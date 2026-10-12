@@ -55,7 +55,7 @@ The real archive is at `~/.local/share/joyscroller/joyscroller.db`. Don't write 
 - `videos` is keyed by `(platform, video_id)`. A row existing means the video is liked.
 - Rows are insert-only. A row keeps what the video looked like when first seen. Only `available` is updated on later syncs, so a video that later goes private keeps its title on file. Don't overwrite other columns.
 - Insert oldest first, so rowid order matches like order. Both platforms list newest first, so each sync reverses the list.
-- `raw_json` holds the full entry (yt-dlp's for YouTube, TikTok's API item for TikTok), so fields we don't parse yet aren't lost. TikTok items are about 25 KB each, mostly video format lists with signed CDN URLs that expire within hours.
+- `raw_json` holds the full entry (yt-dlp's for YouTube, TikTok's API item for TikTok), so fields we don't parse yet aren't lost. For TikTok, every TikTok-hosted URL and the per-quality format lists are stripped first (`without_media_links` in `tiktok.rs`): they expire within about two days and the media is downloaded separately, and dropping them takes an item from ~23 KB to ~5 KB.
 - TikTok leaves deleted and private videos out of the liked list instead of listing them stripped down, so TikTok rows are always stored with `available = 1`. `title` holds the caption, which is often empty (stored as NULL).
 - `syncs` logs each run. `finished_at IS NULL` means the run crashed or is still going.
 - An incremental sync stops after `STOP_AFTER_KNOWN` (100) already-stored likes in a row. Stopping at a single known video would be wrong, because re-liking an old video moves it to the top of the list.

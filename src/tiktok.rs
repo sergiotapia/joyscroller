@@ -46,8 +46,8 @@ pub struct Video {
     pub duration_seconds: Option<u64>,
     /// A slideshow of images rather than a video.
     pub is_photo: bool,
-    /// The full item from TikTok's API, kept so fields we don't parse yet
-    /// aren't lost.
+    /// The item from TikTok's API minus its media links (see
+    /// `without_media_links`), kept so fields we don't parse yet aren't lost.
     pub raw: Value,
 }
 
@@ -218,8 +218,81 @@ fn parse_video(item: &Value) -> Option<Video> {
             .and_then(Value::as_u64)
             .filter(|&d| d > 0),
         is_photo: item.get("imagePost").is_some(),
-        raw: item.clone(),
+        raw: without_media_links(item),
     })
+}
+
+/// Per-quality stream lists under `video`. Once their URLs are gone they're
+/// still ~5 KB of encoder detail per item, and the downloader's own format
+/// choice (best quality) is what we keep instead.
+const FORMAT_LISTS: [&str; 2] = ["bitrateInfo", "bitrateAudioInfo"];
+
+/// The item as we store it. About three quarters of a raw item (~23 KB) is
+/// links to TikTok's CDN: every quality of the video, several sizes of each
+/// cover and avatar, caption files. They expire within about two days, and
+/// the media itself is downloaded separately at the best quality, so they're
+/// dropped. Everything else is kept, which leaves ~5 KB.
+fn without_media_links(item: &Value) -> Value {
+    let mut item = item.clone();
+    if let Some(video) = item.get_mut("video").and_then(Value::as_object_mut) {
+        for key in FORMAT_LISTS {
+            video.remove(key);
+        }
+    }
+    strip_tiktok_urls(&mut item);
+    item
+}
+
+/// Remove every TikTok-hosted URL inside `value`, along with any object or
+/// array that removing them leaves empty. Matching on the host rather than a
+/// list of fields also catches media fields TikTok adds later.
+fn strip_tiktok_urls(value: &mut Value) {
+    match value {
+        Value::Object(fields) => fields.retain(|_, v| keep_after_strip(v)),
+        Value::Array(items) => items.retain_mut(keep_after_strip),
+        _ => {}
+    }
+}
+
+fn keep_after_strip(value: &mut Value) -> bool {
+    if value.as_str().is_some_and(is_tiktok_url) {
+        return false;
+    }
+    let was_empty = is_empty_container(value);
+    strip_tiktok_urls(value);
+    // Containers that arrived empty carry meaning (no hashtags, say); only
+    // drop the ones that held nothing but links.
+    was_empty || !is_empty_container(value)
+}
+
+fn is_empty_container(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+/// A link on tiktok.com or TikTok's CDN. Inside an item these are all media
+/// links; permanent ones (a video's page) can be rebuilt from its ids.
+/// Third-party links, like an editing app's anchor, aren't matched.
+fn is_tiktok_url(s: &str) -> bool {
+    let Some(rest) = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    // A URL followed by more words is text that starts with a link.
+    if s.contains(char::is_whitespace) {
+        return false;
+    }
+    let host = rest
+        .split(['/', '?', '#', ':'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "tiktok.com" || host.ends_with(".tiktok.com") || host.contains("tiktokcdn")
 }
 
 #[cfg(test)]
@@ -274,6 +347,57 @@ mod tests {
         let err = parse_page(r#"{"statusCode": 10201, "status_msg": "nope"}"#).unwrap_err();
         assert!(err.to_string().contains("10201"));
         assert!(parse_page(r#"{"status_code": 5, "itemList": []}"#).is_err());
+    }
+
+    #[test]
+    fn strips_media_links_and_keeps_the_rest() {
+        let item = serde_json::json!({
+            "id": "1",
+            "desc": "see https://example.com and https://www.tiktok.com/@a",
+            "textExtra": [],
+            "author": {
+                "uniqueId": "a",
+                "avatarLarger": "https://p16-sign.tiktokcdn-us.com/a.jpeg?x-expires=1",
+            },
+            "music": {
+                "title": "original sound",
+                "playUrl": "https://v16m.tiktokcdn-us.com/abc/6acd/video/x",
+                "coverLarge": "https://p16-common.tiktokcdn-us.com/c.jpeg",
+            },
+            "video": {
+                "width": 720,
+                "bitrateInfo": [{"Bitrate": 1, "PlayAddr": {}}],
+                "bitrateAudioInfo": [],
+                "playAddr": "https://v16-webapp-prime.us.tiktok.com/video/?expire=1",
+                "zoomCover": {"240": "https://p16-sign.tiktokcdn-us.com/z.jpeg"},
+            },
+            "anchors": [{
+                "schema": "https://www.capcut.com/editor",
+                "icon": {"urlList": ["https://p19-common-sign.tiktokcdn-us.com/i.png"]},
+            }],
+        });
+        assert_eq!(
+            without_media_links(&item),
+            serde_json::json!({
+                "id": "1",
+                "desc": "see https://example.com and https://www.tiktok.com/@a",
+                "textExtra": [],
+                "author": {"uniqueId": "a"},
+                "music": {"title": "original sound"},
+                "video": {"width": 720},
+                "anchors": [{"schema": "https://www.capcut.com/editor"}],
+            })
+        );
+    }
+
+    #[test]
+    fn recognizes_tiktok_hosts() {
+        assert!(is_tiktok_url("https://tiktok.com/x"));
+        assert!(is_tiktok_url("http://WWW.TikTok.com:443/x"));
+        assert!(is_tiktok_url("https://p16-sign-va.tiktokcdn.com/x"));
+        assert!(!is_tiktok_url("https://nottiktok.com/x"));
+        assert!(!is_tiktok_url("https://tiktok.com.evil.example/x"));
+        assert!(!is_tiktok_url("tiktok.com/x"));
     }
 
     #[test]
