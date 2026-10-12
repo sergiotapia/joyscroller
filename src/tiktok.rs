@@ -46,6 +46,8 @@ pub struct Video {
     pub duration_seconds: Option<u64>,
     /// A slideshow of images rather than a video.
     pub is_photo: bool,
+    /// When it was posted, in unix seconds.
+    pub posted_at: Option<i64>,
     /// The item from TikTok's API minus its media links (see
     /// `without_media_links`), kept so fields we don't parse yet aren't lost.
     pub raw: Value,
@@ -218,6 +220,11 @@ fn parse_video(item: &Value) -> Option<Video> {
             .and_then(Value::as_u64)
             .filter(|&d| d > 0),
         is_photo: item.get("imagePost").is_some(),
+        // A number today; some TikTok endpoints send it as a string.
+        posted_at: item.get("createTime").and_then(|t| {
+            t.as_i64()
+                .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
+        }),
         raw: without_media_links(item),
     })
 }
@@ -302,7 +309,8 @@ mod tests {
     const PAGE: &str = r#"{
         "statusCode": 0, "cursor": "1791665073097", "hasMore": true,
         "itemList": [
-            {"id": "111", "desc": "a cat", "author": {"id": "9", "uniqueId": "catperson"},
+            {"id": "111", "desc": "a cat", "createTime": 1700000000,
+             "author": {"id": "9", "uniqueId": "catperson"},
              "video": {"duration": 12}},
             {"id": "222", "desc": "", "author": {"id": "8", "uniqueId": "slides"},
              "video": {"duration": 0}, "imagePost": {"images": []}},
@@ -322,6 +330,7 @@ mod tests {
         assert_eq!(video.desc, "a cat");
         assert_eq!(video.author_id.as_deref(), Some("9"));
         assert_eq!(video.duration_seconds, Some(12));
+        assert_eq!(video.posted_at, Some(1_700_000_000));
         assert_eq!(video.url(), "https://www.tiktok.com/@catperson/video/111");
     }
 

@@ -4,7 +4,7 @@ Notes for coding agents working in this repo. Read this, then `CONTRIBUTING.md`.
 
 ## What this is
 
-A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. A localhost web UI for browsing the archive is planned. Instagram comes later. Every table row has a `platform` column.
+A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. A background task downloads each liked video's media at the best quality available, one video at a time, into `~/.local/share/joyscroller/media/<platform>/<video id>/`. A localhost web UI for browsing the archive is planned. Instagram comes later. Every table row has a `platform` column.
 
 **Product rules:**
 - End users never run subcommands. Launching `joyscroller` must start everything. The `cookies`, `likes` and `sync` subcommands are developer and debugging tools only. New user-facing features go inside the long-running process, as a background task or (later) the web UI, not as new CLI flags.
@@ -25,6 +25,8 @@ src/tiktok.rs   Pages through TikTok's liked list (/api/favorite/item_list/) fro
                 tiktok.com tab and parses the items; a callback can stop the listing early
 src/headless.rs Minimal Chrome DevTools Protocol client: launches the browser headless with a throwaway
                 profile, loads cookies, navigates, evaluates JS in the page
+src/download.rs Downloads one video's media with yt-dlp into its folder (`video.<ext>`, `thumbnail.<ext>`),
+                muxes TikTok's 1080p picture with its real audio, returns trimmed yt-dlp metadata
 src/db.rs       SQLite schema (the SCHEMA const) and every query; the only module that touches the archive DB
 ```
 
@@ -41,10 +43,11 @@ cargo run -- likes --limit 5      # print recent likes (reads real browser cooki
 cargo run -- likes --platform tiktok --limit 5
 cargo run -- sync --db /tmp/t.db  # one sync into a throwaway DB (add --platform tiktok for TikTok)
 cargo run -- sync --full          # read the whole liked list, not just until known videos
+cargo run -- download --db /tmp/t.db --media /tmp/m --limit 3   # download the next 3 queued videos
 cargo run -- cookies --out c.txt  # export cookies.txt (contains live credentials)
 ```
 
-Runtime needs: Linux, `yt-dlp` on `PATH`, a Chromium-family browser profile signed in to YouTube and TikTok (default `--browser brave --profile Default`), that browser's executable on `PATH` (TikTok runs it headless), and a Secret Service keyring (gnome-keyring or KWallet) for v11 cookies.
+Runtime needs: Linux, `yt-dlp` and `ffmpeg` (with `ffprobe`) on `PATH`, a Chromium-family browser profile signed in to YouTube and TikTok (default `--browser brave --profile Default`), that browser's executable on `PATH` (TikTok runs it headless), and a Secret Service keyring (gnome-keyring or KWallet) for v11 cookies.
 
 A full TikTok listing takes about 2 minutes for 5,000 likes (one request per 30). In testing, TikTok's liked list ended after exactly 200 pages (about 5,100 likes, back to January 2026). That looks like a server-side cap rather than the true end of the list.
 
@@ -59,7 +62,11 @@ The real archive is at `~/.local/share/joyscroller/joyscroller.db`. Don't write 
 - TikTok leaves deleted and private videos out of the liked list instead of listing them stripped down, so TikTok rows are always stored with `available = 1`. `title` holds the caption, which is often empty (stored as NULL).
 - `syncs` logs each run. `finished_at IS NULL` means the run crashed or is still going.
 - An incremental sync stops after `STOP_AFTER_KNOWN` (100) already-stored likes in a row. Stopping at a single known video would be wrong, because re-liking an old video moves it to the top of the list.
-- There are no migrations yet. The schema is `CREATE TABLE IF NOT EXISTS`, so changing an existing table won't touch databases that already exist. If you change the schema, add a migration step and say so.
+- Schema changes are migrations: append a step to `MIGRATIONS` in `db.rs`. Never edit `SCHEMA` (the original tables) or a step that has shipped. `PRAGMA user_version` counts the steps a database has had, and `open` applies the rest.
+- `kind` is `video`, or `photo` for a TikTok slideshow. `posted_at` is NULL until known: TikTok rows get it at sync, YouTube rows when their media is downloaded. It may be filled in once, never overwritten.
+- `downloads` has a row once a video's download has been tried. `downloaded_at IS NULL` means not downloaded yet. A failed try counts in `attempts`, and the video is retried after 1h, 2h, 4h and so on, capped at a week (`MAX_RETRY_DELAY`). Videos are never given up on, since most failures (a broken yt-dlp, an expired login, an outage) aren't the video's fault. The queue (`pending_downloads`) is newest-stored first and skips unavailable videos and TikTok photo posts.
+- `downloads.info_json` is yt-dlp's metadata minus `INFO_DROP` in `download.rs`. That covers format lists, URLs and per-stream fields, and `cookies`, which yt-dlp fills with the user's login. Never store that field.
+- "Best quality" means one file per video at the highest quality it has: no second copies at lower qualities. TikTok's 1080p streams have no audio, and its audio-only format is the post's *sound* (the song), not the video's audio. So `download.rs` fetches the best video and the best combined file and muxes the picture of one with the audio of the other. yt-dlp can't do this itself: with `bv*+b` it silently drops the second file.
 
 ## Code conventions
 
@@ -68,7 +75,7 @@ The real archive is at `~/.local/share/joyscroller/joyscroller.db`. Don't write 
 - Logging is `eprintln!` to stderr, prefixed by area (`youtube: ...`, `warning: ...`). There's no logging framework yet. stdout is for command output.
 - Cookie values are credentials. Never log or print them, except in the `cookies` command's output, and never commit a cookies file.
 - Comments explain *why* (format quirks, ordering constraints, yt-dlp behavior). Every module has a `//!` doc comment saying what it's for. Keep those up to date when a module's job changes.
-- Tests go in a `#[cfg(test)] mod tests` at the bottom of the file they test. DB tests use `Connection::open_in_memory()` with `SCHEMA`. Tests must not touch the network, the real browser, the keyring or the real DB.
+- Tests go in a `#[cfg(test)] mod tests` at the bottom of the file they test. DB tests use `Connection::open_in_memory()` with `init` (schema plus migrations). Tests must not touch the network, the real browser, the keyring or the real DB.
 - Clippy runs pedantic with warnings as errors. Fix the code rather than silencing the lint. If an exception really is right, use a narrow `#[expect(clippy::lint, reason = "...")]` on that item.
 
 ## Git
