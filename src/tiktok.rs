@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
 use serde_json::Value;
 
 use crate::browser::{Browser, Cookie};
@@ -60,6 +61,28 @@ impl Video {
         let kind = if self.is_photo { "photo" } else { "video" };
         format!("https://www.tiktok.com/@{handle}/{kind}/{}", self.id)
     }
+}
+
+/// The server-rendered data on a post's page has the full item, signed media
+/// URLs included. Null when the page has no post (deleted or private).
+const POST_ITEM: &str = "JSON.parse(document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')\
+     .textContent).__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct ?? null";
+
+/// A photo post (slideshow) with its media, fetched through TikTok's site.
+pub struct PhotoPost {
+    /// The item, minus its media links, as `raw_json` stores it.
+    pub item: Value,
+    /// The images in order, at the size they were posted.
+    pub images: Vec<Fetched>,
+    /// The sound that plays over the slideshow.
+    pub sound: Option<Fetched>,
+}
+
+/// A file fetched inside the page.
+pub struct Fetched {
+    pub bytes: Vec<u8>,
+    /// The Content-Type it was served with.
+    pub mime: String,
 }
 
 /// One page of the liked list.
@@ -122,6 +145,105 @@ async fn list_liked(
         }
         cursor = page.cursor;
     }
+}
+
+/// Fetch a photo post's images and sound. yt-dlp only gets a slideshow's
+/// sound, so this opens the post in a headless browser and fetches the rest
+/// from inside the page.
+pub async fn photo_post(browser: Browser, cookies: &[Cookie], url: &str) -> Result<PhotoPost> {
+    if !cookies.iter().any(|c| c.name == "sessionid") {
+        bail!("not logged in to TikTok in this browser profile");
+    }
+    let mut tab = Headless::launch(browser, cookies).await?;
+    let result = fetch_photo_post(&mut tab, url).await;
+    tab.close().await;
+    result
+}
+
+async fn fetch_photo_post(tab: &mut Headless, url: &str) -> Result<PhotoPost> {
+    // A post's /photo/ page renders in the browser and carries no item data;
+    // the same post's /video/ page has it server-rendered (it then switches
+    // the address to /photo/ itself).
+    let page = url.replacen("/photo/", "/video/", 1);
+    tab.goto(
+        &page,
+        "document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')",
+    )
+    .await?;
+    let item = tab.eval(POST_ITEM).await?;
+    if item.is_null() {
+        bail!("TikTok's page for {url} has no post (deleted or private?)");
+    }
+
+    let mut images = Vec::new();
+    for image in item
+        .pointer("/imagePost/images")
+        .and_then(Value::as_array)
+        .context("the post has no images")?
+    {
+        let urls = url_list(image.pointer("/imageURL/urlList"));
+        images.push(fetch_in_page(tab, &urls).await?);
+    }
+    if images.is_empty() {
+        bail!("the post has no images");
+    }
+    let sound_urls = url_list(item.pointer("/music/playUrl"));
+    let sound = if sound_urls.is_empty() {
+        None
+    } else {
+        Some(fetch_in_page(tab, &sound_urls).await?)
+    };
+    Ok(PhotoPost {
+        item: without_media_links(&item),
+        images,
+        sound,
+    })
+}
+
+/// The URLs in a TikTok `urlList` array, or a lone URL string.
+fn url_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(url)) if !url.is_empty() => vec![url.clone()],
+        Some(Value::Array(urls)) => urls
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Fetch the first of `urls` (mirrors of one file) that works, from inside
+/// the page, and carry it out base64-encoded. One file per call keeps each
+/// DevTools message to a few megabytes.
+async fn fetch_in_page(tab: &mut Headless, urls: &[String]) -> Result<Fetched> {
+    let urls_json = serde_json::to_string(urls)?;
+    let script = format!(
+        "(async () => {{ \
+           let last = 'no URLs'; \
+           for (const u of {urls_json}) {{ \
+             try {{ \
+               const r = await fetch(u); \
+               if (!r.ok) {{ last = 'HTTP ' + r.status; continue; }} \
+               const b = new Uint8Array(await r.arrayBuffer()); \
+               let s = ''; \
+               for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000)); \
+               return {{mime: r.headers.get('content-type') || '', data: btoa(s)}}; \
+             }} catch (e) {{ last = String(e); }} \
+           }} \
+           throw new Error('download failed: ' + last); \
+         }})()"
+    );
+    let got = tab.eval(&script).await?;
+    let data = got["data"]
+        .as_str()
+        .context("page fetch returned no data")?;
+    Ok(Fetched {
+        bytes: base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .context("page fetch returned bad base64")?,
+        mime: got["mime"].as_str().unwrap_or("").to_string(),
+    })
 }
 
 /// Fetch the page of the liked list that starts at `cursor`, retrying
@@ -397,6 +519,18 @@ mod tests {
                 "anchors": [{"schema": "https://www.capcut.com/editor"}],
             })
         );
+    }
+
+    #[test]
+    fn reads_url_lists() {
+        let list = serde_json::json!(["https://a", 3, "https://b"]);
+        assert_eq!(url_list(Some(&list)), ["https://a", "https://b"]);
+        assert_eq!(
+            url_list(Some(&serde_json::json!("https://c"))),
+            ["https://c"]
+        );
+        assert!(url_list(Some(&serde_json::json!(""))).is_empty());
+        assert!(url_list(None).is_empty());
     }
 
     #[test]

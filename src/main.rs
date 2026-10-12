@@ -325,14 +325,16 @@ async fn download_batch(
     limit: usize,
 ) -> Result<usize> {
     let batch = db::pending_downloads(conn, limit)?;
-    // yt-dlp reads cookies from a file; one per platform, for this batch.
-    let mut cookie_files: HashMap<String, tempfile::NamedTempFile> = HashMap::new();
+    // The login per platform, read once for this batch: the cookies, and a
+    // cookies.txt of them for yt-dlp.
+    let mut logins: HashMap<String, (Vec<browser::Cookie>, tempfile::NamedTempFile)> =
+        HashMap::new();
     let mut failures_in_a_row = 0;
     for item in &batch {
         let started = std::time::Instant::now();
         let name = &item.platform;
         let result = async {
-            if !cookie_files.contains_key(&item.platform) {
+            if !logins.contains_key(&item.platform) {
                 let domain = match item.platform.as_str() {
                     "youtube" => "youtube.com",
                     "tiktok" => "tiktok.com",
@@ -341,9 +343,15 @@ async fn download_batch(
                 let cookies = browser::cookies_for(browser, profile, domain).await?;
                 let file = tempfile::Builder::new().suffix(".txt").tempfile()?;
                 std::fs::write(file.path(), browser::to_netscape(&cookies))?;
-                cookie_files.insert(item.platform.clone(), file);
+                logins.insert(item.platform.clone(), (cookies, file));
             }
-            download::download(item, cookie_files[&item.platform].path(), media_root).await
+            let (cookies, file) = &logins[&item.platform];
+            let login = download::Login {
+                browser,
+                cookies,
+                cookies_txt: file.path(),
+            };
+            download::download(item, &login, media_root).await
         }
         .await;
         match result {

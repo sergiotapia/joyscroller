@@ -224,13 +224,12 @@ pub fn insert_new(conn: &mut Connection, platform: &str, videos: &[NewVideo]) ->
 
 /// Up to `limit` videos to download next, most recently stored first, so new
 /// likes don't wait behind the backlog. Skips videos that are unavailable,
-/// already downloaded, or waiting out a retry delay, and TikTok
-/// photo posts, which yt-dlp only fetches the audio of.
+/// already downloaded, or waiting out a retry delay.
 pub fn pending_downloads(conn: &Connection, limit: usize) -> Result<Vec<PendingDownload>> {
     let mut stmt = conn.prepare(
         "SELECT v.platform, v.video_id, v.url, v.kind FROM videos v \
          LEFT JOIN downloads d ON d.platform = v.platform AND d.video_id = v.video_id \
-         WHERE v.available = 1 AND v.kind = 'video' AND d.downloaded_at IS NULL \
+         WHERE v.available = 1 AND d.downloaded_at IS NULL \
            AND (d.attempts IS NULL OR d.attempts = 0 \
                 OR d.last_attempt_at + MIN(3600 << MIN(d.attempts - 1, 20), ?1) <= ?2) \
          ORDER BY v.rowid DESC LIMIT ?3",

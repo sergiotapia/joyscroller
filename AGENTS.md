@@ -22,11 +22,13 @@ src/browser.rs  Finds the browser profile, copies its Cookies SQLite DB, decrypt
 src/youtube.rs  Runs `yt-dlp --flat-playlist --lazy-playlist --dump-json` on the Liked playlist and
                 streams JSON Lines; a callback can stop the listing early
 src/tiktok.rs   Pages through TikTok's liked list (/api/favorite/item_list/) from inside a headless
-                tiktok.com tab and parses the items; a callback can stop the listing early
+                tiktok.com tab and parses the items; a callback can stop the listing early. Also
+                fetches a photo post's images and sound from inside its page (yt-dlp only gets the sound)
 src/headless.rs Minimal Chrome DevTools Protocol client: launches the browser headless with a throwaway
                 profile, loads cookies, navigates, evaluates JS in the page
-src/download.rs Downloads one video's media with yt-dlp into its folder (`video.<ext>`, `thumbnail.<ext>`),
-                muxes TikTok's 1080p picture with its real audio, returns trimmed yt-dlp metadata
+src/download.rs Downloads one video's media into its folder: with yt-dlp (`video.<ext>`, `thumbnail.<ext>`;
+                muxes TikTok's 1080p picture with its real audio), or for TikTok photo posts through
+                tiktok.rs (`image-NN.<ext>`, `sound.<ext>`); returns trimmed metadata
 src/db.rs       SQLite schema (the SCHEMA const) and every query; the only module that touches the archive DB
 ```
 
@@ -64,7 +66,7 @@ The real archive is at `~/.local/share/joyscroller/joyscroller.db`. Don't write 
 - An incremental sync stops after `STOP_AFTER_KNOWN` (100) already-stored likes in a row. Stopping at a single known video would be wrong, because re-liking an old video moves it to the top of the list.
 - Schema changes are migrations: append a step to `MIGRATIONS` in `db.rs`. Never edit `SCHEMA` (the original tables) or a step that has shipped. `PRAGMA user_version` counts the steps a database has had, and `open` applies the rest.
 - `kind` is `video`, or `photo` for a TikTok slideshow. `posted_at` is NULL until known: TikTok rows get it at sync, YouTube rows when their media is downloaded. It may be filled in once, never overwritten.
-- `downloads` has a row once a video's download has been tried. `downloaded_at IS NULL` means not downloaded yet. A failed try counts in `attempts`, and the video is retried after 1h, 2h, 4h and so on, capped at a week (`MAX_RETRY_DELAY`). Videos are never given up on, since most failures (a broken yt-dlp, an expired login, an outage) aren't the video's fault. The queue (`pending_downloads`) is newest-stored first and skips unavailable videos and TikTok photo posts.
+- `downloads` has a row once a video's download has been tried. `downloaded_at IS NULL` means not downloaded yet. A failed try counts in `attempts`, and the video is retried after 1h, 2h, 4h and so on, capped at a week (`MAX_RETRY_DELAY`). Videos are never given up on, since most failures (a broken yt-dlp, an expired login, an outage) aren't the video's fault. The queue (`pending_downloads`) is newest-stored first and skips unavailable videos.
 - `downloads.info_json` is yt-dlp's metadata minus `INFO_DROP` in `download.rs`. That covers format lists, URLs and per-stream fields, and `cookies`, which yt-dlp fills with the user's login. Never store that field.
 - "Best quality" means one file per video at the highest quality it has: no second copies at lower qualities. TikTok's 1080p streams have no audio, and its audio-only format is the post's *sound* (the song), not the video's audio. So `download.rs` fetches the best video and the best combined file and muxes the picture of one with the audio of the other. yt-dlp can't do this itself: with `bv*+b` it silently drops the second file.
 

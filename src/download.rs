@@ -1,7 +1,11 @@
-//! Downloads a liked video's media with yt-dlp, at the best quality on offer,
-//! into a folder of its own under the media root: `<platform>/<video id>/`
-//! holding `video.<ext>` and `thumbnail.<ext>`. yt-dlp's metadata from the
-//! download comes back to the caller (for the database) rather than being
+//! Downloads a liked video's media at the best quality on offer, into a
+//! folder of its own under the media root: `<platform>/<video id>/`.
+//! - Videos, through yt-dlp: `video.<ext>` and `thumbnail.<ext>`.
+//! - TikTok photo posts, which yt-dlp can't fetch, through `tiktok.rs`:
+//!   `image-01.<ext>`, `image-02.<ext>`, … and `sound.<ext>`. The first image
+//!   is the cover.
+//!
+//! The metadata goes back to the caller (for the database) rather than being
 //! kept as a file.
 
 use std::path::{Path, PathBuf};
@@ -11,7 +15,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use tokio::process::Command;
 
+use crate::browser::{Browser, Cookie};
 use crate::db::PendingDownload;
+use crate::tiktok;
 
 /// For TikTok: the best video stream, and separately the best file that has
 /// both picture and sound. TikTok's highest qualities are video-only, and the
@@ -141,10 +147,18 @@ struct Written {
     path: PathBuf,
 }
 
+/// The user's login, in the two forms the downloads need: a cookies.txt for
+/// yt-dlp, and the cookies themselves for a headless browser.
+pub struct Login<'a> {
+    pub browser: Browser,
+    pub cookies: &'a [Cookie],
+    pub cookies_txt: &'a Path,
+}
+
 /// Download `item` into its folder under `root`, replacing what's there.
 /// The files are assembled in a hidden sibling folder that's renamed into
 /// place at the end, so an interrupted download never looks complete.
-pub async fn download(item: &PendingDownload, cookies_txt: &Path, root: &Path) -> Result<Saved> {
+pub async fn download(item: &PendingDownload, login: &Login<'_>, root: &Path) -> Result<Saved> {
     // The id becomes a path component, so it must not be able to escape.
     if item.video_id.is_empty()
         || !item
@@ -164,7 +178,11 @@ pub async fn download(item: &PendingDownload, cookies_txt: &Path, root: &Path) -
     }
     std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
-    let result = fetch(item, cookies_txt, &work).await;
+    let result = if item.kind == "photo" {
+        fetch_photo_post(item, login, &work).await
+    } else {
+        fetch(item, login.cookies_txt, &work).await
+    };
     let (format, info) = match result {
         Ok(fetched) => fetched,
         Err(e) => {
@@ -319,6 +337,80 @@ async fn fetch(
         None
     };
     Ok((format, info))
+}
+
+/// Save a TikTok photo post's images and sound into `work`. Returns the
+/// format label and the item as metadata.
+async fn fetch_photo_post(
+    item: &PendingDownload,
+    login: &Login<'_>,
+    work: &Path,
+) -> Result<(String, Option<Value>)> {
+    let post = tiktok::photo_post(login.browser, login.cookies, &item.url).await?;
+    for (i, image) in post.images.iter().enumerate() {
+        let name = format!(
+            "image-{:02}.{}",
+            i + 1,
+            extension_for(&image.bytes, &image.mime)
+        );
+        std::fs::write(work.join(name), &image.bytes)?;
+    }
+    if let Some(sound) = &post.sound {
+        std::fs::write(
+            work.join(format!(
+                "sound.{}",
+                extension_for(&sound.bytes, &sound.mime)
+            )),
+            &sound.bytes,
+        )?;
+    }
+    Ok(("photo".to_string(), Some(post.item)))
+}
+
+/// A file extension for fetched bytes, from their leading magic bytes, or
+/// failing that their Content-Type. The bytes come first because TikTok's
+/// headers aren't reliable: slideshow sounds are MP3s served as `video/mp4`.
+fn extension_for(bytes: &[u8], mime: &str) -> &'static str {
+    match bytes {
+        [0xFF, 0xD8, 0xFF, ..] => return "jpg",
+        [0x89, b'P', b'N', b'G', ..] => return "png",
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => return "webp",
+        [b'I', b'D', b'3', ..] => return "mp3",
+        // An MPEG audio frame header without an ID3 tag in front.
+        [0xFF, second, ..] if second & 0xE0 == 0xE0 => return "mp3",
+        [_, _, _, _, b'f', b't', b'y', b'p', ..] => {
+            return if mime.starts_with("video/") {
+                "mp4"
+            } else {
+                "m4a"
+            };
+        }
+        _ => {}
+    }
+    match mime.split(';').next().unwrap_or("").trim() {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/heic" => "heic",
+        "audio/mpeg" => "mp3",
+        "audio/mp4" | "audio/x-m4a" => "m4a",
+        "video/mp4" => "mp4",
+        _ => "bin",
+    }
 }
 
 /// The files yt-dlp reports in its `--print after_move` lines, each once.
@@ -557,6 +649,25 @@ mod tests {
     }
 
     #[test]
+    fn names_extensions_by_content_first() {
+        // An MP3 served as video/mp4, as TikTok does for slideshow sounds.
+        assert_eq!(extension_for(b"ID3\x04\x00", "video/mp4"), "mp3");
+        assert_eq!(extension_for(&[0xFF, 0xFB, 0x90], ""), "mp3");
+        assert_eq!(
+            extension_for(&[0xFF, 0xD8, 0xFF, 0xE0], "image/webp"),
+            "jpg"
+        );
+        assert_eq!(extension_for(b"RIFF\x00\x00\x00\x00WEBPVP8", ""), "webp");
+        assert_eq!(
+            extension_for(b"\x00\x00\x00\x20ftypM4A ", "audio/mp4"),
+            "m4a"
+        );
+        // Unrecognized bytes fall back to the Content-Type.
+        assert_eq!(extension_for(b"????", "image/heic; x=y"), "heic");
+        assert_eq!(extension_for(b"", "application/x-what"), "bin");
+    }
+
+    #[test]
     fn parses_image_probes() {
         assert_eq!(parse_probe("mjpeg,1080,1920\n"), Some((1080 * 1920, "jpg")));
         assert_eq!(parse_probe("webp,10,10"), Some((100, "webp")));
@@ -587,9 +698,12 @@ mod tests {
             kind: "video".into(),
         };
         let root = tempfile::tempdir().unwrap();
-        let err = download(&item, Path::new("/nonexistent"), root.path())
-            .await
-            .unwrap_err();
+        let login = Login {
+            browser: Browser::Brave,
+            cookies: &[],
+            cookies_txt: Path::new("/nonexistent"),
+        };
+        let err = download(&item, &login, root.path()).await.unwrap_err();
         assert!(err.to_string().contains("unusual video id"));
     }
 }
