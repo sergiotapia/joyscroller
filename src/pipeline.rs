@@ -341,6 +341,9 @@ mod tests {
                 video_id: id.into(),
                 url: "https://example.com".into(),
                 kind: "video".into(),
+                title: None,
+                author_name: None,
+                liked_on: "2026-10-12".into(),
             },
             title: id.into(),
         }

@@ -323,24 +323,22 @@ async fn request_download(
             "refusing a download request from another site".into(),
         ));
     }
-    let (found, download) = app.db(|conn| {
+    let (found, download, item) = app.db(|conn| {
         Ok((
             db::video(conn, &platform, &video_id)?,
             db::download_state(conn, &platform, &video_id)?,
+            db::download_item(conn, &platform, &video_id)?,
         ))
     })?;
-    let (video, _) = found.ok_or_else(not_found)?;
+    let ((video, _), Some(item)) = (found.ok_or_else(not_found)?, item) else {
+        return Err(not_found());
+    };
     // A stale page's button for a video that has since been downloaded does
     // nothing; the page it lands on says so.
     if can_download(&video, download.as_ref()) {
         app.pipeline.request(Job {
             title: short_title(&video),
-            item: db::PendingDownload {
-                platform: video.platform.clone(),
-                video_id: video.video_id.clone(),
-                url: video.url.clone(),
-                kind: video.kind.clone(),
-            },
+            item,
         })?;
     }
     let location = HeaderValue::try_from(format!("/videos/{platform}/{video_id}"))
@@ -1142,6 +1140,9 @@ mod tests {
                 video_id: video.video_id.clone(),
                 url: video.url.clone(),
                 kind: video.kind.clone(),
+                title: video.title.clone(),
+                author_name: video.author_name.clone(),
+                liked_on: "2026-10-12".into(),
             },
             title: "<b>".into(),
         }

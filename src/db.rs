@@ -82,13 +82,35 @@ pub struct NewVideo<'a> {
     pub posted_at: Option<i64>,
 }
 
-/// A liked video that still needs its media downloaded.
+/// A liked video that still needs its media downloaded, with what its
+/// folder is named after.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDownload {
     pub platform: String,
     pub video_id: String,
     pub url: String,
     pub kind: String,
+    pub title: Option<String>,
+    pub author_name: Option<String>,
+    /// The local calendar date of `liked_at`, as `YYYY-MM-DD`.
+    pub liked_on: String,
+}
+
+/// `PendingDownload`'s columns, for `pending_from_row`. SQLite turns
+/// `liked_at` into a date in the system's time zone, the user's own.
+const PENDING_COLUMNS: &str = "v.platform, v.video_id, v.url, v.kind, v.title, v.author_name, \
+     date(v.liked_at, 'unixepoch', 'localtime')";
+
+fn pending_from_row(r: &rusqlite::Row) -> rusqlite::Result<PendingDownload> {
+    Ok(PendingDownload {
+        platform: r.get(0)?,
+        video_id: r.get(1)?,
+        url: r.get(2)?,
+        kind: r.get(3)?,
+        title: r.get(4)?,
+        author_name: r.get(5)?,
+        liked_on: r.get(6)?,
+    })
 }
 
 /// A finished download, as `record_download` stores it.
@@ -219,28 +241,40 @@ pub fn insert_new(conn: &mut Connection, platform: &str, videos: &[NewVideo]) ->
 /// likes don't wait behind the backlog. Skips videos that are unavailable,
 /// already downloaded, or waiting out a retry delay.
 pub fn pending_downloads(conn: &Connection, limit: usize) -> Result<Vec<PendingDownload>> {
-    let mut stmt = conn.prepare(
-        "SELECT v.platform, v.video_id, v.url, v.kind FROM videos v \
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {PENDING_COLUMNS} FROM videos v \
          LEFT JOIN downloads d ON d.platform = v.platform AND d.video_id = v.video_id \
          WHERE v.available = 1 AND d.downloaded_at IS NULL \
            AND (d.attempts IS NULL OR d.attempts = 0 \
                 OR d.last_attempt_at + MIN(3600 << MIN(d.attempts - 1, 20), ?1) <= ?2) \
-         ORDER BY v.rowid DESC LIMIT ?3",
-    )?;
+         ORDER BY v.rowid DESC LIMIT ?3"
+    ))?;
     let rows = stmt
         .query_map(
             params![MAX_RETRY_DELAY, now(), i64::try_from(limit)?],
-            |r| {
-                Ok(PendingDownload {
-                    platform: r.get(0)?,
-                    video_id: r.get(1)?,
-                    url: r.get(2)?,
-                    kind: r.get(3)?,
-                })
-            },
+            pending_from_row,
         )?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
+}
+
+/// One video, to download now whatever its state, as the UI's download
+/// button asks.
+pub fn download_item(
+    conn: &Connection,
+    platform: &str,
+    video_id: &str,
+) -> Result<Option<PendingDownload>> {
+    let found = conn
+        .query_row(
+            &format!(
+                "SELECT {PENDING_COLUMNS} FROM videos v WHERE v.platform = ?1 AND v.video_id = ?2"
+            ),
+            [platform, video_id],
+            pending_from_row,
+        )
+        .optional()?;
+    Ok(found)
 }
 
 /// Count a failed download attempt and remember why it failed.
@@ -553,6 +587,22 @@ mod tests {
             .into_iter()
             .map(|p| p.video_id)
             .collect()
+    }
+
+    #[test]
+    fn download_item_has_what_the_folder_is_named_after() {
+        let mut conn = memory_db();
+        insert_new(&mut conn, "youtube", &[video("a", true)]).unwrap();
+        let item = download_item(&conn, "youtube", "a").unwrap().unwrap();
+        assert_eq!(item.title.as_deref(), Some("title"));
+        assert_eq!(item.liked_on.len(), "2026-10-12".len());
+        assert!(
+            item.liked_on
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '-')
+        );
+        assert_eq!(pending_downloads(&conn, 1).unwrap(), [item]);
+        assert!(download_item(&conn, "youtube", "b").unwrap().is_none());
     }
 
     #[test]

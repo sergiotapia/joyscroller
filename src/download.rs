@@ -1,5 +1,6 @@
 //! Downloads a liked video's media at the best quality on offer, into a
-//! folder of its own under the media root: `<platform>/<video id>/`.
+//! folder of its own under the media root, by platform and the day it was
+//! liked: `<platform>/<YYYY-MM-DD>/<title> [<video id>]/`.
 //! - Videos, through yt-dlp: `video.<ext>` and `thumbnail.<ext>`.
 //! - TikTok photo posts, which yt-dlp can't fetch, through `tiktok.rs`:
 //!   `image-01.<ext>`, `image-02.<ext>`, … and `sound.<ext>`. The first image
@@ -19,6 +20,7 @@ use tokio::process::Command;
 
 use crate::browser::{Browser, Cookie};
 use crate::db::PendingDownload;
+use crate::filename::safe_name;
 use crate::tiktok;
 
 /// For TikTok: the best video stream, and separately the best file that has
@@ -83,6 +85,10 @@ const INFO_DROP: &[&str] = &[
     "preference",
     "quality",
 ];
+
+/// How much of a folder name the title may take, in bytes. Names can be 255;
+/// this leaves room for the id, and for Windows' 260-character paths.
+const TITLE_BYTES: usize = 100;
 
 /// Marks yt-dlp's progress lines on stdout, apart from its `--print` lines.
 const PROGRESS_MARK: &str = "joyscroller-progress";
@@ -222,7 +228,14 @@ pub async fn download(
     {
         bail!("refusing unusual video id {:?}", item.video_id);
     }
-    let rel = format!("{}/{}", item.platform, item.video_id);
+    if !item
+        .liked_on
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '-')
+    {
+        bail!("refusing unusual date {:?}", item.liked_on);
+    }
+    let rel = format!("{}/{}/{}", item.platform, item.liked_on, folder_name(item));
     let final_dir = root.join(&rel);
     let work = root
         .join(&item.platform)
@@ -263,6 +276,9 @@ pub async fn download(
         std::fs::rename(&final_dir, &old)
             .with_context(|| format!("moving aside {}", final_dir.display()))?;
     }
+    if let Some(day) = final_dir.parent() {
+        std::fs::create_dir_all(day).with_context(|| format!("creating {}", day.display()))?;
+    }
     if let Err(e) = std::fs::rename(&work, &final_dir) {
         if replacing {
             std::fs::rename(&old, &final_dir)?;
@@ -290,6 +306,30 @@ pub async fn download(
         info_json: info.map(|i| i.to_string()),
         posted_at,
     })
+}
+
+/// A video's folder name: the first line of its title, or for an untitled
+/// one its author, then its id, which keeps names unique when titles repeat
+/// or differ only in case (the same name to Windows and macOS). For example
+/// `Never Gonna Give You Up [dQw4w9WgXcQ]`.
+fn folder_name(item: &PendingDownload) -> String {
+    let title = item
+        .title
+        .as_deref()
+        .and_then(|title| title.lines().map(str::trim).find(|line| !line.is_empty()));
+    let label = match (title, item.author_name.as_deref()) {
+        (Some(title), _) => safe_name(title, TITLE_BYTES),
+        (None, Some(handle)) if item.platform == "tiktok" => {
+            safe_name(&format!("@{handle}"), TITLE_BYTES)
+        }
+        (None, Some(author)) => safe_name(author, TITLE_BYTES),
+        (None, None) => String::new(),
+    };
+    if label.is_empty() {
+        format!("[{}]", item.video_id)
+    } else {
+        format!("{label} [{}]", item.video_id)
+    }
 }
 
 /// Run yt-dlp (and for TikTok, the mux) inside `work`. Leaves `video.<ext>`
@@ -763,6 +803,56 @@ mod tests {
         );
     }
 
+    fn pending(platform: &str, title: Option<&str>, author_name: Option<&str>) -> PendingDownload {
+        PendingDownload {
+            platform: platform.into(),
+            video_id: "abc".into(),
+            url: "https://example.com".into(),
+            kind: "video".into(),
+            title: title.map(Into::into),
+            author_name: author_name.map(Into::into),
+            liked_on: "2026-10-12".into(),
+        }
+    }
+
+    #[test]
+    fn names_folders_after_the_title_and_id() {
+        let name = |platform, title, author| folder_name(&pending(platform, title, author));
+        assert_eq!(
+            name("youtube", Some("Who? Me: yes"), Some("chan")),
+            "Who？ Me： yes [abc]"
+        );
+        // A caption's first line; blank lines before it don't count.
+        assert_eq!(
+            name("tiktok", Some("\n  first line #fyp\nmore"), None),
+            "first line #fyp [abc]"
+        );
+        assert_eq!(name("tiktok", Some("  "), Some("cat")), "@cat [abc]");
+        assert_eq!(name("youtube", None, Some("chan")), "chan [abc]");
+        assert_eq!(name("tiktok", Some("..."), None), "[abc]");
+        let long = name("youtube", Some(&"word ".repeat(100)), None);
+        assert!(long.len() <= TITLE_BYTES + " [abc]".len());
+        assert!(long.ends_with("… [abc]"));
+    }
+
+    #[tokio::test]
+    async fn rejects_dates_that_could_escape_the_media_root() {
+        let item = PendingDownload {
+            liked_on: "../..".into(),
+            ..pending("youtube", None, None)
+        };
+        let root = tempfile::tempdir().unwrap();
+        let login = Login {
+            browser: Browser::Brave,
+            cookies: &[],
+            cookies_txt: Path::new("/nonexistent"),
+        };
+        let err = download(&item, &login, root.path(), &|_| {})
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unusual date"));
+    }
+
     #[test]
     fn parses_progress_lines() {
         assert_eq!(
@@ -834,10 +924,8 @@ mod tests {
     #[tokio::test]
     async fn rejects_ids_that_could_escape_the_media_root() {
         let item = PendingDownload {
-            platform: "youtube".into(),
             video_id: "../../etc".into(),
-            url: "https://example.com".into(),
-            kind: "video".into(),
+            ..pending("youtube", None, None)
         };
         let root = tempfile::tempdir().unwrap();
         let login = Login {

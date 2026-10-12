@@ -4,7 +4,7 @@ Notes for coding agents working in this repo. Read this, then `CONTRIBUTING.md`.
 
 ## What this is
 
-A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves a liked video's media at the best quality available into `downloads/<platform>/<video id>/`. That folder and the database, `joyscroller.db`, sit next to the app's executable, where people will look for them. A binary running from this repo's `target/` (so `cargo run`) uses `data/` at the repo root instead, which survives `cargo clean` and is gitignored. Videos download only when the user asks on a video's page: the request goes into the download pipeline (`pipeline.rs`), and `/downloading` shows its progress live. Automatic downloads of the whole queue (`download_loop`) stay off for now. The `download` subcommand still runs them by hand. Instagram comes later. Every table row has a `platform` column.
+A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves a liked video's media at the best quality available into `downloads/<platform>/<YYYY-MM-DD>/<title> [<video id>]/`, by the local date it was liked (so the first sync's day holds the whole backlog). `filename.rs` makes titles safe as folder names on every OS. That folder and the database, `joyscroller.db`, sit next to the app's executable, where people will look for them. A binary running from this repo's `target/` (so `cargo run`) uses `data/` at the repo root instead, which survives `cargo clean` and is gitignored. Videos download only when the user asks on a video's page: the request goes into the download pipeline (`pipeline.rs`), and `/downloading` shows its progress live. Automatic downloads of the whole queue (`download_loop`) stay off for now. The `download` subcommand still runs them by hand. Instagram comes later. Every table row has a `platform` column.
 
 **Product rules:**
 - End users never run subcommands. Launching `joyscroller` must start everything. The `cookies`, `likes` and `sync` subcommands are developer and debugging tools only. New user-facing features go inside the long-running process, as a background task or in the web UI, not as new CLI flags.
@@ -35,6 +35,8 @@ src/pipeline.rs The download pipeline: one lane per platform (lanes run in paral
 src/download.rs Downloads one video's media into its folder: with yt-dlp (`video.<ext>`, `thumbnail.<ext>`;
                 muxes TikTok's 1080p picture with its real audio), or for TikTok photo posts through
                 tiktok.rs (`image-NN.<ext>`, `sound.<ext>`); returns trimmed metadata
+src/filename.rs safe_name: text to a file/folder name valid on Linux, macOS and Windows (forbidden characters,
+                reserved device names, trailing dots, invisible characters, byte-length limits)
 src/db.rs       SQLite schema (the SCHEMA const) and every query; the only module that touches the archive DB
 ```
 

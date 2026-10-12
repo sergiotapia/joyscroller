@@ -1,6 +1,7 @@
 mod browser;
 mod db;
 mod download;
+mod filename;
 mod headless;
 mod pipeline;
 mod tiktok;
