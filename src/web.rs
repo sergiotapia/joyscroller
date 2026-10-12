@@ -1,7 +1,7 @@
 //! The localhost web UI: plain server-rendered HTML. The list page pages
 //! through the liked videos, newest first, on all platforms or one; each video
-//! has its own page, with a button that asks the download pipeline for its
-//! media, and `/downloading` shows what the pipeline is doing. Every open page
+//! has its own page, with a button that has the download pipeline download it
+//! right away, and `/downloading` shows what the pipeline is doing. Every open page
 //! keeps a Server-Sent Events connection, over which newly stored videos, the
 //! per-platform counts, what each sync is doing and the pipeline's progress
 //! arrive as soon as they change.
@@ -23,7 +23,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::db;
-use crate::pipeline::{Active, Board, Job, Outcome, Pipeline};
+use crate::pipeline::{Active, Board, Job, Lane, Outcome, Pipeline, Wait};
 
 /// Where the UI listens. Localhost only: the archive is the user's own.
 pub const ADDR: &str = "127.0.0.1:4774";
@@ -366,8 +366,10 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
     let board = app.pipeline.board();
     let main = format!(
         "<h1>Downloading</h1>\n\
-         <p>Videos download when you ask for them on their page. YouTube and TikTok \
-         download side by side, one video at a time each.</p>\n\
+         <p>YouTube and TikTok each have a lane that downloads every liked video \
+         not downloaded yet, newest first, one at a time: YouTube waits 30 seconds \
+         between videos, TikTok 15 to 30. A video's Download now button downloads it \
+         right away, alongside the lanes.</p>\n\
          <div id=\"downloads\">\n{}</div>\n",
         board_html(&board)
     );
@@ -792,7 +794,7 @@ fn media_html(
         Some(html) => (html, " data-busy=\"1\""),
         None if can_download(video, download) => (
             format!(
-                "{}\n<form method=\"post\" action=\"{}/download\"><button>Download</button></form>",
+                "{}\n<form method=\"post\" action=\"{}/download\"><button>Download now</button></form>",
                 download_html(download),
                 video_href(video)
             ),
@@ -807,18 +809,9 @@ fn media_html(
     )
 }
 
-/// Where a video is in the pipeline, if it's there.
+/// What the pipeline is doing with a video, if it's on it.
 fn job_html(board: &Board, platform: &str, video_id: &str) -> Option<String> {
-    if let Some(active) = board.find_active(platform, video_id) {
-        return Some(activity_html(active));
-    }
-    let ahead = board.queue_position(platform, video_id)?;
-    let busy = board.active_on(platform).is_some();
-    Some(match (ahead, busy) {
-        (0, false) => "queued, starting…".into(),
-        (0, true) => "queued, next in line".into(),
-        (n, _) => format!("queued, {n} ahead of it"),
-    })
+    board.find_active(platform, video_id).map(activity_html)
 }
 
 /// What a lane is doing with a video, e.g. "downloading 45% of 12.3 MB,
@@ -854,13 +847,13 @@ fn activity_html(active: &Active) -> String {
     )
 }
 
-/// How many videos are in the pipeline, for the sidebar.
+/// How many videos are downloading, for the sidebar.
 fn busy_count(board: &Board) -> usize {
-    board.active.len() + board.queued.len()
+    board.active.len()
 }
 
-/// The downloads page's live part: what each lane is doing, the queue, and
-/// what finished since the app started.
+/// The downloads page's live part: what each lane is doing, the requested
+/// downloads, and what finished since the app started.
 fn board_html(board: &Board) -> String {
     let job_link = |job: &Job| {
         format!(
@@ -871,33 +864,35 @@ fn board_html(board: &Board) -> String {
             escape(&truncate(&job.title, 120))
         )
     };
-    let now = PLATFORMS
+    let lanes = board
+        .lanes
         .iter()
-        .map(|(platform, label)| {
-            let lane: Vec<String> = board
-                .active
-                .iter()
-                .filter(|a| a.job.item.platform == *platform)
-                .map(|a| format!("<li>{} — {}</li>\n", job_link(&a.job), activity_html(a)))
-                .collect();
-            if lane.is_empty() {
-                format!("<li>{label}: idle</li>\n")
-            } else {
-                lane.concat()
-            }
+        .map(|lane| match board.lane_download(lane.platform) {
+            Some(a) => format!(
+                "<li>{} — {}{}</li>\n",
+                job_link(&a.job),
+                activity_html(a),
+                left_html(lane)
+            ),
+            None => format!(
+                "<li>{}: {}{}</li>\n",
+                display_name(lane.platform),
+                lane_html(lane),
+                left_html(lane)
+            ),
         })
         .collect::<Vec<_>>()
         .concat();
-    let queued = if board.queued.is_empty() {
-        "<p>Nothing queued.</p>\n".into()
+    let requested: Vec<String> = board
+        .active
+        .iter()
+        .filter(|a| a.requested)
+        .map(|a| format!("<li>{} — {}</li>\n", job_link(&a.job), activity_html(a)))
+        .collect();
+    let requested = if requested.is_empty() {
+        "<p>Nothing right now.</p>\n".into()
     } else {
-        let jobs = board
-            .queued
-            .iter()
-            .map(|job| format!("<li>{}</li>\n", job_link(job)))
-            .collect::<Vec<_>>()
-            .concat();
-        format!("<ol>\n{jobs}</ol>\n")
+        format!("<ul>\n{}</ul>\n", requested.concat())
     };
     let finished = if board.recent.is_empty() {
         "<p>Nothing since the app started.</p>\n".into()
@@ -928,10 +923,49 @@ fn board_html(board: &Board) -> String {
         format!("<ul>\n{items}</ul>\n")
     };
     format!(
-        "<h2>Now</h2>\n<ul>\n{now}</ul>\n\
-         <h2>Queued</h2>\n{queued}\
+        "<h2>Lanes</h2>\n<ul>\n{lanes}</ul>\n\
+         <h2>Requested</h2>\n{requested}\
          <h2>Finished</h2>\n{finished}"
     )
+}
+
+/// What a lane that isn't downloading is doing.
+fn lane_html(lane: &Lane) -> String {
+    match lane.waiting {
+        None => "starting".into(),
+        Some((Wait::Pace, until)) => format!("next download at {}", time(until, "time")),
+        Some((Wait::Failed, until)) => {
+            format!("a download failed; trying again at {}", time(until, "time"))
+        }
+        Some((Wait::Outage, until)) => format!(
+            "paused after several failed downloads in a row, until {}",
+            time(until, "time")
+        ),
+        Some((Wait::Empty, _)) => "everything is downloaded".into(),
+    }
+}
+
+/// How much of a lane's backlog is left, e.g. ", 1,234 to go".
+fn left_html(lane: &Lane) -> String {
+    match lane.left {
+        Some(left) if left > 0 && lane.waiting.is_none_or(|(why, _)| why != Wait::Empty) => {
+            format!(" ({} to go)", thousands(left))
+        }
+        _ => String::new(),
+    }
+}
+
+/// `n` with thousands separators, e.g. `1,234`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The `downloads` event: `{"count": n, "board": html, "videos": {"platform/id": html}}`,
@@ -942,7 +976,6 @@ fn downloads_json(board: &Board) -> String {
         .active
         .iter()
         .map(|active| &active.job)
-        .chain(&board.queued)
         .filter_map(|job| {
             let (platform, id) = (&job.item.platform, &job.item.video_id);
             Some((
@@ -1181,19 +1214,32 @@ mod tests {
         assert!(!media_html(&gone, None, &board).contains("<button>"));
     }
 
+    fn lane(platform: &'static str, left: Option<usize>, waiting: Option<(Wait, i64)>) -> Lane {
+        Lane {
+            platform,
+            left,
+            waiting,
+        }
+    }
+
     #[test]
     fn media_shows_the_pipeline_instead_of_a_button() {
         let youtube = video("youtube", None);
         let tiktok = video("tiktok", None);
-        let mut board = Board::default();
-        board.queued.push(job(&tiktok));
+        let mut board = Board {
+            lanes: vec![
+                lane("youtube", Some(1234), None),
+                lane("tiktok", Some(3), Some((Wait::Pace, 0))),
+            ],
+            ..Board::default()
+        };
         let html = media_html(&tiktok, None, &board);
-        assert!(html.contains("queued, starting…"));
-        assert!(html.contains("data-busy=\"1\""));
-        assert!(!html.contains("<button>"));
+        assert!(html.contains("<button>Download now</button>"));
+        assert!(!html.contains("data-busy"));
 
-        board.active.push(Active {
-            job: job(&youtube),
+        let downloading = |job, requested| Active {
+            job,
+            requested,
             stage: crate::pipeline::Stage::Download,
             started_at: 0,
             progress: Some(crate::download::Progress {
@@ -1203,11 +1249,15 @@ mod tests {
                 eta: Some(8),
                 format_id: "399".into(),
             }),
-        });
+        };
+        board.active.push(downloading(job(&youtube), false));
+        board.active.push(downloading(job(&tiktok), true));
+        let html = media_html(&youtube, None, &board);
         assert!(
-            media_html(&youtube, None, &board)
-                .contains("downloading 25% of 10.0 MB, 1.0 MB/s, 0:08 left (format 399), started")
+            html.contains("downloading 25% of 10.0 MB, 1.0 MB/s, 0:08 left (format 399), started")
         );
+        assert!(html.contains("data-busy=\"1\""));
+        assert!(!html.contains("<button>"));
 
         let update: serde_json::Value = serde_json::from_str(&downloads_json(&board)).unwrap();
         assert_eq!(update["count"], 2);
@@ -1215,15 +1265,32 @@ mod tests {
             update["videos"]["tiktok/abc"]
                 .as_str()
                 .unwrap()
-                .starts_with("queued")
+                .starts_with("downloading")
         );
         let page = update["board"].as_str().unwrap();
-        // Titles are escaped, and each lane shows what it's on.
+        // Titles are escaped; each lane shows what it's on, and the requested
+        // download has its own list.
+        assert!(page.contains(
+            "<h2>Lanes</h2>\n<ul>\n<li>YouTube: <a href=\"/videos/youtube/abc\">&lt;b&gt;</a> — downloading"
+        ));
+        assert!(page.contains("(1,234 to go)</li>"));
+        assert!(page.contains("<li>TikTok: next download at <time"));
         assert!(
-            page.contains("YouTube: <a href=\"/videos/youtube/abc\">&lt;b&gt;</a> — downloading")
+            page.contains("<h2>Requested</h2>\n<ul>\n<li>TikTok: <a href=\"/videos/tiktok/abc\">")
         );
-        assert!(page.contains("TikTok: idle"));
         assert!(page.contains("Nothing since the app started."));
+    }
+
+    #[test]
+    fn lanes_say_why_they_wait() {
+        assert_eq!(lane_html(&lane("youtube", None, None)), "starting");
+        assert!(lane_html(&lane("youtube", None, Some((Wait::Outage, 0)))).starts_with("paused"));
+        let done = lane("youtube", Some(0), Some((Wait::Empty, 0)));
+        assert_eq!(lane_html(&done), "everything is downloaded");
+        assert_eq!(left_html(&done), "");
+        assert_eq!(left_html(&lane("youtube", Some(12), None)), " (12 to go)");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+        assert_eq!(thousands(999), "999");
     }
 
     #[test]
@@ -1243,7 +1310,7 @@ mod tests {
             },
         });
         let html = board_html(&board);
-        assert!(html.contains("Nothing queued."));
+        assert!(html.contains("Nothing right now."));
         let downloaded = html.find("downloaded 12.3 MB in 1:15").unwrap();
         let failed = html.find("failed: bad thing").unwrap();
         assert!(downloaded < failed);

@@ -146,7 +146,7 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
 }
 
 /// Create the tables if needed and bring them up to date.
-fn init(conn: &mut Connection) -> Result<()> {
+pub fn init(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
     loop {
         // Take the write lock before reading the version, so two processes
@@ -237,25 +237,49 @@ pub fn insert_new(conn: &mut Connection, platform: &str, videos: &[NewVideo]) ->
     Ok(added)
 }
 
-/// Up to `limit` videos to download next, most recently stored first, so new
-/// likes don't wait behind the backlog. Skips videos that are unavailable,
-/// already downloaded, or waiting out a retry delay.
-pub fn pending_downloads(conn: &Connection, limit: usize) -> Result<Vec<PendingDownload>> {
+/// Which videos are waiting to be downloaded: available, not downloaded, and
+/// not waiting out a retry delay. `?1` is `MAX_RETRY_DELAY`, `?2` now, and
+/// `?3` a platform or NULL for all.
+const PENDING_WHERE: &str = "v.available = 1 AND d.downloaded_at IS NULL \
+     AND (?3 IS NULL OR v.platform = ?3) \
+     AND (d.attempts IS NULL OR d.attempts = 0 \
+          OR d.last_attempt_at + MIN(3600 << MIN(d.attempts - 1, 20), ?1) <= ?2)";
+
+/// Up to `limit` videos to download next, on `platform` or all of them, most
+/// recently stored first, so new likes don't wait behind the backlog. Skips
+/// videos that are unavailable, already downloaded, or waiting out a retry
+/// delay.
+pub fn pending_downloads(
+    conn: &Connection,
+    platform: Option<&str>,
+    limit: usize,
+) -> Result<Vec<PendingDownload>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PENDING_COLUMNS} FROM videos v \
          LEFT JOIN downloads d ON d.platform = v.platform AND d.video_id = v.video_id \
-         WHERE v.available = 1 AND d.downloaded_at IS NULL \
-           AND (d.attempts IS NULL OR d.attempts = 0 \
-                OR d.last_attempt_at + MIN(3600 << MIN(d.attempts - 1, 20), ?1) <= ?2) \
-         ORDER BY v.rowid DESC LIMIT ?3"
+         WHERE {PENDING_WHERE} ORDER BY v.rowid DESC LIMIT ?4"
     ))?;
     let rows = stmt
         .query_map(
-            params![MAX_RETRY_DELAY, now(), i64::try_from(limit)?],
+            params![MAX_RETRY_DELAY, now(), platform, i64::try_from(limit)?],
             pending_from_row,
         )?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
+}
+
+/// How many videos on `platform` `pending_downloads` would offer.
+pub fn pending_count(conn: &Connection, platform: &str) -> Result<usize> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT count(*) FROM videos v \
+             LEFT JOIN downloads d ON d.platform = v.platform AND d.video_id = v.video_id \
+             WHERE {PENDING_WHERE}"
+        ),
+        params![MAX_RETRY_DELAY, now(), platform],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(count)?)
 }
 
 /// One video, to download now whatever its state, as the UI's download
@@ -582,7 +606,7 @@ mod tests {
     }
 
     fn pending_ids(conn: &Connection) -> Vec<String> {
-        pending_downloads(conn, 10)
+        pending_downloads(conn, None, 10)
             .unwrap()
             .into_iter()
             .map(|p| p.video_id)
@@ -601,7 +625,7 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_digit() || c == '-')
         );
-        assert_eq!(pending_downloads(&conn, 1).unwrap(), [item]);
+        assert_eq!(pending_downloads(&conn, None, 1).unwrap(), [item]);
         assert!(download_item(&conn, "youtube", "b").unwrap().is_none());
     }
 
@@ -615,6 +639,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pending_ids(&conn), ["new", "old"]);
+    }
+
+    #[test]
+    fn queues_per_platform() {
+        let mut conn = memory_db();
+        insert_new(&mut conn, "youtube", &[video("y", true)]).unwrap();
+        insert_new(&mut conn, "tiktok", &[video("t1", true), video("t2", true)]).unwrap();
+        let ids = |platform| -> Vec<String> {
+            pending_downloads(&conn, platform, 10)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.video_id)
+                .collect()
+        };
+        assert_eq!(ids(Some("youtube")), ["y"]);
+        assert_eq!(ids(Some("tiktok")), ["t2", "t1"]);
+        assert_eq!(ids(None), ["t2", "t1", "y"]);
+        assert_eq!(pending_count(&conn, "tiktok").unwrap(), 2);
+        record_download_failure(&conn, "tiktok", "t2", "flaky").unwrap();
+        assert_eq!(pending_count(&conn, "tiktok").unwrap(), 1);
+        assert_eq!(pending_count(&conn, "instagram").unwrap(), 0);
     }
 
     #[test]

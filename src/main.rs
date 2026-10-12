@@ -108,10 +108,6 @@ const STOP_AFTER_KNOWN: usize = 100;
 /// How often the app pulls new likes while it's running.
 const SYNC_EVERY: Duration = Duration::from_mins(5);
 
-/// Queued downloads are read from the database this many at a time, and
-/// cookies are re-read once per batch.
-const DOWNLOAD_BATCH: usize = 10;
-
 /// The pause after each download. A backlog runs to thousands of videos, and
 /// YouTube answers bursts of requests with HTTP 429.
 const DOWNLOAD_PAUSE: Duration = Duration::from_secs(5);
@@ -119,15 +115,11 @@ const DOWNLOAD_PAUSE: Duration = Duration::from_secs(5);
 /// The pause after a failed download, which is often a sign of rate limiting.
 const DOWNLOAD_FAILURE_PAUSE: Duration = Duration::from_mins(1);
 
-/// How long the downloader waits before checking an empty queue again.
-const DOWNLOAD_IDLE: Duration = Duration::from_mins(1);
-
 /// This many failed downloads in a row looks like a problem on our side or the
 /// platform's (yt-dlp broken, login expired, offline, rate limited) rather than
-/// with the videos, so the downloader stops for `DOWNLOAD_OUTAGE_PAUSE` instead
-/// of failing its way through the queue.
+/// with the videos, so the `download` command stops instead of failing its way
+/// through the queue.
 const FAILURES_BEFORE_PAUSE: usize = 3;
-const DOWNLOAD_OUTAGE_PAUSE: Duration = Duration::from_mins(30);
 
 /// Where the database and the downloads live: the folder the app's
 /// executable is in, where people will look for them (if they move the app,
@@ -271,9 +263,8 @@ async fn print_tiktok_likes(browser: Browser, profile: &str, limit: usize) -> Re
 }
 
 /// The app: serves the web UI and keeps running, syncing new likes every
-/// `SYNC_EVERY`. Media is downloaded only when asked for in the UI, through
-/// the pipeline: `download_loop`, which would work through the whole queue,
-/// isn't spawned until we decide to turn automatic downloads on.
+/// `SYNC_EVERY`. The pipeline's lanes download every liked video in the
+/// background, and the UI can ask it for one right away.
 async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> {
     let mut conn = db::open(db_path)?;
     // Bind before anything else: a second copy of the app fails here instead
@@ -343,46 +334,6 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
     }
 }
 
-/// Download queued media forever, one video at a time. Errors are logged and
-/// retried after a pause; like a failed sync, they never stop the app.
-/// Before it's spawned, it should hand videos to the pipeline rather than
-/// download them itself, so the two never download side by side.
-#[expect(
-    dead_code,
-    reason = "automatic downloads stay off until we decide to turn them on"
-)]
-async fn download_loop(browser: Browser, profile: String, db_path: PathBuf, media_root: PathBuf) {
-    // A separate connection from the syncs', so neither waits on the other
-    // longer than a single write.
-    let mut conn = loop {
-        match db::open(&db_path) {
-            Ok(conn) => break conn,
-            Err(e) => {
-                eprintln!("download: can't open the database: {e:#}");
-                tokio::time::sleep(DOWNLOAD_IDLE).await;
-            }
-        }
-    };
-    // Nothing is downloading yet, so any partial folders are from a run that
-    // was interrupted.
-    if let Err(e) = download::sweep_leftovers(&media_root) {
-        eprintln!("download: couldn't clear interrupted downloads: {e:#}");
-    }
-    loop {
-        match download_batch(browser, &profile, &mut conn, &media_root, DOWNLOAD_BATCH).await {
-            Ok(0) => tokio::time::sleep(DOWNLOAD_IDLE).await,
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!(
-                    "download: {e:#}; pausing for {} min",
-                    DOWNLOAD_OUTAGE_PAUSE.as_secs() / 60
-                );
-                tokio::time::sleep(DOWNLOAD_OUTAGE_PAUSE).await;
-            }
-        }
-    }
-}
-
 /// Download up to `limit` queued videos. Returns how many were attempted.
 /// A failed video is recorded (so it's retried later) and doesn't stop the
 /// batch; database errors and `FAILURES_BEFORE_PAUSE` failures in a row do.
@@ -393,7 +344,7 @@ async fn download_batch(
     media_root: &Path,
     limit: usize,
 ) -> Result<usize> {
-    let batch = db::pending_downloads(conn, limit)?;
+    let batch = db::pending_downloads(conn, None, limit)?;
     // The login per platform, read once for this batch.
     let mut logins: HashMap<String, download::Credentials> = HashMap::new();
     let mut failures_in_a_row = 0;
