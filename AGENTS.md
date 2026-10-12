@@ -4,10 +4,10 @@ Notes for coding agents working in this repo. Read this, then `CONTRIBUTING.md`.
 
 ## What this is
 
-A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. A background task downloads each liked video's media at the best quality available, one video at a time, into `~/.local/share/joyscroller/media/<platform>/<video id>/`. A localhost web UI for browsing the archive is planned. Instagram comes later. Every table row has a `platform` column.
+A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves each liked video's media at the best quality available into `~/.local/share/joyscroller/media/<platform>/<video id>/`, but the app doesn't start downloads for now (`download_loop` isn't spawned) until we decide how they get triggered. The `download` subcommand still runs them by hand. Instagram comes later. Every table row has a `platform` column.
 
 **Product rules:**
-- End users never run subcommands. Launching `joyscroller` must start everything. The `cookies`, `likes` and `sync` subcommands are developer and debugging tools only. New user-facing features go inside the long-running process, as a background task or (later) the web UI, not as new CLI flags.
+- End users never run subcommands. Launching `joyscroller` must start everything. The `cookies`, `likes` and `sync` subcommands are developer and debugging tools only. New user-facing features go inside the long-running process, as a background task or in the web UI, not as new CLI flags.
 - The app runs natively, not in Docker. It has to read the host browser's cookie database and the desktop keyring, which a container can't reach.
 - Logging in means reading the user's browser cookies. Don't add OAuth or API-key flows.
 - We don't call YouTube's API ourselves. `yt-dlp` does the scraping, and we parse its JSON.
@@ -17,6 +17,8 @@ A Rust app that archives the videos a user has liked. Plain `joyscroller` starts
 
 ```
 src/main.rs     CLI (clap), the app loop (run_app), and sync_youtube / sync_tiktok, which tie the modules together
+src/web.rs      The localhost UI (axum): server-rendered HTML list and video pages, and /events, an SSE stream of
+                newly stored videos, counts and sync status. run_app feeds it sync status through a watch channel
 src/browser.rs  Finds the browser profile, copies its Cookies SQLite DB, decrypts values
                 (AES-128-CBC; v10 = fixed key, v11 = key from the keyring), writes Netscape cookies.txt
 src/youtube.rs  Runs `yt-dlp --flat-playlist --lazy-playlist --dump-json` on the Liked playlist and
@@ -40,7 +42,8 @@ Config: `Cargo.toml` (lint levels), `clippy.toml`, `deny.toml`, `justfile`.
 just precommit                    # must pass before every commit (fmt, machete, clippy, deny, antislop, nextest)
 just lint / just test             # run a single step
 
-cargo run                         # the app: syncs into the real DB every 5 min
+cargo run                         # the app: UI on http://127.0.0.1:4774, syncs into the real DB every 5 min
+XDG_DATA_HOME=/tmp/x cargo run    # the app on a throwaway DB (/tmp/x/joyscroller/joyscroller.db)
 cargo run -- likes --limit 5      # print recent likes (reads real browser cookies, no DB)
 cargo run -- likes --platform tiktok --limit 5
 cargo run -- sync --db /tmp/t.db  # one sync into a throwaway DB (add --platform tiktok for TikTok)

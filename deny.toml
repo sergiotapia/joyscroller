@@ -19,6 +19,11 @@ allow = [
     "Zlib",
 ]
 
+# axum's router; part of it is derived from httprouter, which is BSD-3-Clause.
+[[licenses.exceptions]]
+crate = "matchit"
+allow = ["BSD-3-Clause"]
+
 [licenses.private]
 # Our own crate has no license and isn't published.
 ignore = true

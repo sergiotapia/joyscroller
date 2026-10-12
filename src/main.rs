@@ -3,13 +3,14 @@ mod db;
 mod download;
 mod headless;
 mod tiktok;
+mod web;
 mod youtube;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use browser::Browser;
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -128,13 +129,7 @@ const DOWNLOAD_OUTAGE_PAUSE: Duration = Duration::from_mins(30);
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        return run_app(
-            Browser::Brave,
-            "Default",
-            &db::default_path()?,
-            &download::default_root()?,
-        )
-        .await;
+        return run_app(Browser::Brave, "Default", &db::default_path()?).await;
     };
     match command {
         Command::Cookies {
@@ -246,21 +241,33 @@ async fn print_tiktok_likes(browser: Browser, profile: &str, limit: usize) -> Re
     Ok(())
 }
 
-/// The app: keeps running, syncing new likes every `SYNC_EVERY` while a
-/// background task downloads their media.
-async fn run_app(browser: Browser, profile: &str, db_path: &Path, media_root: &Path) -> Result<()> {
+/// The app: serves the web UI and keeps running, syncing new likes every
+/// `SYNC_EVERY`. Media isn't downloaded yet: how downloads get started is
+/// still to be decided, so `download_loop` isn't spawned.
+async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> {
     let mut conn = db::open(db_path)?;
+    // Bind before anything else: a second copy of the app fails here instead
+    // of syncing alongside the first.
+    let listener = tokio::net::TcpListener::bind(web::ADDR)
+        .await
+        .with_context(|| {
+            format!(
+                "listening on {} (is joyscroller already running?)",
+                web::ADDR
+            )
+        })?;
+    let (status, status_rx) = tokio::sync::watch::channel(web::SyncStatus::default());
+    let web_conn = db::open(db_path)?;
+    tokio::spawn(async move {
+        if let Err(e) = web::serve(listener, web_conn, status_rx).await {
+            eprintln!("web: stopped: {e:#}");
+        }
+    });
     eprintln!(
-        "joyscroller: syncing into {}, media into {} (Ctrl-C to stop)",
-        db_path.display(),
-        media_root.display()
+        "joyscroller: open http://{}, syncing into {} (Ctrl-C to stop)",
+        web::ADDR,
+        db_path.display()
     );
-    tokio::spawn(download_loop(
-        browser,
-        profile.to_string(),
-        db_path.to_path_buf(),
-        media_root.to_path_buf(),
-    ));
 
     // The first tick fires immediately. If a sync overruns the interval, wait a
     // full interval after it rather than firing back-to-back.
@@ -272,16 +279,34 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path, media_root: &P
         // tick tries again, and one platform failing doesn't skip the others.
         for platform in [Platform::Youtube, Platform::Tiktok] {
             let name = platform.name();
-            match sync(platform, browser, profile, &mut conn, false).await {
-                Ok((listed, added)) => eprintln!("{name}: listed {listed}, added {added} new"),
-                Err(e) => eprintln!("{name}: sync failed: {e:#}"),
-            }
+            status.send_modify(|s| s.set(name, web::SyncState::Running));
+            let state = match sync(platform, browser, profile, &mut conn, false).await {
+                Ok((listed, added)) => {
+                    eprintln!("{name}: listed {listed}, added {added} new");
+                    web::SyncState::Done {
+                        at: db::now(),
+                        added,
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{name}: sync failed: {e:#}");
+                    web::SyncState::Failed {
+                        at: db::now(),
+                        error: format!("{e:#}"),
+                    }
+                }
+            };
+            status.send_modify(|s| s.set(name, state));
         }
     }
 }
 
 /// Download queued media forever, one video at a time. Errors are logged and
 /// retried after a pause; like a failed sync, they never stop the app.
+#[expect(
+    dead_code,
+    reason = "the app doesn't start downloads until we decide how they're triggered"
+)]
 async fn download_loop(browser: Browser, profile: String, db_path: PathBuf, media_root: PathBuf) {
     // A separate connection from the syncs', so neither waits on the other
     // longer than a single write.

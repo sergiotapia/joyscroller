@@ -2,14 +2,15 @@
 //! across platforms. A row's presence means "liked". Rows keep what the video
 //! looked like when we first saw it; only `available` is refreshed on each
 //! sync, so a video that goes private later still has its title on file.
-//! `downloads` tracks which videos have their media saved to disk.
+//! `downloads` tracks which videos have their media saved to disk. Every query,
+//! including the web UI's reads, lives here.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// The original schema. Never edit it: changes go in `MIGRATIONS`, so that new
 /// databases and old ones end up in the same shape by the same steps.
@@ -306,6 +307,149 @@ pub fn record_download(
     Ok(())
 }
 
+/// A stored video, as the web UI shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredVideo {
+    /// Insertion order, which is like order. The UI sorts by it and streams
+    /// rows past the last one a page has seen.
+    pub rowid: i64,
+    pub platform: String,
+    pub video_id: String,
+    pub url: String,
+    pub title: Option<String>,
+    pub author_id: Option<String>,
+    pub author_name: Option<String>,
+    pub duration_seconds: Option<i64>,
+    pub available: bool,
+    pub kind: String,
+    pub posted_at: Option<i64>,
+    pub liked_at: i64,
+}
+
+const VIDEO_COLUMNS: &str = "rowid, platform, video_id, url, title, author_id, author_name, \
+     duration_seconds, available, kind, posted_at, liked_at";
+
+fn video_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredVideo> {
+    Ok(StoredVideo {
+        rowid: r.get(0)?,
+        platform: r.get(1)?,
+        video_id: r.get(2)?,
+        url: r.get(3)?,
+        title: r.get(4)?,
+        author_id: r.get(5)?,
+        author_name: r.get(6)?,
+        duration_seconds: r.get(7)?,
+        available: r.get(8)?,
+        kind: r.get(9)?,
+        posted_at: r.get(10)?,
+        liked_at: r.get(11)?,
+    })
+}
+
+/// How many videos are stored per platform.
+pub fn video_counts(conn: &Connection) -> Result<Vec<(String, usize)>> {
+    let mut stmt = conn.prepare("SELECT platform, COUNT(*) FROM videos GROUP BY platform")?;
+    let counts: Vec<(String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    counts
+        .into_iter()
+        .map(|(platform, count)| Ok((platform, usize::try_from(count)?)))
+        .collect()
+}
+
+/// One page of videos, most recently liked first, on one platform or all.
+pub fn videos_page(
+    conn: &Connection,
+    platform: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<StoredVideo>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {VIDEO_COLUMNS} FROM videos WHERE ?1 IS NULL OR platform = ?1 \
+         ORDER BY rowid DESC LIMIT ?2 OFFSET ?3"
+    ))?;
+    let videos = stmt
+        .query_map(
+            params![platform, i64::try_from(limit)?, i64::try_from(offset)?],
+            video_from_row,
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(videos)
+}
+
+/// Every video stored after `rowid`, oldest first.
+pub fn videos_after(conn: &Connection, rowid: i64) -> Result<Vec<StoredVideo>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {VIDEO_COLUMNS} FROM videos WHERE rowid > ?1 ORDER BY rowid"
+    ))?;
+    let videos = stmt
+        .query_map([rowid], video_from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(videos)
+}
+
+/// The rowid of the newest stored video, or 0 when there are none.
+pub fn last_rowid(conn: &Connection) -> Result<i64> {
+    Ok(
+        conn.query_row("SELECT COALESCE(MAX(rowid), 0) FROM videos", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+/// One video and its `raw_json`.
+pub fn video(
+    conn: &Connection,
+    platform: &str,
+    video_id: &str,
+) -> Result<Option<(StoredVideo, String)>> {
+    let found = conn
+        .query_row(
+            &format!(
+                "SELECT {VIDEO_COLUMNS}, raw_json FROM videos WHERE platform = ?1 AND video_id = ?2"
+            ),
+            [platform, video_id],
+            |r| Ok((video_from_row(r)?, r.get(12)?)),
+        )
+        .optional()?;
+    Ok(found)
+}
+
+/// Where a video's download stands, if it has been tried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadState {
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub downloaded_at: Option<i64>,
+    pub dir: Option<String>,
+    pub bytes: Option<i64>,
+}
+
+pub fn download_state(
+    conn: &Connection,
+    platform: &str,
+    video_id: &str,
+) -> Result<Option<DownloadState>> {
+    let found = conn
+        .query_row(
+            "SELECT attempts, last_error, downloaded_at, dir, bytes FROM downloads \
+             WHERE platform = ?1 AND video_id = ?2",
+            [platform, video_id],
+            |r| {
+                Ok(DownloadState {
+                    attempts: r.get(0)?,
+                    last_error: r.get(1)?,
+                    downloaded_at: r.get(2)?,
+                    dir: r.get(3)?,
+                    bytes: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +635,64 @@ mod tests {
             .query_row("SELECT posted_at FROM videos", [], |r| r.get(0))
             .unwrap();
         assert_eq!(posted_at, 5);
+    }
+
+    #[test]
+    fn pages_newest_first_per_platform() {
+        let mut conn = memory_db();
+        insert_new(
+            &mut conn,
+            "youtube",
+            &[video("y1", true), video("y2", true)],
+        )
+        .unwrap();
+        insert_new(&mut conn, "tiktok", &[video("t1", true)]).unwrap();
+        let ids = |platform, limit, offset| -> Vec<String> {
+            videos_page(&conn, platform, limit, offset)
+                .unwrap()
+                .into_iter()
+                .map(|v| v.video_id)
+                .collect()
+        };
+        assert_eq!(ids(None, 10, 0), ["t1", "y2", "y1"]);
+        assert_eq!(ids(None, 1, 1), ["y2"]);
+        assert_eq!(ids(Some("youtube"), 10, 0), ["y2", "y1"]);
+        assert!(ids(Some("instagram"), 10, 0).is_empty());
+
+        let mut counts = video_counts(&conn).unwrap();
+        counts.sort();
+        assert_eq!(counts, [("tiktok".into(), 1), ("youtube".into(), 2)]);
+    }
+
+    #[test]
+    fn streams_videos_stored_after_a_rowid() {
+        let mut conn = memory_db();
+        assert_eq!(last_rowid(&conn).unwrap(), 0);
+        insert_new(&mut conn, "youtube", &[video("a", true)]).unwrap();
+        let seen = last_rowid(&conn).unwrap();
+        insert_new(&mut conn, "youtube", &[video("b", true), video("c", true)]).unwrap();
+        let after: Vec<String> = videos_after(&conn, seen)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.video_id)
+            .collect();
+        assert_eq!(after, ["b", "c"]);
+    }
+
+    #[test]
+    fn looks_up_one_video_and_its_download() {
+        let mut conn = memory_db();
+        insert_new(&mut conn, "youtube", &[video("a", true)]).unwrap();
+        let (found, raw) = super::video(&conn, "youtube", "a").unwrap().unwrap();
+        assert_eq!(found.title.as_deref(), Some("title"));
+        assert_eq!(raw, "{}");
+        assert!(super::video(&conn, "tiktok", "a").unwrap().is_none());
+
+        assert!(download_state(&conn, "youtube", "a").unwrap().is_none());
+        record_download_failure(&conn, "youtube", "a", "HTTP 429").unwrap();
+        let state = download_state(&conn, "youtube", "a").unwrap().unwrap();
+        assert_eq!(state.attempts, 1);
+        assert_eq!(state.last_error.as_deref(), Some("HTTP 429"));
+        assert_eq!(state.downloaded_at, None);
     }
 }
