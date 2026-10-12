@@ -6,13 +6,15 @@
 //!   is the cover.
 //!
 //! The metadata goes back to the caller (for the database) rather than being
-//! kept as a file.
+//! kept as a file. yt-dlp's progress is passed to a callback as it comes, for
+//! the web UI's downloads page.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::browser::{Browser, Cookie};
@@ -82,12 +84,8 @@ const INFO_DROP: &[&str] = &[
     "quality",
 ];
 
-/// `~/.local/share/joyscroller/media`
-pub fn default_root() -> Result<PathBuf> {
-    Ok(dirs::data_dir()
-        .context("no XDG data dir")?
-        .join("joyscroller/media"))
-}
+/// Marks yt-dlp's progress lines on stdout, apart from its `--print` lines.
+const PROGRESS_MARK: &str = "joyscroller-progress";
 
 /// Delete the hidden `.partial` and `.old` folders an interrupted download
 /// leaves under `root` (a crash or Ctrl-C mid-download). Partials can be
@@ -137,6 +135,21 @@ pub struct Saved {
     pub posted_at: Option<i64>,
 }
 
+/// How far yt-dlp is through the file it's downloading. TikTok videos come as
+/// two files, one after the other, each reported from zero.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Progress {
+    pub downloaded: u64,
+    /// Bytes in the file: exact, or yt-dlp's estimate for streams sent in
+    /// fragments. None when it doesn't know.
+    pub total: Option<f64>,
+    /// Bytes per second.
+    pub speed: Option<f64>,
+    /// Seconds left.
+    pub eta: Option<u64>,
+    pub format_id: String,
+}
+
 /// One file yt-dlp reported writing.
 struct Written {
     format_id: String,
@@ -155,10 +168,51 @@ pub struct Login<'a> {
     pub cookies_txt: &'a Path,
 }
 
+/// A platform's login read from the browser, which a `Login` borrows. The
+/// cookies.txt is a temp file, deleted when this is dropped.
+pub struct Credentials {
+    browser: Browser,
+    cookies: Vec<Cookie>,
+    cookies_txt: tempfile::NamedTempFile,
+}
+
+impl Credentials {
+    pub async fn read(browser: Browser, profile: &str, platform: &str) -> Result<Self> {
+        let domain = match platform {
+            "youtube" => "youtube.com",
+            "tiktok" => "tiktok.com",
+            other => bail!("can't download from platform {other}"),
+        };
+        let cookies = crate::browser::cookies_for(browser, profile, domain).await?;
+        let cookies_txt = tempfile::Builder::new().suffix(".txt").tempfile()?;
+        std::fs::write(cookies_txt.path(), crate::browser::to_netscape(&cookies))?;
+        Ok(Credentials {
+            browser,
+            cookies,
+            cookies_txt,
+        })
+    }
+
+    pub fn login(&self) -> Login<'_> {
+        Login {
+            browser: self.browser,
+            cookies: &self.cookies,
+            cookies_txt: self.cookies_txt.path(),
+        }
+    }
+}
+
 /// Download `item` into its folder under `root`, replacing what's there.
 /// The files are assembled in a hidden sibling folder that's renamed into
 /// place at the end, so an interrupted download never looks complete.
-pub async fn download(item: &PendingDownload, login: &Login<'_>, root: &Path) -> Result<Saved> {
+/// `progress` hears from yt-dlp about once a second; photo posts, which
+/// don't go through yt-dlp, don't report any.
+pub async fn download(
+    item: &PendingDownload,
+    login: &Login<'_>,
+    root: &Path,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<Saved> {
     // The id becomes a path component, so it must not be able to escape.
     if item.video_id.is_empty()
         || !item
@@ -181,7 +235,7 @@ pub async fn download(item: &PendingDownload, login: &Login<'_>, root: &Path) ->
     let result = if item.kind == "photo" {
         fetch_photo_post(item, login, &work).await
     } else {
-        fetch(item, login.cookies_txt, &work).await
+        fetch(item, login.cookies_txt, &work, progress).await
     };
     let (format, info) = match result {
         Ok(fetched) => fetched,
@@ -244,6 +298,7 @@ async fn fetch(
     item: &PendingDownload,
     cookies_txt: &Path,
     work: &Path,
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<(String, Option<Value>)> {
     let tiktok = item.platform == "tiktok";
     let media_name = if tiktok { "%(format_id)s" } else { "video" };
@@ -251,7 +306,17 @@ async fn fetch(
     cmd.arg("--cookies")
         .arg(cookies_txt)
         .arg("--no-playlist")
-        .arg("--no-progress")
+        // --print below makes yt-dlp quiet, which hides progress unless asked
+        // for. It goes to stdout, one line per update, at most once a second.
+        .arg("--progress")
+        .arg("--newline")
+        .arg("--progress-delta")
+        .arg("1")
+        .arg("--progress-template")
+        .arg(format!(
+            "download:{PROGRESS_MARK}\t%(progress.downloaded_bytes)s\t%(progress.total_bytes)s\t\
+             %(progress.total_bytes_estimate)s\t%(progress.speed)s\t%(progress.eta)s\t%(info.format_id)s"
+        ))
         .arg("--socket-timeout")
         .arg("30")
         .arg("-f")
@@ -285,19 +350,12 @@ async fn fetch(
         .arg("after_move:%(format_id)s\t%(acodec)s\t%(height)s\t%(filepath)s")
         .arg(&item.url)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let out = cmd
-        .output()
-        .await
-        .context("failed to run yt-dlp; is it installed?")?;
-    if !out.status.success() {
-        bail!(
-            "yt-dlp failed: {}",
-            error_lines(&String::from_utf8_lossy(&out.stderr))
-        );
-    }
+    let printed = run_yt_dlp(&mut cmd, progress).await?;
 
-    let written = parse_written(&String::from_utf8_lossy(&out.stdout));
+    let written = parse_written(&printed);
     let format = match written.as_slice() {
         [] => bail!("yt-dlp reported no downloaded file"),
         [only] => {
@@ -337,6 +395,46 @@ async fn fetch(
         None
     };
     Ok((format, info))
+}
+
+/// Run yt-dlp, passing its progress lines to `progress` as they come.
+/// Returns the rest of what it printed.
+async fn run_yt_dlp(cmd: &mut Command, progress: &(dyn Fn(Progress) + Sync)) -> Result<String> {
+    let mut child = cmd
+        .spawn()
+        .context("failed to run yt-dlp; is it installed?")?;
+    let stdout = child.stdout.take().context("no stdout from yt-dlp")?;
+    let mut stderr = child.stderr.take().context("no stderr from yt-dlp")?;
+    // Read both pipes at once: yt-dlp blocks if either fills up.
+    let read_stdout = async {
+        let mut printed = String::new();
+        let mut lines = BufReader::new(stdout).split(b'\n');
+        while let Some(line) = lines.next_segment().await? {
+            let line = String::from_utf8_lossy(&line);
+            if let Some(update) = parse_progress(&line) {
+                progress(update);
+            } else {
+                printed.push_str(&line);
+                printed.push('\n');
+            }
+        }
+        Ok::<_, std::io::Error>(printed)
+    };
+    let read_stderr = async {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await?;
+        Ok(bytes)
+    };
+    let (printed, errors) =
+        tokio::try_join!(read_stdout, read_stderr).context("reading yt-dlp's output")?;
+    let status = child.wait().await.context("waiting for yt-dlp")?;
+    if !status.success() {
+        bail!(
+            "yt-dlp failed: {}",
+            error_lines(&String::from_utf8_lossy(&errors))
+        );
+    }
+    Ok(printed)
 }
 
 /// Save a TikTok photo post's images and sound into `work`. Returns the
@@ -439,6 +537,23 @@ fn parse_written(stdout: &str) -> Vec<Written> {
     }
 
     written
+}
+
+/// A progress line from `--progress-template`, or None for any other line.
+/// yt-dlp prints NA for a field it doesn't know.
+fn parse_progress(line: &str) -> Option<Progress> {
+    let fields: Vec<&str> = line.strip_prefix(PROGRESS_MARK)?.split('\t').collect();
+    let ["", downloaded, total, estimate, speed, eta, format_id] = fields.as_slice() else {
+        return None;
+    };
+    let number = |text: &str| text.parse::<f64>().ok().filter(|n| n.is_finite());
+    Some(Progress {
+        downloaded: downloaded.parse().ok()?,
+        total: number(total).or_else(|| number(estimate)),
+        speed: number(speed),
+        eta: eta.parse().ok(),
+        format_id: (*format_id).to_string(),
+    })
 }
 
 /// Combine `video`'s picture with `sound`'s audio into `video.<ext>`, copying
@@ -649,6 +764,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_progress_lines() {
+        assert_eq!(
+            parse_progress("joyscroller-progress\t1024\t223779\tNA\t222283.78\t1\t395"),
+            Some(Progress {
+                downloaded: 1024,
+                total: Some(223_779.0),
+                speed: Some(222_283.78),
+                eta: Some(1),
+                format_id: "395".into(),
+            })
+        );
+        // Fragmented streams only have an estimate; a stalled one no speed.
+        assert_eq!(
+            parse_progress("joyscroller-progress\t5\tNA\t99.5\tNA\tNA\thls-1"),
+            Some(Progress {
+                downloaded: 5,
+                total: Some(99.5),
+                speed: None,
+                eta: None,
+                format_id: "hls-1".into(),
+            })
+        );
+        assert_eq!(parse_progress("395+251\topus\t240\t/w/video.webm"), None);
+        assert_eq!(parse_progress("joyscroller-progress\tNA\tNA"), None);
+    }
+
+    #[test]
     fn names_extensions_by_content_first() {
         // An MP3 served as video/mp4, as TikTok does for slideshow sounds.
         assert_eq!(extension_for(b"ID3\x04\x00", "video/mp4"), "mp3");
@@ -703,7 +845,9 @@ mod tests {
             cookies: &[],
             cookies_txt: Path::new("/nonexistent"),
         };
-        let err = download(&item, &login, root.path()).await.unwrap_err();
+        let err = download(&item, &login, root.path(), &|_| {})
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("unusual video id"));
     }
 }

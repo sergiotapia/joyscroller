@@ -6,7 +6,6 @@
 //! including the web UI's reads, lives here.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -109,13 +108,6 @@ pub struct Downloaded<'a> {
 /// given up on, because many failures aren't the video's fault (a yt-dlp
 /// broken by a site change, an expired login, an outage) and can last days.
 pub const MAX_RETRY_DELAY: i64 = 7 * 24 * 3600;
-
-/// `~/.local/share/joyscroller/joyscroller.db`
-pub fn default_path() -> Result<PathBuf> {
-    Ok(dirs::data_dir()
-        .context("no XDG data dir")?
-        .join("joyscroller/joyscroller.db"))
-}
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {

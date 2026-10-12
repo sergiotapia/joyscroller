@@ -4,7 +4,7 @@ Notes for coding agents working in this repo. Read this, then `CONTRIBUTING.md`.
 
 ## What this is
 
-A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves each liked video's media at the best quality available into `~/.local/share/joyscroller/media/<platform>/<video id>/`, but the app doesn't start downloads for now (`download_loop` isn't spawned) until we decide how they get triggered. The `download` subcommand still runs them by hand. Instagram comes later. Every table row has a `platform` column.
+A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves a liked video's media at the best quality available into `downloads/<platform>/<video id>/`. That folder and the database, `joyscroller.db`, sit next to the app's executable, where people will look for them. A binary running from this repo's `target/` (so `cargo run`) uses `data/` at the repo root instead, which survives `cargo clean` and is gitignored. Videos download only when the user asks on a video's page: the request goes into the download pipeline (`pipeline.rs`), and `/downloading` shows its progress live. Automatic downloads of the whole queue (`download_loop`) stay off for now. The `download` subcommand still runs them by hand. Instagram comes later. Every table row has a `platform` column.
 
 **Product rules:**
 - End users never run subcommands. Launching `joyscroller` must start everything. The `cookies`, `likes` and `sync` subcommands are developer and debugging tools only. New user-facing features go inside the long-running process, as a background task or in the web UI, not as new CLI flags.
@@ -17,8 +17,9 @@ A Rust app that archives the videos a user has liked. Plain `joyscroller` starts
 
 ```
 src/main.rs     CLI (clap), the app loop (run_app), and sync_youtube / sync_tiktok, which tie the modules together
-src/web.rs      The localhost UI (axum): server-rendered HTML list and video pages, and /events, an SSE stream of
-                newly stored videos, counts and sync status. run_app feeds it sync status through a watch channel
+src/web.rs      The localhost UI (axum): server-rendered HTML list and video pages (with a Download button),
+                /downloading, and /events, an SSE stream of newly stored videos, counts, sync status and
+                the download pipeline's board. run_app feeds it sync status through a watch channel
 src/browser.rs  Finds the browser profile, copies its Cookies SQLite DB, decrypts values
                 (AES-128-CBC; v10 = fixed key, v11 = key from the keyring), writes Netscape cookies.txt
 src/youtube.rs  Runs `yt-dlp --flat-playlist --lazy-playlist --dump-json` on the Liked playlist and
@@ -28,6 +29,9 @@ src/tiktok.rs   Pages through TikTok's liked list (/api/favorite/item_list/) fro
                 fetches a photo post's images and sound from inside its page (yt-dlp only gets the sound)
 src/headless.rs Minimal Chrome DevTools Protocol client: launches the browser headless with a throwaway
                 profile, loads cookies, navigates, evaluates JS in the page
+src/pipeline.rs The download pipeline: one lane per platform (lanes run in parallel, one video at a time
+                each), a stage enum with only Download for now, and the Board of what's queued, running
+                and finished that the UI watches. Requests are in memory only
 src/download.rs Downloads one video's media into its folder: with yt-dlp (`video.<ext>`, `thumbnail.<ext>`;
                 muxes TikTok's 1080p picture with its real audio), or for TikTok photo posts through
                 tiktok.rs (`image-NN.<ext>`, `sound.<ext>`); returns trimmed metadata
@@ -43,7 +47,7 @@ just precommit                    # must pass before every commit (fmt, machete,
 just lint / just test             # run a single step
 
 cargo run                         # the app: UI on http://127.0.0.1:4774, syncs into the real DB every 5 min
-XDG_DATA_HOME=/tmp/x cargo run    # the app on a throwaway DB (/tmp/x/joyscroller/joyscroller.db)
+cp target/debug/joyscroller /tmp/x/ && /tmp/x/joyscroller   # the app on a throwaway DB and downloads folder
 cargo run -- likes --limit 5      # print recent likes (reads real browser cookies, no DB)
 cargo run -- likes --platform tiktok --limit 5
 cargo run -- sync --db /tmp/t.db  # one sync into a throwaway DB (add --platform tiktok for TikTok)
@@ -56,7 +60,7 @@ Runtime needs: Linux, `yt-dlp` and `ffmpeg` (with `ffprobe`) on `PATH`, a Chromi
 
 A full TikTok listing takes about 2 minutes for 5,000 likes (one request per 30). In testing, TikTok's liked list ended after exactly 200 pages (about 5,100 likes, back to January 2026). That looks like a server-side cap rather than the true end of the list.
 
-The real archive is at `~/.local/share/joyscroller/joyscroller.db`. Don't write to it while experimenting. Pass `--db` with a temp path.
+The real archive is `joyscroller.db` and `downloads/` in `data/` at the repo root (for `cargo run`). Don't write to it while experimenting. Pass `--db` (and `--media`) with a temp path, or run a copy of the binary from a temp folder.
 
 ## Data model invariants
 

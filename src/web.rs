@@ -1,8 +1,10 @@
 //! The localhost web UI: plain server-rendered HTML. The list page pages
 //! through the liked videos, newest first, on all platforms or one; each video
-//! has its own page. Every open page keeps a Server-Sent Events connection, over
-//! which newly stored videos, the per-platform counts and what each sync is
-//! doing arrive as soon as they change.
+//! has its own page, with a button that asks the download pipeline for its
+//! media, and `/downloading` shows what the pipeline is doing. Every open page
+//! keeps a Server-Sent Events connection, over which newly stored videos, the
+//! per-platform counts, what each sync is doing and the pipeline's progress
+//! arrive as soon as they change.
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -10,10 +12,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use anyhow::Result;
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use futures_util::{Stream, StreamExt, stream};
 use rusqlite::Connection;
 use serde::Deserialize;
@@ -21,6 +23,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::db;
+use crate::pipeline::{Active, Board, Job, Outcome, Pipeline};
 
 /// Where the UI listens. Localhost only: the archive is the user's own.
 pub const ADDR: &str = "127.0.0.1:4774";
@@ -69,6 +72,7 @@ impl SyncStatus {
 struct App {
     db: Arc<Mutex<Connection>>,
     status: watch::Receiver<SyncStatus>,
+    pipeline: Pipeline,
 }
 
 impl App {
@@ -86,14 +90,21 @@ pub async fn serve(
     listener: TcpListener,
     conn: Connection,
     status: watch::Receiver<SyncStatus>,
+    pipeline: Pipeline,
 ) -> Result<()> {
     let app = App {
         db: Arc::new(Mutex::new(conn)),
         status,
+        pipeline,
     };
     let router = Router::new()
         .route("/", get(list_page))
         .route("/videos/{platform}/{video_id}", get(video_page))
+        .route(
+            "/videos/{platform}/{video_id}/download",
+            post(request_download),
+        )
+        .route("/downloading", get(downloading_page))
         .route("/events", get(events))
         .with_state(app);
     axum::serve(listener, router).await?;
@@ -150,6 +161,7 @@ async fn list_page(
         ))
     })?;
     let status = app.status.borrow().clone();
+    let board = app.pipeline.board();
     let pages = count_of(&counts, platform).div_ceil(PAGE_SIZE).max(1);
 
     let heading = match platform {
@@ -184,9 +196,10 @@ async fn list_page(
     Ok(Html(layout(
         &Frame {
             title: &heading,
-            current: platform,
+            current: Section::Likes(platform),
             status: &status,
             counts: &counts,
+            board: &board,
             after,
             live: page == 1,
         },
@@ -208,6 +221,7 @@ async fn video_page(
     })?;
     let (video, raw_json) = found.ok_or_else(not_found)?;
     let status = app.status.borrow().clone();
+    let board = app.pipeline.board();
     let source = display_name(&video.platform);
     let title = short_title(&video);
 
@@ -260,7 +274,7 @@ async fn video_page(
             }
             .into(),
         ),
-        ("Media", download_html(download.as_ref())),
+        ("Media", media_html(&video, download.as_ref(), &board)),
         ("ID", format!("<code>{}</code>", escape(&video.video_id))),
     ]
     .map(|(name, value)| format!("<dt>{name}</dt><dd>{value}</dd>\n"))
@@ -285,9 +299,87 @@ async fn video_page(
     Ok(Html(layout(
         &Frame {
             title: &title,
-            current: Some(&video.platform),
+            current: Section::Likes(Some(&video.platform)),
             status: &status,
             counts: &counts,
+            board: &board,
+            after,
+            live: false,
+        },
+        &main,
+    )))
+}
+
+/// The video page's download button. Queues the video in the pipeline and
+/// sends the browser back to the video's page, where its progress shows.
+async fn request_download(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path((platform, video_id)): Path<(String, String)>,
+) -> Result<Response, Failure> {
+    if !from_this_ui(&headers) {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "refusing a download request from another site".into(),
+        ));
+    }
+    let (found, download) = app.db(|conn| {
+        Ok((
+            db::video(conn, &platform, &video_id)?,
+            db::download_state(conn, &platform, &video_id)?,
+        ))
+    })?;
+    let (video, _) = found.ok_or_else(not_found)?;
+    // A stale page's button for a video that has since been downloaded does
+    // nothing; the page it lands on says so.
+    if can_download(&video, download.as_ref()) {
+        app.pipeline.request(Job {
+            title: short_title(&video),
+            item: db::PendingDownload {
+                platform: video.platform.clone(),
+                video_id: video.video_id.clone(),
+                url: video.url.clone(),
+                kind: video.kind.clone(),
+            },
+        })?;
+    }
+    let location = HeaderValue::try_from(format!("/videos/{platform}/{video_id}"))
+        .map_err(anyhow::Error::from)?;
+    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
+}
+
+/// Any page on the web can make the browser POST to localhost. Browsers say
+/// which site a POST comes from in `Origin`, so refuse it unless it's this UI.
+fn from_this_ui(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        // Not sent by a browser, or by one too old to say.
+        return true;
+    };
+    let ours = format!("http://{ADDR}");
+    let ours_by_name = ours.replace("127.0.0.1", "localhost");
+    origin
+        .to_str()
+        .is_ok_and(|origin| origin == ours || origin == ours_by_name)
+}
+
+async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failure> {
+    let (counts, after) = app.db(|conn| Ok((db::video_counts(conn)?, db::last_rowid(conn)?)))?;
+    let status = app.status.borrow().clone();
+    let board = app.pipeline.board();
+    let main = format!(
+        "<h1>Downloading</h1>\n\
+         <p>Videos download when you ask for them on their page. YouTube and TikTok \
+         download side by side, one video at a time each.</p>\n\
+         <div id=\"downloads\">\n{}</div>\n",
+        board_html(&board)
+    );
+    Ok(Html(layout(
+        &Frame {
+            title: "Downloading",
+            current: Section::Downloading,
+            status: &status,
+            counts: &counts,
+            board: &board,
             after,
             live: false,
         },
@@ -303,7 +395,8 @@ struct EventsQuery {
 /// Live updates for an open page. Each newly stored video comes as a `video`
 /// event holding its table row, with its rowid as the event id; then a
 /// `counts` event, and on every change a `status` event with the header's
-/// sync status.
+/// sync status. Whenever the download pipeline changes, a `downloads` event
+/// brings what `downloads_json` describes.
 async fn events(
     State(app): State<App>,
     headers: HeaderMap,
@@ -321,16 +414,30 @@ async fn events(
         None => app.db(db::last_rowid)?,
     };
     let mut status = app.status.clone();
+    let mut board = app.pipeline.subscribe();
     // Send the current state right away, which also delivers anything stored
     // between rendering the page and connecting.
     status.mark_changed();
+    board.mark_changed();
     let updates = stream::unfold(
-        (app, status, after),
-        |(app, mut status, after)| async move {
-            status.changed().await.ok()?;
-            let current = status.borrow_and_update().clone();
-            let (events, after) = updates_since(&app, &current, after);
-            Some((stream::iter(events), (app, status, after)))
+        (app, status, board, after),
+        |(app, mut status, mut board, after)| async move {
+            let (events, after) = tokio::select! {
+                changed = status.changed() => {
+                    changed.ok()?;
+                    let current = status.borrow_and_update().clone();
+                    updates_since(&app, &current, after)
+                }
+                changed = board.changed() => {
+                    changed.ok()?;
+                    let current = board.borrow_and_update().clone();
+                    let event = Event::default()
+                        .event("downloads")
+                        .data(downloads_json(&current));
+                    (vec![event], after)
+                }
+            };
+            Some((stream::iter(events), (app, status, board, after)))
         },
     )
     .flatten()
@@ -363,13 +470,21 @@ fn updates_since(app: &App, status: &SyncStatus, after: i64) -> (Vec<Event>, i64
     (events, newest)
 }
 
+/// The highlighted sidebar entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section<'a> {
+    /// A list of likes: all of them (`None`), or one platform's.
+    Likes(Option<&'a str>),
+    Downloading,
+}
+
 /// What every page shares around its `main`.
 struct Frame<'a> {
     title: &'a str,
-    /// The highlighted sidebar entry; `None` is All.
-    current: Option<&'a str>,
+    current: Section<'a>,
     status: &'a SyncStatus,
     counts: &'a [(String, usize)],
+    board: &'a Board,
     /// The newest video's rowid when the page was rendered.
     after: i64,
     /// Whether new videos go straight into the table (the list's first page)
@@ -383,7 +498,7 @@ fn layout(frame: &Frame, main: &str) -> String {
         .chain(PLATFORMS.map(|(name, label)| (Some(name), label)))
         .map(|(name, label)| {
             let link = format!("<a href=\"{}\">{label}</a>", list_href(name, 1));
-            let link = if name == frame.current {
+            let link = if frame.current == Section::Likes(name) {
                 format!("<b>{link}</b>")
             } else {
                 link
@@ -396,6 +511,12 @@ fn layout(frame: &Frame, main: &str) -> String {
         })
         .collect::<Vec<_>>()
         .concat();
+    let downloading = "<a href=\"/downloading\">Downloading</a>";
+    let downloading = if frame.current == Section::Downloading {
+        format!("<b>{downloading}</b>")
+    } else {
+        downloading.into()
+    };
     format!(
         "<!doctype html>\n\
          <html lang=\"en\">\n\
@@ -410,7 +531,7 @@ fn layout(frame: &Frame, main: &str) -> String {
          <p id=\"status\">{status}</p>\n\
          </header>\n\
          <hr>\n\
-         <nav>\n<ul>\n{nav}</ul>\n</nav>\n\
+         <nav>\n<ul>\n{nav}<li>{downloading} (<span id=\"count-downloading\">{busy}</span>)</li>\n</ul>\n</nav>\n\
          <hr>\n\
          <main>\n{main}</main>\n\
          <script>{SCRIPT}</script>\n\
@@ -418,7 +539,11 @@ fn layout(frame: &Frame, main: &str) -> String {
          </html>\n",
         title = escape(frame.title),
         after = frame.after,
-        platform = frame.current.unwrap_or(""),
+        platform = match frame.current {
+            Section::Likes(platform) => platform.unwrap_or(""),
+            Section::Downloading => "",
+        },
+        busy = busy_count(frame.board),
         live = u8::from(frame.live),
         status = status_html(frame.status),
     )
@@ -468,6 +593,28 @@ events.addEventListener("status", (e) => {
   const el = document.getElementById("status");
   el.innerHTML = e.data;
   showTimes(el);
+});
+events.addEventListener("downloads", (e) => {
+  const update = JSON.parse(e.data);
+  document.getElementById("count-downloading").textContent = update.count;
+  const board = document.getElementById("downloads");
+  if (board) {
+    board.innerHTML = update.board;
+    showTimes(board);
+  }
+  // A video page: show its progress, and once it's out of the pipeline,
+  // reload for the result.
+  const media = document.getElementById("media");
+  if (media) {
+    const progress = update.videos[media.dataset.key];
+    if (progress) {
+      media.innerHTML = progress;
+      media.dataset.busy = "1";
+      showTimes(media);
+    } else if (media.dataset.busy) {
+      location.reload();
+    }
+  }
 });
 "#;
 
@@ -627,6 +774,191 @@ fn author_html(video: &db::StoredVideo) -> String {
         Some(href) if !label.is_empty() => format!("<a href=\"{}\">{label}</a>", escape(&href)),
         _ => label,
     }
+}
+
+/// Whether the download button makes sense: there's nothing saved yet, and
+/// the platform still has the video.
+fn can_download(video: &db::StoredVideo, download: Option<&db::DownloadState>) -> bool {
+    video.available && download.is_none_or(|d| d.downloaded_at.is_none())
+}
+
+/// The video page's Media field: where its download stands in the pipeline,
+/// or else in the database, with a button if it can be downloaded. `id` and
+/// `data-key` are for the live updates.
+fn media_html(
+    video: &db::StoredVideo,
+    download: Option<&db::DownloadState>,
+    board: &Board,
+) -> String {
+    let (inner, busy) = match job_html(board, &video.platform, &video.video_id) {
+        Some(html) => (html, " data-busy=\"1\""),
+        None if can_download(video, download) => (
+            format!(
+                "{}\n<form method=\"post\" action=\"{}/download\"><button>Download</button></form>",
+                download_html(download),
+                video_href(video)
+            ),
+            "",
+        ),
+        None => (download_html(download), ""),
+    };
+    format!(
+        "<div id=\"media\" data-key=\"{}/{}\"{busy}>{inner}</div>",
+        escape(&video.platform),
+        escape(&video.video_id)
+    )
+}
+
+/// Where a video is in the pipeline, if it's there.
+fn job_html(board: &Board, platform: &str, video_id: &str) -> Option<String> {
+    if let Some(active) = board.find_active(platform, video_id) {
+        return Some(activity_html(active));
+    }
+    let ahead = board.queue_position(platform, video_id)?;
+    let busy = board.active_on(platform).is_some();
+    Some(match (ahead, busy) {
+        (0, false) => "queued, starting…".into(),
+        (0, true) => "queued, next in line".into(),
+        (n, _) => format!("queued, {n} ahead of it"),
+    })
+}
+
+/// What a lane is doing with a video, e.g. "downloading 45% of 12.3 MB,
+/// 2.1 MB/s, 0:05 left (format 399), started 3:04:05 PM".
+#[expect(clippy::cast_precision_loss, reason = "sizes for display")]
+fn activity_html(active: &Active) -> String {
+    let doing = active.stage.doing();
+    let started = time(active.started_at, "time");
+    let Some(progress) = &active.progress else {
+        return format!("{doing}, started {started}");
+    };
+    let downloaded = progress.downloaded as f64;
+    let amount = match progress.total {
+        Some(total) if total > 0.0 => format!(
+            "{:.0}% of {:.1} MB",
+            (downloaded / total * 100.0).min(100.0),
+            total / 1e6
+        ),
+        _ => format!("{:.1} MB", downloaded / 1e6),
+    };
+    let speed = progress
+        .speed
+        .map(|speed| format!(", {:.1} MB/s", speed / 1e6))
+        .unwrap_or_default();
+    let eta = progress
+        .eta
+        .and_then(|eta| i64::try_from(eta).ok())
+        .map(|eta| format!(", {} left", duration(eta)))
+        .unwrap_or_default();
+    format!(
+        "{doing} {amount}{speed}{eta} (format {}), started {started}",
+        escape(&progress.format_id)
+    )
+}
+
+/// How many videos are in the pipeline, for the sidebar.
+fn busy_count(board: &Board) -> usize {
+    board.active.len() + board.queued.len()
+}
+
+/// The downloads page's live part: what each lane is doing, the queue, and
+/// what finished since the app started.
+fn board_html(board: &Board) -> String {
+    let job_link = |job: &Job| {
+        format!(
+            "{}: <a href=\"/videos/{}/{}\">{}</a>",
+            display_name(&job.item.platform),
+            escape(&job.item.platform),
+            escape(&job.item.video_id),
+            escape(&truncate(&job.title, 120))
+        )
+    };
+    let now = PLATFORMS
+        .iter()
+        .map(|(platform, label)| {
+            let lane: Vec<String> = board
+                .active
+                .iter()
+                .filter(|a| a.job.item.platform == *platform)
+                .map(|a| format!("<li>{} — {}</li>\n", job_link(&a.job), activity_html(a)))
+                .collect();
+            if lane.is_empty() {
+                format!("<li>{label}: idle</li>\n")
+            } else {
+                lane.concat()
+            }
+        })
+        .collect::<Vec<_>>()
+        .concat();
+    let queued = if board.queued.is_empty() {
+        "<p>Nothing queued.</p>\n".into()
+    } else {
+        let jobs = board
+            .queued
+            .iter()
+            .map(|job| format!("<li>{}</li>\n", job_link(job)))
+            .collect::<Vec<_>>()
+            .concat();
+        format!("<ol>\n{jobs}</ol>\n")
+    };
+    let finished = if board.recent.is_empty() {
+        "<p>Nothing since the app started.</p>\n".into()
+    } else {
+        let items = board
+            .recent
+            .iter()
+            .map(|finished| {
+                let outcome = match &finished.outcome {
+                    Outcome::Downloaded { bytes, seconds } => {
+                        #[expect(clippy::cast_precision_loss, reason = "a size for display")]
+                        let megabytes = *bytes as f64 / 1e6;
+                        let seconds = i64::try_from(*seconds).unwrap_or(i64::MAX);
+                        format!("downloaded {megabytes:.1} MB in {}", duration(seconds))
+                    }
+                    Outcome::Failed(error) => {
+                        format!("failed: {}", escape(&error.replace(['\r', '\n'], " ")))
+                    }
+                };
+                format!(
+                    "<li>{} {} — {outcome}</li>\n",
+                    time(finished.at, "time"),
+                    job_link(&finished.job)
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        format!("<ul>\n{items}</ul>\n")
+    };
+    format!(
+        "<h2>Now</h2>\n<ul>\n{now}</ul>\n\
+         <h2>Queued</h2>\n{queued}\
+         <h2>Finished</h2>\n{finished}"
+    )
+}
+
+/// The `downloads` event: `{"count": n, "board": html, "videos": {"platform/id": html}}`,
+/// with the sidebar count, the downloads page's `board_html`, and the Media
+/// field of each video in the pipeline.
+fn downloads_json(board: &Board) -> String {
+    let videos: serde_json::Map<String, serde_json::Value> = board
+        .active
+        .iter()
+        .map(|active| &active.job)
+        .chain(&board.queued)
+        .filter_map(|job| {
+            let (platform, id) = (&job.item.platform, &job.item.video_id);
+            Some((
+                format!("{platform}/{id}"),
+                job_html(board, platform, id)?.into(),
+            ))
+        })
+        .collect();
+    serde_json::json!({
+        "count": busy_count(board),
+        "board": board_html(board),
+        "videos": videos,
+    })
+    .to_string()
 }
 
 fn download_html(download: Option<&db::DownloadState>) -> String {
@@ -801,5 +1133,133 @@ mod tests {
         assert!(html.contains("logged out"));
         assert!(html.contains("TikTok: synced at"));
         assert!(html.contains("2 new"));
+    }
+
+    fn job(video: &db::StoredVideo) -> Job {
+        Job {
+            item: db::PendingDownload {
+                platform: video.platform.clone(),
+                video_id: video.video_id.clone(),
+                url: video.url.clone(),
+                kind: video.kind.clone(),
+            },
+            title: "<b>".into(),
+        }
+    }
+
+    #[test]
+    fn media_offers_a_button_only_when_there_is_nothing_saved() {
+        let board = Board::default();
+        let fresh = video("youtube", None);
+        assert!(
+            media_html(&fresh, None, &board).contains("action=\"/videos/youtube/abc/download\"")
+        );
+
+        let failed = db::DownloadState {
+            attempts: 2,
+            last_error: Some("429".into()),
+            downloaded_at: None,
+            dir: None,
+            bytes: None,
+        };
+        let html = media_html(&fresh, Some(&failed), &board);
+        assert!(html.contains("2 failed tries, last error: 429"));
+        assert!(html.contains("<button>"));
+
+        let saved = db::DownloadState {
+            downloaded_at: Some(1),
+            dir: Some("youtube/abc".into()),
+            bytes: Some(1),
+            ..failed
+        };
+        assert!(!media_html(&fresh, Some(&saved), &board).contains("<button>"));
+        let gone = db::StoredVideo {
+            available: false,
+            ..fresh
+        };
+        assert!(!media_html(&gone, None, &board).contains("<button>"));
+    }
+
+    #[test]
+    fn media_shows_the_pipeline_instead_of_a_button() {
+        let youtube = video("youtube", None);
+        let tiktok = video("tiktok", None);
+        let mut board = Board::default();
+        board.queued.push(job(&tiktok));
+        let html = media_html(&tiktok, None, &board);
+        assert!(html.contains("queued, starting…"));
+        assert!(html.contains("data-busy=\"1\""));
+        assert!(!html.contains("<button>"));
+
+        board.active.push(Active {
+            job: job(&youtube),
+            stage: crate::pipeline::Stage::Download,
+            started_at: 0,
+            progress: Some(crate::download::Progress {
+                downloaded: 2_500_000,
+                total: Some(10_000_000.0),
+                speed: Some(1_000_000.0),
+                eta: Some(8),
+                format_id: "399".into(),
+            }),
+        });
+        assert!(
+            media_html(&youtube, None, &board)
+                .contains("downloading 25% of 10.0 MB, 1.0 MB/s, 0:08 left (format 399), started")
+        );
+
+        let update: serde_json::Value = serde_json::from_str(&downloads_json(&board)).unwrap();
+        assert_eq!(update["count"], 2);
+        assert!(
+            update["videos"]["tiktok/abc"]
+                .as_str()
+                .unwrap()
+                .starts_with("queued")
+        );
+        let page = update["board"].as_str().unwrap();
+        // Titles are escaped, and each lane shows what it's on.
+        assert!(
+            page.contains("YouTube: <a href=\"/videos/youtube/abc\">&lt;b&gt;</a> — downloading")
+        );
+        assert!(page.contains("TikTok: idle"));
+        assert!(page.contains("Nothing since the app started."));
+    }
+
+    #[test]
+    fn board_lists_finished_videos() {
+        let mut board = Board::default();
+        board.recent.push_front(crate::pipeline::Finished {
+            job: job(&video("tiktok", None)),
+            at: 0,
+            outcome: Outcome::Failed("bad\nthing".into()),
+        });
+        board.recent.push_front(crate::pipeline::Finished {
+            job: job(&video("youtube", None)),
+            at: 0,
+            outcome: Outcome::Downloaded {
+                bytes: 12_300_000,
+                seconds: 75,
+            },
+        });
+        let html = board_html(&board);
+        assert!(html.contains("Nothing queued."));
+        let downloaded = html.find("downloaded 12.3 MB in 1:15").unwrap();
+        let failed = html.find("failed: bad thing").unwrap();
+        assert!(downloaded < failed);
+    }
+
+    #[test]
+    fn refuses_download_requests_from_other_sites() {
+        let mut headers = HeaderMap::new();
+        assert!(from_this_ui(&headers));
+        for (origin, ok) in [
+            ("http://127.0.0.1:4774", true),
+            ("http://localhost:4774", true),
+            ("https://evil.example", false),
+            ("null", false),
+        ] {
+            headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+            assert_eq!(from_this_ui(&headers), ok, "{origin}");
+        }
     }
 }

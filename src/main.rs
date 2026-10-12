@@ -2,6 +2,7 @@ mod browser;
 mod db;
 mod download;
 mod headless;
+mod pipeline;
 mod tiktok;
 mod web;
 mod youtube;
@@ -72,7 +73,8 @@ enum Command {
         browser: Browser,
         #[arg(long, default_value = "Default")]
         profile: String,
-        /// Database file (default: ~/.local/share/joyscroller/joyscroller.db).
+        /// Database file (default: joyscroller.db next to this executable, or in
+        /// data/ when run from the repo's target/).
         #[arg(long)]
         db: Option<std::path::PathBuf>,
         /// Read the whole liked list instead of stopping once we reach likes we
@@ -86,10 +88,11 @@ enum Command {
         browser: Browser,
         #[arg(long, default_value = "Default")]
         profile: String,
-        /// Database file (default: ~/.local/share/joyscroller/joyscroller.db).
+        /// Database file (default: joyscroller.db next to this executable, or in
+        /// data/ when run from the repo's target/).
         #[arg(long)]
         db: Option<PathBuf>,
-        /// Where media goes (default: ~/.local/share/joyscroller/media).
+        /// Where media goes (default: downloads/ next to the database).
         #[arg(long)]
         media: Option<PathBuf>,
         /// How many videos to download.
@@ -125,11 +128,36 @@ const DOWNLOAD_IDLE: Duration = Duration::from_mins(1);
 const FAILURES_BEFORE_PAUSE: usize = 3;
 const DOWNLOAD_OUTAGE_PAUSE: Duration = Duration::from_mins(30);
 
+/// Where the database and the downloads live: the folder the app's
+/// executable is in, where people will look for them (if they move the app,
+/// moving those along is up to them). A build running from this repo's own
+/// `target/` uses `data/` in the repo instead, so `cargo clean` can't delete
+/// the archive. A dev binary copied elsewhere counts as an install.
+fn app_dir() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("finding the app's executable")?;
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if exe.starts_with(repo.join("target")) {
+        return Ok(repo.join("data"));
+    }
+    Ok(exe
+        .parent()
+        .context("the app's executable has no folder")?
+        .to_owned())
+}
+
+fn default_db() -> Result<PathBuf> {
+    Ok(app_dir()?.join("joyscroller.db"))
+}
+
+fn default_media() -> Result<PathBuf> {
+    Ok(app_dir()?.join("downloads"))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        return run_app(Browser::Brave, "Default", &db::default_path()?).await;
+        return run_app(Browser::Brave, "Default", &default_db()?).await;
     };
     match command {
         Command::Cookies {
@@ -166,7 +194,7 @@ async fn main() -> Result<()> {
         } => {
             let db_path = match db {
                 Some(path) => path,
-                None => db::default_path()?,
+                None => default_db()?,
             };
             let mut conn = db::open(&db_path)?;
             let (listed, added) = sync(platform, browser, &profile, &mut conn, full).await?;
@@ -185,11 +213,11 @@ async fn main() -> Result<()> {
         } => {
             let db_path = match db {
                 Some(path) => path,
-                None => db::default_path()?,
+                None => default_db()?,
             };
             let media_root = match media {
                 Some(path) => path,
-                None => download::default_root()?,
+                None => default_media()?,
             };
             let mut conn = db::open(&db_path)?;
             let attempted =
@@ -242,8 +270,9 @@ async fn print_tiktok_likes(browser: Browser, profile: &str, limit: usize) -> Re
 }
 
 /// The app: serves the web UI and keeps running, syncing new likes every
-/// `SYNC_EVERY`. Media isn't downloaded yet: how downloads get started is
-/// still to be decided, so `download_loop` isn't spawned.
+/// `SYNC_EVERY`. Media is downloaded only when asked for in the UI, through
+/// the pipeline: `download_loop`, which would work through the whole queue,
+/// isn't spawned until we decide to turn automatic downloads on.
 async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> {
     let mut conn = db::open(db_path)?;
     // Bind before anything else: a second copy of the app fails here instead
@@ -257,16 +286,28 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
             )
         })?;
     let (status, status_rx) = tokio::sync::watch::channel(web::SyncStatus::default());
+    // Made up front, so the folder is there to find before anything downloads.
+    let media_root = default_media()?;
+    std::fs::create_dir_all(&media_root)
+        .with_context(|| format!("creating {}", media_root.display()))?;
+    let pipeline = pipeline::Pipeline::start(
+        &[Platform::Youtube.name(), Platform::Tiktok.name()],
+        browser,
+        profile,
+        db_path,
+        &media_root,
+    );
     let web_conn = db::open(db_path)?;
     tokio::spawn(async move {
-        if let Err(e) = web::serve(listener, web_conn, status_rx).await {
+        if let Err(e) = web::serve(listener, web_conn, status_rx, pipeline).await {
             eprintln!("web: stopped: {e:#}");
         }
     });
     eprintln!(
-        "joyscroller: open http://{}, syncing into {} (Ctrl-C to stop)",
+        "joyscroller: open http://{}, syncing into {}, downloading into {} (Ctrl-C to stop)",
         web::ADDR,
-        db_path.display()
+        db_path.display(),
+        media_root.display()
     );
 
     // The first tick fires immediately. If a sync overruns the interval, wait a
@@ -303,9 +344,11 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
 
 /// Download queued media forever, one video at a time. Errors are logged and
 /// retried after a pause; like a failed sync, they never stop the app.
+/// Before it's spawned, it should hand videos to the pipeline rather than
+/// download them itself, so the two never download side by side.
 #[expect(
     dead_code,
-    reason = "the app doesn't start downloads until we decide how they're triggered"
+    reason = "automatic downloads stay off until we decide to turn them on"
 )]
 async fn download_loop(browser: Browser, profile: String, db_path: PathBuf, media_root: PathBuf) {
     // A separate connection from the syncs', so neither waits on the other
@@ -350,75 +393,31 @@ async fn download_batch(
     limit: usize,
 ) -> Result<usize> {
     let batch = db::pending_downloads(conn, limit)?;
-    // The login per platform, read once for this batch: the cookies, and a
-    // cookies.txt of them for yt-dlp.
-    let mut logins: HashMap<String, (Vec<browser::Cookie>, tempfile::NamedTempFile)> =
-        HashMap::new();
+    // The login per platform, read once for this batch.
+    let mut logins: HashMap<String, download::Credentials> = HashMap::new();
     let mut failures_in_a_row = 0;
     for item in &batch {
         let started = std::time::Instant::now();
-        let name = &item.platform;
         let result = async {
             if !logins.contains_key(&item.platform) {
-                let domain = match item.platform.as_str() {
-                    "youtube" => "youtube.com",
-                    "tiktok" => "tiktok.com",
-                    other => anyhow::bail!("can't download from platform {other}"),
-                };
-                let cookies = browser::cookies_for(browser, profile, domain).await?;
-                let file = tempfile::Builder::new().suffix(".txt").tempfile()?;
-                std::fs::write(file.path(), browser::to_netscape(&cookies))?;
-                logins.insert(item.platform.clone(), (cookies, file));
+                let credentials =
+                    download::Credentials::read(browser, profile, &item.platform).await?;
+                logins.insert(item.platform.clone(), credentials);
             }
-            let (cookies, file) = &logins[&item.platform];
-            let login = download::Login {
-                browser,
-                cookies,
-                cookies_txt: file.path(),
-            };
-            download::download(item, &login, media_root).await
+            let login = logins[&item.platform].login();
+            download::download(item, &login, media_root, &|_| {}).await
         }
         .await;
-        match result {
-            Ok(saved) => {
-                db::record_download(
-                    conn,
-                    &item.platform,
-                    &item.video_id,
-                    &db::Downloaded {
-                        dir: &saved.dir,
-                        files: &saved.files,
-                        bytes: saved.bytes,
-                        format: Some(&saved.format),
-                        info_json: saved.info_json.as_deref(),
-                        posted_at: saved.posted_at,
-                    },
-                )?;
-                #[expect(clippy::cast_precision_loss, reason = "a size for a log line")]
-                let megabytes = saved.bytes as f64 / 1e6;
-                eprintln!(
-                    "{name}: downloaded {} ({megabytes:.1} MB, format {}) in {}s",
-                    item.video_id,
-                    saved.format,
-                    started.elapsed().as_secs()
-                );
-                failures_in_a_row = 0;
-                tokio::time::sleep(DOWNLOAD_PAUSE).await;
+        pipeline::record(conn, item, &result, started.elapsed())?;
+        if result.is_ok() {
+            failures_in_a_row = 0;
+            tokio::time::sleep(DOWNLOAD_PAUSE).await;
+        } else {
+            failures_in_a_row += 1;
+            if failures_in_a_row == FAILURES_BEFORE_PAUSE {
+                anyhow::bail!("{failures_in_a_row} downloads failed in a row");
             }
-            Err(e) => {
-                db::record_download_failure(
-                    conn,
-                    &item.platform,
-                    &item.video_id,
-                    &format!("{e:#}"),
-                )?;
-                eprintln!("{name}: download of {} failed: {e:#}", item.video_id);
-                failures_in_a_row += 1;
-                if failures_in_a_row == FAILURES_BEFORE_PAUSE {
-                    anyhow::bail!("{failures_in_a_row} downloads failed in a row");
-                }
-                tokio::time::sleep(DOWNLOAD_FAILURE_PAUSE).await;
-            }
+            tokio::time::sleep(DOWNLOAD_FAILURE_PAUSE).await;
         }
     }
     Ok(batch.len())
