@@ -1,0 +1,32 @@
+# cargo-deny: `cargo deny check`. Reference: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# joyscroller is Linux-only for now; skip Windows/wasm-only dependencies.
+targets = ["x86_64-unknown-linux-gnu"]
+
+[advisories]
+# Unmaintained crates in the tree fail the check, not just vulnerable ones.
+unmaintained = "all"
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[licenses.private]
+# Our own crate has no license and isn't published.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -58,16 +58,21 @@ enum Command {
 const STOP_AFTER_KNOWN: usize = 100;
 
 /// How often the app pulls new likes while it's running.
-const SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const SYNC_EVERY: std::time::Duration = std::time::Duration::from_mins(5);
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        return run_app(Browser::Brave, "Default", &db::default_path()).await;
+        return run_app(Browser::Brave, "Default", &db::default_path()?).await;
     };
     match command {
-        Command::Cookies { browser, profile, domain, out } => {
+        Command::Cookies {
+            browser,
+            profile,
+            domain,
+            out,
+        } => {
             let cookies = browser::cookies_for(browser, &profile, &domain).await?;
             let txt = browser::to_netscape(&cookies);
             match out {
@@ -78,7 +83,11 @@ async fn main() -> Result<()> {
                 None => print!("{txt}"),
             }
         }
-        Command::Likes { browser, profile, limit } => {
+        Command::Likes {
+            browser,
+            profile,
+            limit,
+        } => {
             let cookies = browser::cookies_for(browser, &profile, "youtube.com").await?;
             eprintln!("extracted {} youtube.com cookies", cookies.len());
 
@@ -91,18 +100,28 @@ async fn main() -> Result<()> {
             for (i, v) in videos.iter().enumerate() {
                 let dur = v
                     .duration_seconds
-                    .map(|s| format!("{}:{:02}", s / 60, s % 60))
-                    .unwrap_or_else(|| "--:--".into());
+                    .map_or_else(|| "--:--".into(), |s| format!("{}:{:02}", s / 60, s % 60));
                 let channel = v.channel.as_deref().unwrap_or("?");
                 println!("{:>3}. [{dur}] {} — {}", i + 1, v.title, channel);
                 println!("     {}", v.url());
             }
         }
-        Command::Sync { browser, profile, db, full } => {
-            let db_path = db.unwrap_or_else(db::default_path);
+        Command::Sync {
+            browser,
+            profile,
+            db,
+            full,
+        } => {
+            let db_path = match db {
+                Some(path) => path,
+                None => db::default_path()?,
+            };
             let mut conn = db::open(&db_path)?;
             let (listed, added) = sync_youtube(browser, &profile, &mut conn, full).await?;
-            eprintln!("youtube: listed {listed}, added {added} new → {}", db_path.display());
+            eprintln!(
+                "youtube: listed {listed}, added {added} new → {}",
+                db_path.display()
+            );
         }
     }
     Ok(())
@@ -111,7 +130,10 @@ async fn main() -> Result<()> {
 /// The app: keeps running, syncing new likes every `SYNC_EVERY`.
 async fn run_app(browser: Browser, profile: &str, db_path: &std::path::Path) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    eprintln!("joyscroller: syncing into {} (Ctrl-C to stop)", db_path.display());
+    eprintln!(
+        "joyscroller: syncing into {} (Ctrl-C to stop)",
+        db_path.display()
+    );
 
     // The first tick fires immediately. If a sync overruns the interval, wait a
     // full interval after it rather than firing back-to-back.
@@ -158,7 +180,7 @@ async fn sync_youtube(
     })
     .await?;
 
-    let urls: Vec<String> = videos.iter().map(|v| v.url()).collect();
+    let urls: Vec<String> = videos.iter().map(youtube::Video::url).collect();
     let raws: Vec<String> = videos.iter().map(|v| v.raw.to_string()).collect();
     // yt-dlp lists newest first; insert oldest first so rowid follows like order.
     let rows: Vec<db::NewVideo> = videos

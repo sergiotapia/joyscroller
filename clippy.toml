@@ -1,0 +1,4 @@
+# Proper nouns that doc_markdown would otherwise want in backticks.
+doc-valid-idents = ["YouTube", "KWallet", ".."]
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

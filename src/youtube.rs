@@ -61,11 +61,15 @@ pub async fn liked_videos(
         cmd.arg("--playlist-end").arg(limit.to_string());
     }
     cmd.arg(LIKED_PLAYLIST);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
-    let mut child = cmd.spawn().context("failed to run yt-dlp; is it installed?")?;
+    let mut child = cmd
+        .spawn()
+        .context("failed to run yt-dlp; is it installed?")?;
     // Drain stderr concurrently so a chatty yt-dlp can't block on a full pipe.
-    let mut stderr_pipe = child.stderr.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().context("yt-dlp stderr not piped")?;
     let stderr_task = tokio::spawn(async move {
         let mut buf = String::new();
         let _ = stderr_pipe.read_to_string(&mut buf).await;
@@ -73,16 +77,27 @@ pub async fn liked_videos(
     });
 
     // yt-dlp emits one JSON object per line (JSON Lines), one per video.
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut lines = BufReader::new(child.stdout.take().context("yt-dlp stdout not piped")?).lines();
     let mut videos = Vec::new();
     let mut stopped = false;
     while let Some(line) = lines.next_line().await? {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-        let Some(id) = v.get("id").and_then(Value::as_str) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(id) = v.get("id").and_then(Value::as_str) else {
+            continue;
+        };
         let video = Video {
             id: id.to_string(),
-            title: v.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
-            channel_id: v.get("channel_id").and_then(Value::as_str).map(str::to_string),
+            title: v
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            channel_id: v
+                .get("channel_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             channel: v
                 .get("channel")
                 .or_else(|| v.get("uploader"))

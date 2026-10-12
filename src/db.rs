@@ -47,10 +47,10 @@ pub struct NewVideo<'a> {
 }
 
 /// `~/.local/share/joyscroller/joyscroller.db`
-pub fn default_path() -> PathBuf {
-    dirs::data_dir()
-        .expect("no XDG data dir")
-        .join("joyscroller/joyscroller.db")
+pub fn default_path() -> Result<PathBuf> {
+    Ok(dirs::data_dir()
+        .context("no XDG data dir")?
+        .join("joyscroller/joyscroller.db"))
 }
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {
@@ -62,8 +62,11 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Unix seconds. A clock set before 1970 reads as 0.
 pub fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs().cast_signed())
 }
 
 /// Record the start of a sync; returns its id for `finish_sync`.
@@ -78,7 +81,7 @@ pub fn start_sync(conn: &Connection, platform: &str) -> Result<i64> {
 pub fn finish_sync(conn: &Connection, sync_id: i64, added: usize) -> Result<()> {
     conn.execute(
         "UPDATE syncs SET finished_at = ?1, added = ?2 WHERE id = ?3",
-        params![now(), added as i64, sync_id],
+        params![now(), i64::try_from(added)?, sync_id],
     )?;
     Ok(())
 }
@@ -86,7 +89,9 @@ pub fn finish_sync(conn: &Connection, sync_id: i64, added: usize) -> Result<()> 
 /// Every video id already stored for `platform`.
 pub fn video_ids(conn: &Connection, platform: &str) -> Result<HashSet<String>> {
     let mut stmt = conn.prepare("SELECT video_id FROM videos WHERE platform = ?1")?;
-    let ids = stmt.query_map([platform], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let ids = stmt
+        .query_map([platform], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
 
@@ -114,7 +119,7 @@ pub fn insert_new(conn: &mut Connection, platform: &str, videos: &[NewVideo]) ->
                 v.title,
                 v.author_id,
                 v.author_name,
-                v.duration_seconds.map(|d| d as i64),
+                v.duration_seconds.map(i64::try_from).transpose()?,
                 v.available,
                 v.raw_json,
                 liked_at,
@@ -127,4 +132,72 @@ pub fn insert_new(conn: &mut Connection, platform: &str, videos: &[NewVideo]) ->
     }
     tx.commit()?;
     Ok(added)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn video(id: &str, available: bool) -> NewVideo<'_> {
+        NewVideo {
+            video_id: id,
+            url: "https://example.com",
+            title: available.then_some("title"),
+            author_id: None,
+            author_name: None,
+            duration_seconds: Some(60),
+            available,
+            raw_json: "{}",
+        }
+    }
+
+    fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn
+    }
+
+    #[test]
+    fn inserts_only_new_videos() {
+        let mut conn = memory_db();
+        assert_eq!(
+            insert_new(&mut conn, "youtube", &[video("a", true)]).unwrap(),
+            1
+        );
+        let added =
+            insert_new(&mut conn, "youtube", &[video("a", true), video("b", true)]).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(
+            video_ids(&conn, "youtube").unwrap(),
+            HashSet::from(["a".into(), "b".into()])
+        );
+        assert!(video_ids(&conn, "tiktok").unwrap().is_empty());
+    }
+
+    #[test]
+    fn refreshes_availability_but_keeps_title() {
+        let mut conn = memory_db();
+        insert_new(&mut conn, "youtube", &[video("a", true)]).unwrap();
+        insert_new(&mut conn, "youtube", &[video("a", false)]).unwrap();
+        let (title, available): (Option<String>, bool) = conn
+            .query_row(
+                "SELECT title, available FROM videos WHERE video_id = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title.as_deref(), Some("title"));
+        assert!(!available);
+    }
+
+    #[test]
+    fn records_sync_runs() {
+        let conn = memory_db();
+        let id = start_sync(&conn, "youtube").unwrap();
+        finish_sync(&conn, id, 3).unwrap();
+        let added: i64 = conn
+            .query_row("SELECT added FROM syncs WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(added, 3);
+    }
 }
