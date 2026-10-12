@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS videos (
     author_name      TEXT,
     duration_seconds INTEGER,
     available        INTEGER NOT NULL DEFAULT 1,  -- 0 = private or deleted on the platform
-    raw_json         TEXT NOT NULL,      -- full yt-dlp entry, as first seen
+    raw_json         TEXT NOT NULL,      -- full entry from yt-dlp or the platform's API, as first seen
     liked_at         INTEGER NOT NULL,   -- unix seconds: the sync that first found it
     PRIMARY KEY (platform, video_id)
 );

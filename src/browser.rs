@@ -37,6 +37,22 @@ impl Browser {
         }))
     }
 
+    /// The browser's program, found on `PATH` under its usual Linux names.
+    pub fn executable(self) -> Result<PathBuf> {
+        let names: &[&str] = match self {
+            Browser::Brave => &["brave", "brave-browser"],
+            Browser::Chrome => &["google-chrome-stable", "google-chrome"],
+            Browser::Chromium => &["chromium", "chromium-browser"],
+            Browser::Vivaldi => &["vivaldi-stable", "vivaldi"],
+            Browser::Edge => &["microsoft-edge-stable", "microsoft-edge"],
+        };
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| anyhow!("none of {names:?} is on PATH"))
+    }
+
     /// The `application` attribute Chromium stores its keyring secret under.
     fn keyring_application(self) -> &'static str {
         match self {
