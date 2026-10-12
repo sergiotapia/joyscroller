@@ -451,8 +451,13 @@ async fn run_yt_dlp(cmd: &mut Command, progress: &(dyn Fn(Progress) + Sync)) -> 
         let mut lines = BufReader::new(stdout).split(b'\n');
         while let Some(line) = lines.next_segment().await? {
             let line = String::from_utf8_lossy(&line);
-            if let Some(update) = parse_progress(&line) {
-                progress(update);
+            if line.starts_with(PROGRESS_MARK) {
+                // A file yt-dlp already has (TikTok's best video, when it
+                // has sound too, is also the best combined file) reports
+                // progress with no byte counts. It's still not a file line.
+                if let Some(update) = parse_progress(&line) {
+                    progress(update);
+                }
             } else {
                 printed.push_str(&line);
                 printed.push('\n');
