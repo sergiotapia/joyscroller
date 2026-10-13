@@ -266,7 +266,10 @@ media-fullscreen-button[data-fullscreen] .when-fullscreen { display: inline-flex
   background: #000;
   border-image: none;
 }
-.player:fullscreen .player-screen { width: 100%; height: 100%; border-radius: 0; }
+/* The screen's one grid cell is set to its size: left auto, the row grows
+   to fit the video at full width, and its height: 100% follows the row, so
+   a portrait video comes out taller than the screen and gets cropped. */
+.player:fullscreen .player-screen { grid-template: 100% / 100%; width: 100%; height: 100%; border-radius: 0; }
 .player:fullscreen .player-screen::before { display: none; }
 .player:fullscreen video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
 /* The strip, on a slab of its own (panel.webp: 72px tall, its ends 56px
