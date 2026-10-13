@@ -1,5 +1,7 @@
 # Joyscroller
 
+![Joyscroller's pages: the list of likes, a YouTube video playing, and a TikTok photo post's slideshow](docs/joyscroller.gif)
+
 ## What it is
 
 Joyscroller keeps a permanent copy of every video you've liked, so a like never disappears when the platform hides it, deletes it, or buries it in an endless feed. YouTube and TikTok work today, and Instagram is planned.
