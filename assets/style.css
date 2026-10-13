@@ -372,6 +372,9 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 .list .title a:hover { text-decoration: underline; }
 .list .num, .list .date { white-space: nowrap; }
 .list .num { text-align: right; font-variant-numeric: tabular-nums; }
+.list th a { display: block; color: inherit; text-decoration: none; }
+.list th a:hover { text-decoration: underline; }
+.list th[aria-sort] { background: linear-gradient(#f3f1e7, #e2ded0 80%, #d6d2c2); }
 .list .thumb img, .list .nothumb {
   width: 96px;
   height: 54px;
@@ -560,6 +563,19 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   border-left: 1px solid #092e8e;
   box-shadow: inset 1px 0 1px #18bbff;
 }
+
+/* ---- The search box ------------------------------------------------------ */
+
+.search { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 12px; }
+.search input[type="search"] {
+  flex: 1 1 240px;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid #7f9db9;
+  background: #fff;
+  font: 12px var(--font-ui);
+}
+.search input[type="search"]:focus { outline: 1px solid var(--select); outline-offset: -2px; }
 
 /* ---- Small screens ----------------------------------------------------- */
 

@@ -16,6 +16,7 @@ dirs = "7.0.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 liblzma = { version = "0.4.8", features = ["static"] }
 pbkdf2 = "0.13.0"
+regex = "1.13.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 secret-service = { version = "5.2.0", features = ["rt-tokio-crypto-rust"] }
 serde = { version = "1.0.229", features = ["derive"] }

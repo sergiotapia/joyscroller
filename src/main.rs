@@ -6,6 +6,7 @@ mod headless;
 mod instagram;
 mod pipeline;
 mod player;
+mod query;
 mod tiktok;
 mod tools;
 mod web;

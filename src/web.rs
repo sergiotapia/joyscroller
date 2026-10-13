@@ -1,5 +1,6 @@
 //! The localhost web UI: plain server-rendered HTML. The list page pages
-//! through the liked videos, newest first, on all platforms or one; each video
+//! through the liked videos, newest first, on all platforms or one, sorted by
+//! any column or narrowed by a search, all kept in the URL; each video
 //! has its own page, with a button that has the download pipeline download it
 //! right away, and `/downloading` shows what the pipeline is doing. Every open page
 //! keeps a Server-Sent Events connection, over which newly stored videos, the
@@ -324,6 +325,154 @@ fn not_found() -> Failure {
 struct ListQuery {
     platform: Option<String>,
     page: Option<usize>,
+    q: Option<String>,
+    sort: Option<String>,
+    dir: Option<String>,
+}
+
+/// The column sorts, as (sort, its `sort=` key in the URL, the direction a
+/// first click picks): text A to Z, numbers and dates biggest and newest
+/// first. Anything else in the URL is ignored, never passed on.
+const SORTS: [(db::Sort, &str, db::Dir); 6] = [
+    (db::Sort::Best, "best", db::Dir::Asc),
+    (db::Sort::Title, "title", db::Dir::Asc),
+    (db::Sort::Author, "author", db::Dir::Asc),
+    (db::Sort::Length, "duration", db::Dir::Desc),
+    (db::Sort::Posted, "posted", db::Dir::Desc),
+    (db::Sort::Added, "added", db::Dir::Desc),
+];
+
+/// What the list page shows: one platform or all, the search, the order and
+/// the page. All of it lives in the URL, so paging, the platform links and
+/// the back button keep it, without JavaScript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListView<'a> {
+    platform: Option<&'a str>,
+    /// The search as typed, trimmed; empty for none.
+    q: String,
+    order: db::Order,
+    page: usize,
+}
+
+impl<'a> ListView<'a> {
+    /// The list as the sidebar links to it: everything, newest first.
+    fn plain(platform: Option<&'a str>, page: usize) -> Self {
+        ListView {
+            platform,
+            q: String::new(),
+            order: db::Order::NEWEST,
+            page,
+        }
+    }
+
+    fn from_query(platform: Option<&'a str>, query: &ListQuery) -> Self {
+        let mut view = ListView::plain(platform, query.page.unwrap_or(1).max(1));
+        view.q = query.q.as_deref().unwrap_or_default().trim().into();
+        let sort = SORTS
+            .iter()
+            .find(|(_, key, _)| query.sort.as_deref() == Some(*key));
+        view.order = match sort {
+            // Best match without a search means nothing; the default stands.
+            Some((db::Sort::Best, _, _)) | None => view.default_order(),
+            Some(&(sort, _, first)) => db::Order {
+                sort,
+                dir: match query.dir.as_deref() {
+                    Some("asc") => db::Dir::Asc,
+                    Some("desc") => db::Dir::Desc,
+                    _ => first,
+                },
+            },
+        };
+        view
+    }
+
+    fn searching(&self) -> bool {
+        !self.q.is_empty()
+    }
+
+    /// Best match while searching, newest first otherwise.
+    fn default_order(&self) -> db::Order {
+        if self.searching() {
+            db::Order {
+                sort: db::Sort::Best,
+                dir: db::Dir::Asc,
+            }
+        } else {
+            db::Order::NEWEST
+        }
+    }
+
+    /// Whether newly synced likes belong at the top of this page: only the
+    /// first page of the list in like order, newest first, unsearched.
+    fn live(&self) -> bool {
+        self.page == 1 && !self.searching() && self.order == db::Order::NEWEST
+    }
+
+    /// The same list on another page.
+    fn at(&self, page: usize) -> Self {
+        ListView {
+            page,
+            ..self.clone()
+        }
+    }
+
+    /// The same list in another order, from its first page.
+    fn ordered(&self, order: db::Order) -> Self {
+        ListView {
+            order,
+            page: 1,
+            ..self.clone()
+        }
+    }
+
+    /// The URL that shows this list, escaped for an attribute.
+    fn href(&self) -> String {
+        let mut params = Vec::new();
+        if let Some(name) = self.platform {
+            params.push(format!("platform={}", url_encode(name)));
+        }
+        if self.searching() {
+            params.push(format!("q={}", url_encode(&self.q)));
+        }
+        if self.order != self.default_order() {
+            let key = SORTS
+                .iter()
+                .find(|(sort, _, _)| *sort == self.order.sort)
+                .map_or("added", |(_, key, _)| key);
+            params.push(format!("sort={key}"));
+            if self.order.sort != db::Sort::Best {
+                params.push(format!("dir={}", dir_key(self.order.dir)));
+            }
+        }
+        if self.page > 1 {
+            params.push(format!("page={}", self.page));
+        }
+        if params.is_empty() {
+            "/".into()
+        } else {
+            escape(&format!("/?{}", params.join("&")))
+        }
+    }
+}
+
+fn dir_key(dir: db::Dir) -> &'static str {
+    match dir {
+        db::Dir::Asc => "asc",
+        db::Dir::Desc => "desc",
+    }
+}
+
+/// Percent-encodes everything but the characters a URL never needs encoded.
+fn url_encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
 }
 
 async fn list_page(
@@ -340,67 +489,175 @@ async fn list_page(
                 .0,
         ),
     };
-    let page = query.page.unwrap_or(1).max(1);
-    let offset = (page - 1).saturating_mul(PAGE_SIZE);
-    let (videos, counts, after) = app.db(|conn| {
-        Ok((
-            db::videos_page(conn, platform, PAGE_SIZE, offset)?,
-            db::video_counts(conn)?,
-            db::last_rowid(conn)?,
-        ))
+    let view = ListView::from_query(platform, &query);
+    let search = crate::query::parse(&view.q);
+    // A search with nothing searchable in it ("*", "-") finds nothing,
+    // rather than everything.
+    let nothing = view.searching() && search.is_empty();
+    let offset = (view.page - 1).saturating_mul(PAGE_SIZE);
+    let (videos, found, counts, after) = app.db(|conn| {
+        let counts = db::video_counts(conn)?;
+        let (videos, found) = if nothing {
+            (Vec::new(), 0)
+        } else {
+            (
+                db::videos_page(conn, platform, &search, view.order, PAGE_SIZE, offset)?,
+                if view.searching() {
+                    db::videos_count(conn, platform, &search)?
+                } else {
+                    count_of(&counts, platform)
+                },
+            )
+        };
+        Ok((videos, found, counts, db::last_rowid(conn)?))
     })?;
     let status = app.status.borrow().clone();
     let board = app.pipeline.board();
-    let pages = count_of(&counts, platform).div_ceil(PAGE_SIZE).max(1);
+    let pages = found.div_ceil(PAGE_SIZE).max(1);
 
     let heading = match platform {
         Some(name) => format!("{} likes", display_name(name)),
         None => "All likes".into(),
     };
-    let pager = pager(platform, page, pages);
-    let mut main = format!(
+    let pager = pager(&view, pages);
+    let main = format!(
         "<p id=\"new\" class=\"balloon\" hidden><a href=\"{}\"><span id=\"new-count\">0</span> new likes — show them</a></p>\n\
-         {pager}",
-        list_href(platform, 1)
+         {}{pager}{}{pager}",
+        list_href(platform, 1),
+        search_html(&view),
+        table_html(&view, &videos),
     );
-    main.push_str(
-        "<table class=\"list\">\n<thead><tr><th></th><th>Title</th><th class=\"author\">Author</th>\
-         <th class=\"num\">Length</th><th class=\"date\">Posted</th><th class=\"date\">Added</th>\
-         <th class=\"source\">Source</th></tr></thead>\n<tbody id=\"videos\">\n",
-    );
-    for video in &videos {
-        main.push_str(&video_row(video));
-        main.push('\n');
-    }
-    main.push_str("</tbody>\n</table>\n");
-    if videos.is_empty() {
-        main.push_str(if page > 1 {
-            "<p id=\"empty\" class=\"empty\">Nothing on this page.</p>\n"
-        } else {
-            "<p id=\"empty\" class=\"empty\">No liked videos yet. \
-             They show up here as each sync finishes.</p>\n"
-        });
-    }
-    main.push_str(&pager);
 
+    // A search's count is of that search, which a new like may not be in, so
+    // the live updates leave it alone.
+    let footer = if view.searching() {
+        format!(
+            "{} {} for “{}”",
+            thousands(found),
+            if found == 1 { "match" } else { "matches" },
+            escape(&view.q)
+        )
+    } else {
+        format!(
+            "<span data-count=\"{}\">{}</span> likes",
+            platform.unwrap_or("all"),
+            found
+        )
+    };
     Ok(Html(layout(
         &Frame {
             title: &heading,
             current: Section::Likes(platform),
+            list: Some(&view),
             status: &status,
             counts: &counts,
             board: &board,
-            footer: format!(
-                "<span data-count=\"{}\">{}</span> likes",
-                platform.unwrap_or("all"),
-                count_of(&counts, platform)
-            ),
+            footer,
             after,
-            live: page == 1,
+            live: view.live(),
             player: false,
         },
         &main,
     )))
+}
+
+/// The list's table, with a line saying why when it's empty.
+fn table_html(view: &ListView, videos: &[db::StoredVideo]) -> String {
+    let rows: String = videos.iter().map(|video| video_row(video) + "\n").collect();
+    let empty = if !videos.is_empty() {
+        String::new()
+    } else if view.page > 1 {
+        "<p id=\"empty\" class=\"empty\">Nothing on this page.</p>\n".into()
+    } else if view.searching() {
+        format!(
+            "<p id=\"empty\" class=\"empty\">No likes match “{}”.</p>\n",
+            escape(&view.q)
+        )
+    } else {
+        "<p id=\"empty\" class=\"empty\">No liked videos yet. \
+         They show up here as each sync finishes.</p>\n"
+            .into()
+    };
+    format!(
+        "<table class=\"list\">\n<thead><tr><th></th>{}{}{}{}{}\
+         <th class=\"source\">Source</th></tr></thead>\n<tbody id=\"videos\">\n{rows}</tbody>\n</table>\n{empty}",
+        sort_header(view, db::Sort::Title, "Title", ""),
+        sort_header(view, db::Sort::Author, "Author", "author"),
+        sort_header(view, db::Sort::Length, "Length", "num"),
+        sort_header(view, db::Sort::Posted, "Posted", "date"),
+        sort_header(view, db::Sort::Added, "Added", "date"),
+    )
+}
+
+/// The search box: a plain GET form that keeps the platform. A new search
+/// starts at its best matches. While searching, it offers to go back to best
+/// match after a column sort, and to clear the search.
+fn search_html(view: &ListView) -> String {
+    let platform = view.platform.map_or(String::new(), |name| {
+        format!(
+            "<input type=\"hidden\" name=\"platform\" value=\"{}\">",
+            escape(name)
+        )
+    });
+    let mut extra = Vec::new();
+    if view.searching() {
+        if view.order.sort != db::Sort::Best {
+            extra.push(format!(
+                "<a class=\"button\" href=\"{}\">Best match</a>",
+                view.ordered(view.default_order()).href()
+            ));
+        }
+        let cleared = ListView {
+            q: String::new(),
+            ..view.at(1)
+        };
+        let cleared = if view.order.sort == db::Sort::Best {
+            cleared.ordered(db::Order::NEWEST)
+        } else {
+            cleared
+        };
+        extra.push(format!(
+            "<a class=\"button\" href=\"{}\">Clear</a>",
+            cleared.href()
+        ));
+    }
+    let extra = extra.concat();
+    format!(
+        "<form class=\"search\" method=\"get\" action=\"/\" role=\"search\">\
+         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search titles, descriptions, authors\" \
+         aria-label=\"Search likes\">{platform}\
+         <button class=\"button\" type=\"submit\">Search</button>{extra}</form>\n",
+        escape(&view.q),
+    )
+}
+
+/// A column header that sorts the list by `sort`: by it, or the other way
+/// if it already does, with an arrow on the current one.
+fn sort_header(view: &ListView, sort: db::Sort, label: &str, class: &str) -> String {
+    let first = SORTS
+        .iter()
+        .find(|(s, _, _)| *s == sort)
+        .map_or(db::Dir::Desc, |(_, _, first)| *first);
+    let current = view.order.sort == sort;
+    let dir = match (current, view.order.dir) {
+        (true, db::Dir::Asc) => db::Dir::Desc,
+        (true, db::Dir::Desc) => db::Dir::Asc,
+        (false, _) => first,
+    };
+    let (aria, arrow) = match (current, view.order.dir) {
+        (false, _) => (String::new(), ""),
+        (true, db::Dir::Asc) => (" aria-sort=\"ascending\"".into(), " ▲"),
+        (true, db::Dir::Desc) => (" aria-sort=\"descending\"".into(), " ▼"),
+    };
+    let class = if class.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"{class}\"")
+    };
+    format!(
+        "<th{class}{aria}><a href=\"{}\">{label}{arrow}</a></th>",
+        view.ordered(db::Order { sort, dir }).href()
+    )
 }
 
 async fn video_page(
@@ -466,6 +723,7 @@ async fn video_page(
         &Frame {
             title: &title,
             current: Section::Likes(Some(&video.platform)),
+            list: None,
             status: &status,
             counts: &counts,
             board: &board,
@@ -634,6 +892,7 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
         &Frame {
             title: "Downloading",
             current: Section::Downloading,
+            list: None,
             status: &status,
             counts: &counts,
             board: &board,
@@ -744,6 +1003,8 @@ enum Section<'a> {
 struct Frame<'a> {
     title: &'a str,
     current: Section<'a>,
+    /// On the list page, what it shows, which the platform links keep.
+    list: Option<&'a ListView<'a>>,
     status: &'a SyncStatus,
     counts: &'a [(String, usize)],
     board: &'a Board,
@@ -780,7 +1041,16 @@ fn nav_entries(frame: &Frame) -> Vec<NavEntry> {
         .chain(PLATFORMS.map(|(name, label)| (Some(name), label)))
         .map(|(name, label)| NavEntry {
             section: Section::Likes(name),
-            href: list_href(name, 1),
+            href: frame.list.map_or_else(
+                || list_href(name, 1),
+                |view| {
+                    ListView {
+                        platform: name,
+                        ..view.at(1)
+                    }
+                    .href()
+                },
+            ),
             label,
             count_name: name.unwrap_or("all"),
             count: count_of(frame.counts, name),
@@ -1169,43 +1439,39 @@ fn count_of(counts: &[(String, usize)], platform: Option<&str>) -> usize {
 }
 
 /// The pager line: where we are, and links to the neighboring pages.
-fn pager(platform: Option<&str>, page: usize, pages: usize) -> String {
-    let newer = if page > 1 {
+fn pager(view: &ListView, pages: usize) -> String {
+    // "Newer" and "Older" only say where a page goes in like order.
+    let (back, forward) = if view.order == db::Order::NEWEST {
+        ("← Newer", "Older →")
+    } else {
+        ("← Previous", "Next →")
+    };
+    let back = if view.page > 1 {
         format!(
-            "<a class=\"button\" href=\"{}\">← Newer</a>",
-            list_href(platform, page - 1)
+            "<a class=\"button\" href=\"{}\">{back}</a>",
+            view.at(view.page - 1).href()
         )
     } else {
         String::new()
     };
-    let older = if page < pages {
+    let forward = if view.page < pages {
         format!(
-            "<a class=\"button\" href=\"{}\">Older →</a>",
-            list_href(platform, page + 1)
+            "<a class=\"button\" href=\"{}\">{forward}</a>",
+            view.at(view.page + 1).href()
         )
     } else {
         String::new()
     };
     format!(
-        "<nav class=\"pager\"><span class=\"where\">Page {} of {}</span>{newer}{older}</nav>\n",
-        thousands(page),
+        "<nav class=\"pager\"><span class=\"where\">Page {} of {}</span>{back}{forward}</nav>\n",
+        thousands(view.page),
         thousands(pages)
     )
 }
 
+/// The list as the sidebar links to it, on `page`.
 fn list_href(platform: Option<&str>, page: usize) -> String {
-    let mut params = Vec::new();
-    if let Some(name) = platform {
-        params.push(format!("platform={name}"));
-    }
-    if page > 1 {
-        params.push(format!("page={page}"));
-    }
-    if params.is_empty() {
-        "/".into()
-    } else {
-        format!("/?{}", params.join("&amp;"))
-    }
+    ListView::plain(platform, page).href()
 }
 
 fn video_href(video: &db::StoredVideo) -> String {
@@ -1677,10 +1943,97 @@ mod tests {
         assert_eq!(list_href(None, 2), "/?page=2");
         assert_eq!(list_href(Some("tiktok"), 1), "/?platform=tiktok");
         assert_eq!(list_href(Some("tiktok"), 3), "/?platform=tiktok&amp;page=3");
-        let first = pager(None, 1, 3);
+        let first = pager(&ListView::plain(None, 1), 3);
         assert!(!first.contains("Newer") && first.contains("Older"));
-        let last = pager(None, 3, 3);
+        let last = pager(&ListView::plain(None, 3), 3);
         assert!(last.contains("Newer") && !last.contains("Older"));
+    }
+
+    fn list_query(q: Option<&str>, sort: Option<&str>, dir: Option<&str>) -> ListQuery {
+        ListQuery {
+            platform: None,
+            page: Some(2),
+            q: q.map(Into::into),
+            sort: sort.map(Into::into),
+            dir: dir.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn sort_and_search_live_in_the_url() {
+        let view = ListView::from_query(
+            Some("tiktok"),
+            &list_query(Some(" cat & dog "), Some("duration"), Some("asc")),
+        );
+        assert_eq!(view.q, "cat & dog");
+        assert_eq!(
+            view.order,
+            db::Order {
+                sort: db::Sort::Length,
+                dir: db::Dir::Asc
+            }
+        );
+        assert_eq!(
+            view.href(),
+            "/?platform=tiktok&amp;q=cat%20%26%20dog&amp;sort=duration&amp;dir=asc&amp;page=2"
+        );
+        assert!(!view.live());
+        // Paging keeps everything else.
+        let next = pager(&view, 5);
+        assert!(next.contains("sort=duration&amp;dir=asc&amp;page=3"));
+        assert!(next.contains("Next →") && !next.contains("Older"));
+    }
+
+    #[test]
+    fn a_search_defaults_to_best_match() {
+        let view = ListView::from_query(None, &list_query(Some("cat"), None, None));
+        assert_eq!(view.order.sort, db::Sort::Best);
+        assert_eq!(view.at(1).href(), "/?q=cat");
+        // Without a search, best match means nothing, and so does junk.
+        for sort in [Some("best"), Some("rowid; DROP TABLE videos"), None] {
+            let view = ListView::from_query(None, &list_query(None, sort, Some("up")));
+            assert_eq!(view.order, db::Order::NEWEST, "for {sort:?}");
+            assert_eq!(view.at(1).href(), "/");
+        }
+        let view = ListView::from_query(None, &list_query(None, Some("added"), Some("desc")));
+        assert!(view.at(1).live());
+    }
+
+    #[test]
+    fn headers_sort_and_flip() {
+        let view = ListView::plain(None, 4);
+        // A first click picks the column's own direction, from page 1.
+        assert!(
+            sort_header(&view, db::Sort::Title, "Title", "")
+                .contains("href=\"/?sort=title&amp;dir=asc\"")
+        );
+        assert!(
+            sort_header(&view, db::Sort::Length, "Length", "num")
+                .contains("href=\"/?sort=duration&amp;dir=desc\"")
+        );
+        // The current one shows its arrow, and flips.
+        let added = sort_header(&view, db::Sort::Added, "Added", "date");
+        assert!(added.contains("aria-sort=\"descending\"") && added.contains("Added ▼"));
+        assert!(added.contains("href=\"/?sort=added&amp;dir=asc\""));
+        let title = ListView::from_query(None, &list_query(None, Some("title"), None));
+        assert!(
+            sort_header(&title, db::Sort::Title, "Title", "")
+                .contains("href=\"/?sort=title&amp;dir=desc\"")
+        );
+    }
+
+    #[test]
+    fn the_search_form_keeps_the_platform() {
+        let mut view = ListView::plain(Some("youtube"), 1);
+        view.q = "\"piano\" -cat".into();
+        view.order = view.default_order();
+        let form = search_html(&view);
+        assert!(form.contains("value=\"&quot;piano&quot; -cat\""));
+        assert!(form.contains("name=\"platform\" value=\"youtube\""));
+        assert!(form.contains("href=\"/?platform=youtube\">Clear"));
+        assert!(!form.contains("Best match"));
+        let sorted = view.ordered(db::Order::NEWEST);
+        assert!(search_html(&sorted).contains(">Best match"));
     }
 
     #[test]
@@ -1884,6 +2237,7 @@ mod tests {
             &Frame {
                 title: "t",
                 current: Section::Downloading,
+                list: None,
                 status: &SyncStatus::default(),
                 counts: &[],
                 board: &Board::default(),
