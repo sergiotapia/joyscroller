@@ -1,5 +1,5 @@
-//! The download pipeline. Every platform has a lane that works through its
-//! backlog on its own: each liked video that isn't downloaded yet, newest
+//! The download pipeline. Every platform can have a lane (off for now, see
+//! `AUTOMATIC`) that works through its backlog on its own: each liked video that isn't downloaded yet, newest
 //! first, one at a time, pausing between videos (`pace`) so a backlog of
 //! thousands doesn't look like a bot to the platform. A video someone asks
 //! for in the UI doesn't wait for its lane: it downloads right away, on a
@@ -23,6 +23,11 @@ use tokio::sync::watch;
 use crate::browser::Browser;
 use crate::db::{self, PendingDownload};
 use crate::download::{self, Credentials, Progress, Saved};
+
+/// Whether the lanes download the backlog. Off for now: videos download only
+/// when asked for in the UI. Turning it on starts downloading every liked
+/// video, thousands of them, with the user's logins.
+const AUTOMATIC: bool = false;
 
 /// The pause between a lane's videos, as the shortest and longest: a random
 /// length in between, so the requests don't come at a machine's regular beat.
@@ -228,8 +233,9 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// Start a lane for each of `platforms`. Call it before anything else
-    /// downloads: it clears what interrupted downloads left behind.
+    /// Start a lane for each of `platforms`, if `AUTOMATIC`. Call it before
+    /// anything else downloads: it clears what interrupted downloads left
+    /// behind.
     pub fn start(
         platforms: &[&'static str],
         browser: Browser,
@@ -242,6 +248,7 @@ impl Pipeline {
         }
         let pipeline = Pipeline::new(
             platforms,
+            AUTOMATIC,
             Shared {
                 browser,
                 profile: profile.to_owned(),
@@ -250,25 +257,30 @@ impl Pipeline {
                 board: watch::Sender::new(Board::default()),
             },
         );
-        for &platform in platforms {
-            tokio::spawn(run_lane(platform, Arc::clone(&pipeline.shared)));
+        if AUTOMATIC {
+            for &platform in platforms {
+                tokio::spawn(run_lane(platform, Arc::clone(&pipeline.shared)));
+            }
         }
         pipeline
     }
 
-    /// A pipeline with an empty lane on the board for each platform, but
-    /// nothing running yet.
-    fn new(platforms: &[&'static str], shared: Shared) -> Pipeline {
-        shared.board.send_modify(|board| {
-            board.lanes = platforms
-                .iter()
-                .map(|&platform| Lane {
-                    platform,
-                    left: None,
-                    waiting: None,
-                })
-                .collect();
-        });
+    /// A pipeline for `platforms`, with nothing running yet. With `lanes`,
+    /// the board has an empty lane for each; without, none, so the UI says
+    /// automatic downloads are off.
+    fn new(platforms: &[&'static str], lanes: bool, shared: Shared) -> Pipeline {
+        if lanes {
+            shared.board.send_modify(|board| {
+                board.lanes = platforms
+                    .iter()
+                    .map(|&platform| Lane {
+                        platform,
+                        left: None,
+                        waiting: None,
+                    })
+                    .collect();
+            });
+        }
         Pipeline {
             platforms: platforms.to_vec(),
             shared: Arc::new(shared),
@@ -535,6 +547,7 @@ mod tests {
     fn pipeline() -> Pipeline {
         Pipeline::new(
             &["youtube", "tiktok"],
+            true,
             Shared {
                 browser: Browser::Brave,
                 profile: "Default".into(),

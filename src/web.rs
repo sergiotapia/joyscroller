@@ -364,12 +364,17 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
     let (counts, after) = app.db(|conn| Ok((db::video_counts(conn)?, db::last_rowid(conn)?)))?;
     let status = app.status.borrow().clone();
     let board = app.pipeline.board();
-    let main = format!(
-        "<h1>Downloading</h1>\n\
-         <p>YouTube and TikTok each have a lane that downloads every liked video \
+    let about = if board.lanes.is_empty() {
+        "Videos download when you click Download now on their page, right away, \
+         several at a time if you like."
+    } else {
+        "YouTube and TikTok each have a lane that downloads every liked video \
          not downloaded yet, newest first, one at a time: YouTube waits 30 seconds \
          between videos, TikTok 15 to 30. A video's Download now button downloads it \
-         right away, alongside the lanes.</p>\n\
+         right away, alongside the lanes."
+    };
+    let main = format!(
+        "<h1>Downloading</h1>\n<p>{about}</p>\n\
          <div id=\"downloads\">\n{}</div>\n",
         board_html(&board)
     );
@@ -864,7 +869,7 @@ fn board_html(board: &Board) -> String {
             escape(&truncate(&job.title, 120))
         )
     };
-    let lanes = board
+    let lanes: String = board
         .lanes
         .iter()
         .map(|lane| match board.lane_download(lane.platform) {
@@ -881,8 +886,12 @@ fn board_html(board: &Board) -> String {
                 left_html(lane)
             ),
         })
-        .collect::<Vec<_>>()
-        .concat();
+        .collect();
+    let lanes = if lanes.is_empty() {
+        "<p>Automatic downloads are off.</p>\n".into()
+    } else {
+        format!("<ul>\n{lanes}</ul>\n")
+    };
     let requested: Vec<String> = board
         .active
         .iter()
@@ -923,7 +932,7 @@ fn board_html(board: &Board) -> String {
         format!("<ul>\n{items}</ul>\n")
     };
     format!(
-        "<h2>Lanes</h2>\n<ul>\n{lanes}</ul>\n\
+        "<h2>Lanes</h2>\n{lanes}\
          <h2>Requested</h2>\n{requested}\
          <h2>Finished</h2>\n{finished}"
     )
@@ -1310,6 +1319,7 @@ mod tests {
             },
         });
         let html = board_html(&board);
+        assert!(html.contains("Automatic downloads are off."));
         assert!(html.contains("Nothing right now."));
         let downloaded = html.find("downloaded 12.3 MB in 1:15").unwrap();
         let failed = html.find("failed: bad thing").unwrap();
