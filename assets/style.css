@@ -405,6 +405,7 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 }
 .badge-youtube { background: #e62117; }
 .badge-tiktok { background: #111; box-shadow: -1px 0 #25f4ee, 1px 0 #fe2c55; }
+.badge-instagram { background: linear-gradient(45deg, #fa7e1e, #d62976 45%, #962fbf 75%, #4f5bd5); }
 
 /* ---- A video's page ---------------------------------------------------- */
 

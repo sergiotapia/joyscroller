@@ -4,9 +4,10 @@ light (radio.py), all facing the camera:
 - splat.png: the top bar's orange splat, a soft molded badge on the outline
   splat.svg has (a little fuller), with its two droplets, a little in front of the bar so it
   casts a shadow on it. The lettering stays live text on the page.
-- icon-likes, icon-youtube, icon-tiktok, icon-downloading (.png): the
-  section icons. A pink heart, a red play tile, a black tile with TikTok's
-  offset note, and a green download button.
+- icon-likes, icon-youtube, icon-tiktok, icon-instagram, icon-downloading
+  (.png): the section icons. A pink heart, a red play tile, a black tile
+  with TikTok's offset note, Instagram's gradient tile with its camera, and
+  a green download button.
 
     blender -b -P assets/blender/badges.py -- /tmp/r [samples]
     for f in /tmp/r/*.png; do cwebp -q 90 -alpha_q 100 -m 6 $f -o assets/$(basename ${f%.png}).webp; done
@@ -93,6 +94,45 @@ M = {
     "rose": plastic("rose", "#fe2c55", rough=0.3, coat=0.4),
     "green": plastic("green", "#3aa52c", rough=0.22, coat=0.6, sss=0.15),
 }
+
+
+def gradient_plastic(name, stops, origin, reach):
+    """plastic() whose color runs through `stops` (position, hex) with the
+    distance from `origin` (x, z), over `reach`: Instagram's glow, which
+    starts yellow at the tile's lower left corner."""
+    m = plastic(name, stops[0][1], rough=0.25, coat=0.6)
+    nt = m.node_tree
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+    flat = nt.nodes.new("ShaderNodeCombineXYZ")
+    dist = nt.nodes.new("ShaderNodeVectorMath")
+    dist.operation = "DISTANCE"
+    dist.inputs[1].default_value = (origin[0], origin[1], 0)
+    scale = nt.nodes.new("ShaderNodeMath")
+    scale.operation = "DIVIDE"
+    scale.inputs[1].default_value = reach
+    ramp = nt.nodes.new("ShaderNodeValToRGB")
+    elements = ramp.color_ramp.elements
+    elements[0].position, elements[0].color = stops[0][0], (*lin(stops[0][1]), 1)
+    elements[1].position, elements[1].color = stops[-1][0], (*lin(stops[-1][1]), 1)
+    for pos, color in stops[1:-1]:
+        elements.new(pos).color = (*lin(color), 1)
+    nt.links.new(tc.outputs["Object"], sep.inputs["Vector"])
+    nt.links.new(sep.outputs["X"], flat.inputs["X"])
+    nt.links.new(sep.outputs["Z"], flat.inputs["Y"])
+    nt.links.new(flat.outputs["Vector"], dist.inputs[0])
+    nt.links.new(dist.outputs["Value"], scale.inputs[0])
+    nt.links.new(scale.outputs["Value"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], nt.nodes["Principled BSDF"].inputs["Base Color"])
+    return m
+
+
+M["instagram"] = gradient_plastic(
+    "instagram",
+    [(0.08, "#feda75"), (0.3, "#fa7e1e"), (0.55, "#d62976"), (0.8, "#962fbf"), (1.0, "#4f5bd5")],
+    (-1.35, -1.55),
+    4.6,
+)
 
 
 def link(ob, group):
@@ -323,6 +363,15 @@ note(-0.09, 0.09, -0.62, M["cyan"], "cyan")
 note(0.09, -0.09, -0.66, M["rose"], "rose")
 note(0, 0, -0.78, M["white"], "white")
 
+INSTAGRAM = group("instagram")
+pillow("tile", rrect(0, 0, 3.7, 3.7, 1.05), 0.55, 0.5, 0.06, M["instagram"], INSTAGRAM)
+# The camera, in white rods: a rounded square, the lens ring, the flash.
+body = rrect(0, 0, 2.3, 2.3, 0.62, seg=10)
+stroke("camera", [(x, -0.74, z) for x, z in body + body[:1]], 0.17, M["white"], INSTAGRAM)
+lens = [(0.55 * math.cos(2 * math.pi * k / 48), -0.74, 0.55 * math.sin(2 * math.pi * k / 48)) for k in range(49)]
+stroke("lens", lens, 0.17, M["white"], INSTAGRAM)
+ball("flash", (0.6, -0.74, 0.6), 0.16, M["white"], INSTAGRAM)
+
 DOWNLOAD = group("downloading")
 circle = [(1.95 * math.cos(2 * math.pi * k / 160), 1.95 * math.sin(2 * math.pi * k / 160)) for k in range(160)]
 pillow("button", circle, 0.75, 1.3, 0.06, M["green"], DOWNLOAD)
@@ -432,5 +481,5 @@ img.filepath_raw = out
 img.file_format = "PNG"
 img.save()
 
-for g in (LIKES, YOUTUBE, TIKTOK, DOWNLOAD):
+for g in (LIKES, YOUTUBE, TIKTOK, INSTAGRAM, DOWNLOAD):
     render(g, f"icon-{g.name}", 160, 160, 4.2, exposure=-0.15)

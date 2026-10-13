@@ -33,7 +33,15 @@ pub const ADDR: &str = "127.0.0.1:4774";
 const PAGE_SIZE: usize = 50;
 
 /// The sidebar's platforms, as (stored name, display name).
-const PLATFORMS: [(&str, &str); 2] = [("youtube", "YouTube"), ("tiktok", "TikTok")];
+const PLATFORMS: [(&str, &str); 3] = [
+    ("youtube", "YouTube"),
+    ("tiktok", "TikTok"),
+    ("instagram", "Instagram"),
+];
+
+/// Platforms the UI already lists but the app can't sync yet: their sync
+/// line says so instead of waiting for a sync that never comes.
+const COMING_SOON: [&str; 1] = ["instagram"];
 
 fn display_name(platform: &str) -> &str {
     PLATFORMS
@@ -116,7 +124,7 @@ pub async fn serve(
 
 /// The stylesheet, fonts and pictures, as (name, type, contents). They're
 /// built into the executable, so the app stays a single file.
-const ASSETS: [(&str, &str, &[u8]); 13] = [
+const ASSETS: [(&str, &str, &[u8]); 14] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -151,6 +159,11 @@ const ASSETS: [(&str, &str, &[u8]); 13] = [
         "icon-tiktok.webp",
         "image/webp",
         include_bytes!("../assets/icon-tiktok.webp"),
+    ),
+    (
+        "icon-instagram.webp",
+        "image/webp",
+        include_bytes!("../assets/icon-instagram.webp"),
     ),
     (
         "icon-downloading.webp",
@@ -280,11 +293,18 @@ async fn list_page(
     }
     main.push_str("</tbody>\n</table>\n");
     if videos.is_empty() {
-        main.push_str(if page == 1 {
-            "<p id=\"empty\" class=\"empty\">No liked videos yet. They show up here as each sync finishes.</p>\n"
-        } else {
-            "<p id=\"empty\" class=\"empty\">Nothing on this page.</p>\n"
-        });
+        let empty = match platform {
+            _ if page > 1 => "<p id=\"empty\" class=\"empty\">Nothing on this page.</p>\n".into(),
+            Some(name) if COMING_SOON.contains(&name) => format!(
+                "<p id=\"empty\" class=\"empty\">Syncing {0} likes is coming soon. \
+                 They'll show up here once it does.</p>\n",
+                display_name(name)
+            ),
+            _ => "<p id=\"empty\" class=\"empty\">No liked videos yet. \
+                  They show up here as each sync finishes.</p>\n"
+                .into(),
+        };
+        main.push_str(&empty);
     }
     main.push_str(&pager);
 
@@ -771,6 +791,9 @@ fn icon(section: Section) -> &'static str {
         Section::Likes(Some("tiktok")) => {
             "<img class=\"icon\" src=\"/assets/icon-tiktok.webp\" alt=\"\">"
         }
+        Section::Likes(Some("instagram")) => {
+            "<img class=\"icon\" src=\"/assets/icon-instagram.webp\" alt=\"\">"
+        }
         Section::Likes(_) => "<img class=\"icon\" src=\"/assets/icon-likes.webp\" alt=\"\">",
         Section::Downloading => {
             "<img class=\"icon\" src=\"/assets/icon-downloading.webp\" alt=\"\">"
@@ -914,6 +937,7 @@ fn status_html(status: &SyncStatus) -> String {
         .iter()
         .map(|(name, label)| {
             let (light, state) = match status.get(name) {
+                None if COMING_SOON.contains(name) => ("waiting", "coming soon".into()),
                 None => ("waiting", "waiting to sync".into()),
                 Some(SyncState::Running) => ("running", "syncing…".into()),
                 Some(SyncState::Done { at, added }) => (
@@ -1433,7 +1457,10 @@ mod tests {
         let counts = [("youtube".to_string(), 3)];
         assert_eq!(count_of(&counts, None), 3);
         assert_eq!(count_of(&counts, Some("tiktok")), 0);
-        assert_eq!(counts_json(&counts), r#"{"all":3,"tiktok":0,"youtube":3}"#);
+        assert_eq!(
+            counts_json(&counts),
+            r#"{"all":3,"instagram":0,"tiktok":0,"youtube":3}"#
+        );
     }
 
     #[test]
@@ -1457,6 +1484,7 @@ mod tests {
         let tiktok = html.find("<li class=\"sync-done\"><span class=\"led\"></span><b>TikTok</b>");
         assert!(tiktok.is_some_and(|at| at > 0));
         assert!(html.contains("2 new"));
+        assert!(html.contains("<b>Instagram</b><span class=\"what\">coming soon</span>"));
     }
 
     fn job(video: &db::StoredVideo) -> Job {
