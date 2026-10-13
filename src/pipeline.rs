@@ -1,6 +1,6 @@
-//! The download pipeline. Every platform can have a lane (off for now, see
-//! `AUTOMATIC`) that works through its backlog on its own: each liked video that isn't downloaded yet, newest
-//! first, one at a time, pausing between videos (`pace`) so a backlog of
+//! The download pipeline. Every platform has a lane (unless `AUTOMATIC` is
+//! off) that works through its backlog on its own: each liked video that isn't
+//! downloaded yet, newest first, one at a time, pausing between videos (`pace`) so a backlog of
 //! thousands doesn't look like a bot to the platform. A video someone asks
 //! for in the UI doesn't wait for its lane: it downloads right away, on a
 //! track of its own, alongside the lanes and any other requested videos.
@@ -24,10 +24,13 @@ use crate::browser::Browser;
 use crate::db::{self, PendingDownload};
 use crate::download::{self, Credentials, Progress, Saved};
 
-/// Whether the lanes download the backlog. Off for now: videos download only
-/// when asked for in the UI. Turning it on starts downloading every liked
-/// video, thousands of them, with the user's logins.
-const AUTOMATIC: bool = false;
+/// Whether the lanes download the backlog, every liked video (thousands of
+/// them) with the user's logins. When off, videos download only when asked
+/// for in the UI.
+const AUTOMATIC: bool = true;
+
+/// How often a lane checks whether the tools it downloads with have arrived.
+const TOOLS_RETRY: Duration = Duration::from_secs(10);
 
 /// The pause between a lane's videos, as the shortest and longest: a random
 /// length in between, so the requests don't come at a machine's regular beat.
@@ -352,6 +355,17 @@ async fn run_lane(platform: &'static str, shared: Arc<Shared>) {
             }
         }
     };
+    // On first launch the app is still fetching yt-dlp and ffmpeg. A lane that
+    // started without them would fail its first videos and push each one back
+    // an hour.
+    loop {
+        match crate::tools::ready() {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(e) => eprintln!("{platform}: can't check for the download tools: {e:#}"),
+        }
+        tokio::time::sleep(TOOLS_RETRY).await;
+    }
     let mut failures_in_a_row = 0;
     loop {
         let job = match next_job(platform, &shared, &conn) {

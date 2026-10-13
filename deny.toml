@@ -2,7 +2,7 @@
 
 [graph]
 # joyscroller is Linux-only for now; skip Windows/wasm-only dependencies.
-targets = ["x86_64-unknown-linux-gnu"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [advisories]
 # Unmaintained crates in the tree fail the check, not just vulnerable ones.
@@ -12,6 +12,7 @@ unmaintained = "all"
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
+    "ISC",
     "MIT",
     "MPL-2.0",
     "Unicode-3.0",
@@ -24,8 +25,17 @@ allow = [
 crate = "matchit"
 allow = ["BSD-3-Clause"]
 
+# rustls (HTTPS for fetching yt-dlp, ffmpeg and deno) uses these two.
+[[licenses.exceptions]]
+crate = "subtle"
+allow = ["BSD-3-Clause"]
+
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [licenses.private]
-# Our own crate has no license and isn't published.
+# Our own crate (MIT) isn't published, so it needs no license check.
 ignore = true
 
 [bans]

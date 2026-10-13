@@ -1,0 +1,66 @@
+# Builds joyscroller for Linux and publishes a GitHub Release when a version
+# tag is pushed: bump `version` in Cargo.toml, commit, then
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# The release starts as a draft and is only published once every build has
+# uploaded, so a failed build never leaves a release with missing downloads.
+# Ubuntu 22.04 runners keep the glibc requirement at 2.35, old enough for any
+# current distro.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG doesn't match Cargo.toml's version $version" >&2
+            exit 1
+          fi
+      - run: gh release create "$TAG" --draft --verify-tag --generate-notes --title "$TAG"
+
+  build:
+    needs: draft
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          name="joyscroller-$TAG-linux-${{ matrix.arch }}"
+          mkdir "$name"
+          cp target/release/joyscroller README.md LICENSE "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          gh release upload "$TAG" "$name.tar.gz" "$name.tar.gz.sha256"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh release edit "$TAG" --draft=false --latest

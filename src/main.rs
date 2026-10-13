@@ -7,6 +7,7 @@ mod instagram;
 mod pipeline;
 mod player;
 mod tiktok;
+mod tools;
 mod web;
 mod youtube;
 
@@ -111,6 +112,10 @@ const STOP_AFTER_KNOWN: usize = 100;
 
 /// How often the app pulls new likes while it's running.
 const SYNC_EVERY: Duration = Duration::from_mins(5);
+
+/// How often the app updates its own yt-dlp. Fixes for site changes ship in
+/// yt-dlp releases every week or two.
+const UPDATE_YT_DLP_EVERY: Duration = Duration::from_hours(24);
 
 /// The pause after each download. A backlog runs to thousands of videos, and
 /// YouTube answers bursts of requests with HTTP 429.
@@ -331,12 +336,33 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
         media_root.display()
     );
 
+    // Only downloads need ffmpeg and deno, so fetching them (ffmpeg is large)
+    // doesn't hold up the first sync.
+    tokio::spawn(async {
+        while let Err(e) = tools::ensure_helpers().await {
+            eprintln!("tools: {e:#}");
+            tokio::time::sleep(SYNC_EVERY).await;
+        }
+    });
+    let mut yt_dlp_updated: Option<tokio::time::Instant> = None;
+
     // The first tick fires immediately. If a sync overruns the interval, wait a
     // full interval after it rather than firing back-to-back.
     let mut ticks = tokio::time::interval(SYNC_EVERY);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticks.tick().await;
+        // Listing YouTube likes needs yt-dlp. If fetching it fails (offline),
+        // the YouTube sync fails too, and both are tried again next tick.
+        if let Err(e) = tools::ensure_yt_dlp().await {
+            eprintln!("tools: {e:#}");
+        }
+        if yt_dlp_updated.is_none_or(|at| at.elapsed() >= UPDATE_YT_DLP_EVERY) {
+            match tools::update_yt_dlp().await {
+                Ok(()) => yt_dlp_updated = Some(tokio::time::Instant::now()),
+                Err(e) => eprintln!("tools: {e:#}"),
+            }
+        }
         // A failed sync (offline, logged out) is logged, not fatal: the next
         // tick tries again, and one platform failing doesn't skip the others.
         for platform in [Platform::Youtube, Platform::Tiktok, Platform::Instagram] {

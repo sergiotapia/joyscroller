@@ -4,12 +4,13 @@ Notes for coding agents working in this repo. Read this, then `CONTRIBUTING.md`.
 
 ## What this is
 
-A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes and Instagram saves (the bookmark, Instagram's way of keeping a post) into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves a liked video's media at the best quality available into `downloads/<platform>/<YYYY-MM-DD>/<title> [<video id>]/`, by the local date it was liked (so the first sync's day holds the whole backlog). `filename.rs` makes titles safe as folder names on every OS. That folder and the database, `joyscroller.db`, sit next to the app's executable, where people will look for them. A binary running from this repo's `target/` (so `cargo run`) uses `data/` at the repo root instead, which survives `cargo clean` and is gitignored. Videos download when the user clicks "Download now" on a video's page: the download pipeline (`pipeline.rs`) starts it right away on a track of its own, several at once if asked. The pipeline also has a lane per platform that works through the whole backlog newest first, one video at a time, waiting 30 s between YouTube videos, a random 15–30 s between TikTok ones and 30–60 s between Instagram ones (yt-dlp's wiki puts YouTube's logged-in limit at ~2,000 videos/hour; TikTok and Instagram publish none, and Instagram is quick to lock out accounts that look automated). The lanes are off for now (`AUTOMATIC` in `pipeline.rs`). `/downloading` shows it all live. Once downloaded, a video plays on its page (`player.rs`): a video in a player, a TikTok photo post as a slideshow with its sound playing. The page loads the files from `/videos/<platform>/<id>/media/<file>`, which serves only the files the download recorded. The `download` subcommand downloads by hand. Every table row has a `platform` column.
+A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes and Instagram saves (the bookmark, Instagram's way of keeping a post) into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves a liked video's media at the best quality available into `downloads/<platform>/<YYYY-MM-DD>/<title> [<video id>]/`, by the local date it was liked (so the first sync's day holds the whole backlog). `filename.rs` makes titles safe as folder names on every OS. That folder, the database (`joyscroller.db`) and `tools/` sit next to the app's executable, where people will look for them. A binary running from this repo's `target/` (so `cargo run`) uses `data/` at the repo root instead, which survives `cargo clean` and is gitignored. Videos download when the user clicks "Download now" on a video's page: the download pipeline (`pipeline.rs`) starts it right away on a track of its own, several at once if asked. The pipeline also has a lane per platform that works through the whole backlog newest first, one video at a time, waiting 30 s between YouTube videos, a random 15–30 s between TikTok ones and 30–60 s between Instagram ones (yt-dlp's wiki puts YouTube's logged-in limit at ~2,000 videos/hour; TikTok and Instagram publish none, and Instagram is quick to lock out accounts that look automated). The lanes are on (`AUTOMATIC` in `pipeline.rs`) and wait for `tools.rs` to have fetched yt-dlp and ffmpeg before their first video. `/downloading` shows it all live. Once downloaded, a video plays on its page (`player.rs`): a video in a player, a TikTok photo post as a slideshow with its sound playing. The page loads the files from `/videos/<platform>/<id>/media/<file>`, which serves only the files the download recorded. The `download` subcommand downloads by hand. Every table row has a `platform` column.
 
 **Product rules:**
 - End users never run subcommands. Launching `joyscroller` must start everything. The `cookies`, `likes` and `sync` subcommands are developer and debugging tools only. New user-facing features go inside the long-running process, as a background task or in the web UI, not as new CLI flags.
 - The app runs natively, not in Docker. It has to read the host browser's cookie database and the desktop keyring, which a container can't reach.
 - Logging in means reading the user's browser cookies. Don't add OAuth or API-key flows.
+- Users install nothing but the app. `tools.rs` fetches yt-dlp, ffmpeg/ffprobe and deno (yt-dlp needs a JavaScript runtime for YouTube) into `tools/` on launch and runs `yt-dlp --update` daily. yt-dlp is always our own copy, since distro packages lag behind site changes; ffmpeg and deno already on `PATH` are used as they are. Run the tools through `tools::yt_dlp()`, `tools::ffmpeg()` and `tools::ffprobe()`, never `Command::new("yt-dlp")`.
 - We don't call YouTube's API ourselves. `yt-dlp` does the scraping, and we parse its JSON.
 - yt-dlp can't list TikTok likes, and TikTok rejects API requests its own page script didn't sign. So we load tiktok.com in a headless copy of the user's browser, logged in with their cookies, and call the API with `fetch` from inside the page, where TikTok's script signs it. Don't try to reimplement TikTok's request signing.
 - yt-dlp can't list Instagram saves either. Instagram's saved-posts endpoint (`/api/v1/feed/saved/posts/`) needs no signing, only the cookies plus the `x-ig-app-id` and `x-csrftoken` headers, but it's called the same way, from a headless instagram.com tab. Only videos (`media_type` 2: reels and video posts) are kept; saved photos and carousels are skipped. yt-dlp downloads each one.
@@ -35,6 +36,8 @@ src/instagram.rs Pages through Instagram's saved list (/api/v1/feed/saved/posts/
                 instagram.com tab and parses the videos; a callback can stop the listing early
 src/headless.rs Minimal Chrome DevTools Protocol client: launches the browser headless with a throwaway
                 profile, loads cookies, navigates, evaluates JS in the page
+src/tools.rs    Fetches the app's own yt-dlp, ffmpeg/ffprobe and deno from their GitHub releases (checksum-
+                verified) into tools/, keeps yt-dlp updated, and builds the commands that run them
 src/pipeline.rs The download pipeline: one lane per platform working through its backlog (lanes run in
                 parallel, one video at a time each, paced by `pace`), an immediate track per video asked
                 for in the UI, and the Board of what's running and finished that the UI watches
@@ -56,7 +59,7 @@ assets/         The UI's look, built into the binary by web.rs (`ASSETS`) and se
                 and fonts/ (Luckiest Guy, Fredoka, DSEG LCD digits, with their licenses)
 ```
 
-Config: `Cargo.toml` (lint levels), `clippy.toml`, `deny.toml`, `justfile`.
+Config: `Cargo.toml` (lint levels), `clippy.toml`, `deny.toml`, `justfile`. `.github/workflows/release.yml` builds Linux x86_64 and aarch64 binaries and publishes a GitHub Release when a `v*` tag matching Cargo.toml's version is pushed.
 
 ## Commands
 
@@ -76,7 +79,7 @@ cargo run -- download --db /tmp/t.db --media /tmp/m --limit 3   # download the n
 cargo run -- cookies --out c.txt  # export cookies.txt (contains live credentials)
 ```
 
-Runtime needs: Linux, `yt-dlp` and `ffmpeg` (with `ffprobe`) on `PATH`, a Chromium-family browser profile signed in to YouTube, TikTok and Instagram (default `--browser brave --profile Default`), that browser's executable on `PATH` (TikTok and Instagram run it headless), and a Secret Service keyring (gnome-keyring or KWallet) for v11 cookies.
+Runtime needs: Linux (x86_64 or aarch64 for the fetched tools; elsewhere `yt-dlp`, `ffmpeg`, `ffprobe` and `deno` on `PATH`), a Chromium-family browser profile signed in to YouTube, TikTok and Instagram (default `--browser brave --profile Default`), that browser's executable on `PATH` (TikTok and Instagram run it headless), and a Secret Service keyring (gnome-keyring or KWallet) for v11 cookies.
 
 A full TikTok listing takes about 2 minutes for 5,000 likes (one request per 30). In testing, TikTok's liked list ended after exactly 200 pages (about 5,100 likes, back to January 2026). That looks like a server-side cap rather than the true end of the list.
 
@@ -110,6 +113,6 @@ The real archive is `joyscroller.db` and `downloads/` in `data/` at the repo roo
 
 ## Git
 
-- Commit straight to `master`. Never create branches. The repo has no remote.
+- Commit straight to `master`. Never create branches. The remote is `origin` on GitHub; push and tag only when asked.
 - Run `just precommit` before committing. Don't commit if it fails.
 - Commit message: an imperative subject line, then a body explaining what changed and why.

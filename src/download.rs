@@ -346,7 +346,7 @@ async fn fetch(
 ) -> Result<(String, Option<Value>)> {
     let tiktok = item.platform == "tiktok";
     let media_name = if tiktok { "%(format_id)s" } else { "video" };
-    let mut cmd = Command::new("yt-dlp");
+    let mut cmd = crate::tools::yt_dlp()?;
     cmd.arg("--cookies")
         .arg(cookies_txt)
         .arg("--no-playlist")
@@ -610,7 +610,7 @@ fn parse_progress(line: &str) -> Option<Progress> {
 async fn mux(video: &Path, sound: &Path, work: &Path) -> Result<()> {
     let ext = video.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
     let out_path = work.join(format!("video.{ext}"));
-    let out = Command::new("ffmpeg")
+    let out = crate::tools::ffmpeg()?
         .args(["-v", "error", "-y", "-i"])
         .arg(video)
         .arg("-i")
@@ -678,7 +678,7 @@ async fn keep_largest_thumbnail(work: &Path) -> Result<()> {
 /// A still image's pixel count and file extension, via ffprobe. None for
 /// anything else, including animated images.
 async fn probe_image(path: &Path) -> Result<Option<(u64, &'static str)>> {
-    let out = Command::new("ffprobe")
+    let out = crate::tools::ffprobe()?
         .args(["-v", "error", "-select_streams", "v:0"])
         .args(["-show_entries", "stream=codec_name,width,height"])
         .args(["-of", "csv=p=0"])

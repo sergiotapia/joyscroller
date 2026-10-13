@@ -8,7 +8,6 @@ use std::process::Stdio;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::process::Command;
 
 /// The "Liked videos" playlist.
 const LIKED_PLAYLIST: &str = "https://www.youtube.com/playlist?list=LL";
@@ -50,7 +49,7 @@ pub async fn liked_videos(
     limit: usize,
     mut keep_going: impl FnMut(&Video) -> bool,
 ) -> Result<Vec<Video>> {
-    let mut cmd = Command::new("yt-dlp");
+    let mut cmd = crate::tools::yt_dlp()?;
     cmd.arg("--cookies")
         .arg(cookies_txt)
         .arg("--flat-playlist")

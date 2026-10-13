@@ -46,11 +46,7 @@ impl Browser {
             Browser::Vivaldi => &["vivaldi-stable", "vivaldi"],
             Browser::Edge => &["microsoft-edge-stable", "microsoft-edge"],
         };
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::split_paths(&path)
-            .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
-            .find(|candidate| candidate.is_file())
-            .ok_or_else(|| anyhow!("none of {names:?} is on PATH"))
+        crate::tools::on_path(names).ok_or_else(|| anyhow!("none of {names:?} is on PATH"))
     }
 
     /// The `application` attribute Chromium stores its keyring secret under.
