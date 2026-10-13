@@ -1,7 +1,8 @@
-/* joyscroller's look: a Windows XP desktop (Bliss hills, Luna title bars,
-   the taskbar, MSN's blue side panel with gold section bars) with a
-   Nickelodeon clock radio's plastic on top (purple casing, slime green,
-   the orange splat, the red dome button, an LCD). */
+/* joyscroller's look: a Windows XP desktop (a cartoon mad-science lab
+   as wallpaper, Luna title bars, the taskbar, MSN's blue side panel with
+   gold section bars) with a Nickelodeon clock radio's plastic on top
+   (purple casing, slime green, the orange splat, the red dome button,
+   an LCD). */
 
 @font-face {
   font-family: "Luckiest Guy";
@@ -52,7 +53,7 @@
 
 html {
   min-height: 100%;
-  background: #3a7be0 url("/assets/desktop.svg") center bottom / cover no-repeat fixed;
+  background: #160f2b url("/assets/lab.webp") center / cover no-repeat fixed;
 }
 body {
   margin: 0;

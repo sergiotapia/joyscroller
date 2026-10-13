@@ -131,9 +131,9 @@ const ASSETS: [(&str, &str, &[u8]); 14] = [
         include_bytes!("../assets/style.css"),
     ),
     (
-        "desktop.svg",
-        "image/svg+xml",
-        include_bytes!("../assets/desktop.svg"),
+        "lab.webp",
+        "image/webp",
+        include_bytes!("../assets/lab.webp"),
     ),
     (
         "radio.webp",
