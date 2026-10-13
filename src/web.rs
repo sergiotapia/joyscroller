@@ -116,7 +116,7 @@ pub async fn serve(
 
 /// The stylesheet, fonts and pictures, as (name, type, contents). They're
 /// built into the executable, so the app stays a single file.
-const ASSETS: [(&str, &str, &[u8]); 8] = [
+const ASSETS: [(&str, &str, &[u8]); 13] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -131,6 +131,31 @@ const ASSETS: [(&str, &str, &[u8]); 8] = [
         "radio.webp",
         "image/webp",
         include_bytes!("../assets/radio.webp"),
+    ),
+    (
+        "splat.webp",
+        "image/webp",
+        include_bytes!("../assets/splat.webp"),
+    ),
+    (
+        "icon-likes.webp",
+        "image/webp",
+        include_bytes!("../assets/icon-likes.webp"),
+    ),
+    (
+        "icon-youtube.webp",
+        "image/webp",
+        include_bytes!("../assets/icon-youtube.webp"),
+    ),
+    (
+        "icon-tiktok.webp",
+        "image/webp",
+        include_bytes!("../assets/icon-tiktok.webp"),
+    ),
+    (
+        "icon-downloading.webp",
+        "image/webp",
+        include_bytes!("../assets/icon-downloading.webp"),
     ),
     (
         "splat.svg",
@@ -704,7 +729,7 @@ fn layout(frame: &Frame, main: &str) -> String {
          </main>\n\
          </div>\n\
          <footer class=\"taskbar\">\n\
-         <a class=\"start\" href=\"/\"><img src=\"/assets/splat.svg\" alt=\"\">start</a>\n\
+         <a class=\"start\" href=\"/\"><img src=\"/assets/splat.webp\" alt=\"\">start</a>\n\
          <span class=\"task\">{icon}<span>{title}</span></span>\n\
          <span class=\"tray\" id=\"tray-clock\"></span>\n\
          </footer>\n\
@@ -736,22 +761,19 @@ const RADIO_LCD: &str = "<svg class=\"radio-lcd\" viewBox=\"0 0 960 691\" aria-h
 <text class=\"lcd-ampm\" id=\"lcd-ampm\" x=\"95\" y=\"15\"></text>\
 </g></svg>";
 
-/// A glossy little icon for a section, drawn inline. Flat fills only: an
-/// SVG gradient is looked up by id across the page, and breaks when the
-/// copy that defines it is hidden.
+/// A section's icon: a molded plastic piece rendered in Blender
+/// (`assets/blender/badges.py`), like the radio.
 fn icon(section: Section) -> &'static str {
     match section {
         Section::Likes(Some("youtube")) => {
-            r##"<svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="6" width="28" height="20" rx="6" fill="#e62117" stroke="#8f0c06" stroke-width="1.5"/><path d="M4 12 Q16 8 28 12 V10 Q28 7.5 25 7.5 H7 Q4 7.5 4 10Z" fill="#fff" opacity=".3"/><path d="M13 11 V21 L22 16Z" fill="#fff"/></svg>"##
+            "<img class=\"icon\" src=\"/assets/icon-youtube.webp\" alt=\"\">"
         }
         Section::Likes(Some("tiktok")) => {
-            r##"<svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="3" width="26" height="26" rx="7" fill="#161616" stroke="#000" stroke-width="1.5"/><g fill="none" stroke-width="3" stroke-linecap="round"><path d="M17 8 V20 M17 8 Q19 12 23 12" stroke="#25f4ee" transform="translate(-1 -1)"/><path d="M17 8 V20 M17 8 Q19 12 23 12" stroke="#fe2c55" transform="translate(1 1)"/><path d="M17 8 V20 M17 8 Q19 12 23 12" stroke="#fff"/></g><circle cx="13.5" cy="21" r="3.8" fill="none" stroke="#fff" stroke-width="3"/></svg>"##
+            "<img class=\"icon\" src=\"/assets/icon-tiktok.webp\" alt=\"\">"
         }
-        Section::Likes(_) => {
-            r##"<svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 28 C6 20 2 14.5 2 10 A6.8 6.8 0 0 1 16 7.5 A6.8 6.8 0 0 1 30 10 C30 14.5 26 20 16 28Z" fill="#ff3d7f" stroke="#a3123f" stroke-width="1.5"/><ellipse cx="9.5" cy="10.5" rx="4" ry="2.4" fill="#fff" opacity=".6" transform="rotate(-30 9.5 10.5)"/></svg>"##
-        }
+        Section::Likes(_) => "<img class=\"icon\" src=\"/assets/icon-likes.webp\" alt=\"\">",
         Section::Downloading => {
-            r##"<svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="#3aa52c" stroke="#1d6a14" stroke-width="1.5"/><ellipse cx="16" cy="9" rx="10" ry="5" fill="#fff" opacity=".3"/><path d="M16 8 V20 M10.5 15 L16 20.5 L21.5 15 M10 24.5 H22" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+            "<img class=\"icon\" src=\"/assets/icon-downloading.webp\" alt=\"\">"
         }
     }
 }

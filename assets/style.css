@@ -80,10 +80,15 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   box-shadow: 0 4px 0 var(--slime), 0 7px 0 var(--slime-dark), 0 12px 22px rgba(0, 0, 40, .35);
 }
 .logo { display: flex; align-items: center; gap: 4px; text-decoration: none; }
+/* The splat is a Blender render (assets/blender/badges.py) of exactly this
+   box, plus a 12px margin all round for its shadow and droplets. */
 .splat {
-  display: inline-block;
-  padding: 16px 30px 12px;
-  background: url("/assets/splat.svg") center / 100% 100% no-repeat;
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 264px;
+  height: 62px;
+  padding-top: 4px;
   font: 32px/1 var(--font-fun);
   letter-spacing: 1px;
   text-transform: uppercase;
@@ -93,6 +98,13 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
     -2px 2px 0 var(--purple-dark), 2px 2px 0 var(--purple-dark),
     3px 4px 0 var(--purple-dark);
   transform: rotate(-3deg);
+}
+.splat::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  z-index: -1;
+  background: url("/assets/splat.webp") center / 100% 100% no-repeat;
 }
 .edition {
   align-self: flex-end;
@@ -513,7 +525,7 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   text-shadow: 1px 1px 2px rgba(0, 0, 0, .6);
 }
 .start:hover { filter: brightness(1.1); }
-.start img { width: 34px; height: 22px; transform: rotate(-8deg); }
+.start img { width: 40px; height: auto; transform: rotate(-8deg); }
 .task {
   display: flex;
   align-items: center;
@@ -556,7 +568,8 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   .quick a { width: auto; flex: 1; }
   .quick .icon { width: 28px; height: 28px; }
   .panel { order: 1; }
-  .splat { font-size: 26px; }
+  .splat { width: 222px; height: 52px; font-size: 26px; }
+  .splat::before { inset: -10px; }
   .list .author, .list thead { display: none; }
   .list .thumb img, .list .nothumb { width: 72px; height: 40px; }
   .window-body { padding: 12px; }

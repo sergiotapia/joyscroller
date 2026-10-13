@@ -39,8 +39,9 @@ src/filename.rs safe_name: text to a file/folder name valid on Linux, macOS and 
                 reserved device names, trailing dots, invisible characters, byte-length limits)
 src/db.rs       SQLite schema (the SCHEMA const) and every query; the only module that touches the archive DB
 assets/         The UI's look, built into the binary by web.rs (`ASSETS`) and served at /assets/<file>:
-                style.css (Windows XP desktop + Nickelodeon clock radio), desktop.svg, splat.svg,
+                style.css (Windows XP desktop + Nickelodeon clock radio), desktop.svg, splat.svg (favicon),
                 radio.webp (rendered by blender/radio.py; the page overlays a live clock on its LCD),
+                splat.webp and icon-*.webp (rendered by blender/badges.py in the radio's materials),
                 and fonts/ (Luckiest Guy, Fredoka, DSEG LCD digits, with their licenses)
 ```
 
