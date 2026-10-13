@@ -1,7 +1,8 @@
 //! Downloads a liked video's media at the best quality on offer, into a
 //! folder of its own under the media root, by platform and the day it was
 //! liked: `<platform>/<YYYY-MM-DD>/<title> [<video id>]/`.
-//! - Videos, through yt-dlp: `video.<ext>` and `thumbnail.<ext>`.
+//! - Videos (YouTube, TikTok, Instagram), through yt-dlp: `video.<ext>` and
+//!   `thumbnail.<ext>`.
 //! - TikTok photo posts, which yt-dlp can't fetch, through `tiktok.rs`:
 //!   `image-01.<ext>`, `image-02.<ext>`, … and `sound.<ext>`. The first image
 //!   is the cover.
@@ -31,8 +32,10 @@ use crate::tiktok;
 /// have video (it drops the second one silently), so `mux` does it instead.
 const TIKTOK_FORMATS: &str = "bv*,b";
 
-/// For YouTube: yt-dlp's default, the best video and best audio, merged.
-const YOUTUBE_FORMATS: &str = "bv*+ba/b";
+/// For YouTube and Instagram: yt-dlp's default, the best video and best audio,
+/// merged. Instagram's best qualities come as DASH streams, the picture and
+/// the video's own audio apart.
+const MERGED_FORMATS: &str = "bv*+ba/b";
 
 /// Keys dropped from yt-dlp's metadata before storing it:
 /// - `cookies`: yt-dlp copies the request cookies (the user's login) into it.
@@ -187,6 +190,7 @@ impl Credentials {
         let domain = match platform {
             "youtube" => "youtube.com",
             "tiktok" => "tiktok.com",
+            "instagram" => "instagram.com",
             other => bail!("can't download from platform {other}"),
         };
         let cookies = crate::browser::cookies_for(browser, profile, domain).await?;
@@ -319,7 +323,7 @@ fn folder_name(item: &PendingDownload) -> String {
         .and_then(|title| title.lines().map(str::trim).find(|line| !line.is_empty()));
     let label = match (title, item.author_name.as_deref()) {
         (Some(title), _) => safe_name(title, TITLE_BYTES),
-        (None, Some(handle)) if item.platform == "tiktok" => {
+        (None, Some(handle)) if matches!(item.platform.as_str(), "tiktok" | "instagram") => {
             safe_name(&format!("@{handle}"), TITLE_BYTES)
         }
         (None, Some(author)) => safe_name(author, TITLE_BYTES),
@@ -363,7 +367,7 @@ async fn fetch(
         .arg(if tiktok {
             TIKTOK_FORMATS
         } else {
-            YOUTUBE_FORMATS
+            MERGED_FORMATS
         })
         .arg("-o")
         .arg(work.join(format!("{media_name}.%(ext)s")))
@@ -833,6 +837,7 @@ mod tests {
             "first line #fyp [abc]"
         );
         assert_eq!(name("tiktok", Some("  "), Some("cat")), "@cat [abc]");
+        assert_eq!(name("instagram", None, Some("cat")), "@cat [abc]");
         assert_eq!(name("youtube", None, Some("chan")), "chan [abc]");
         assert_eq!(name("tiktok", Some("..."), None), "[abc]");
         let long = name("youtube", Some(&"word ".repeat(100)), None);

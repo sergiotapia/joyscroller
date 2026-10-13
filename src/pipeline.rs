@@ -33,9 +33,12 @@ const AUTOMATIC: bool = false;
 /// length in between, so the requests don't come at a machine's regular beat.
 /// yt-dlp's wiki puts YouTube's limit for a logged-in account at about 2,000
 /// videos an hour; 30 s keeps us at about 120. TikTok publishes no limits.
+/// Neither does Instagram, but it's the quickest of the three to lock an
+/// account out for "suspicious activity", so it gets the slowest pace.
 fn pace(platform: &str) -> (Duration, Duration) {
     match platform {
         "tiktok" => (Duration::from_secs(15), Duration::from_secs(30)),
+        "instagram" => (Duration::from_secs(30), Duration::from_secs(60)),
         _ => (Duration::from_secs(30), Duration::from_secs(30)),
     }
 }

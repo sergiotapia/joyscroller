@@ -45,10 +45,6 @@ const PLATFORMS: [(&str, &str); 3] = [
     ("instagram", "Instagram"),
 ];
 
-/// Platforms the UI already lists but the app can't sync yet: their sync
-/// line says so instead of waiting for a sync that never comes.
-const COMING_SOON: [&str; 1] = ["instagram"];
-
 fn display_name(platform: &str) -> &str {
     PLATFORMS
         .iter()
@@ -378,18 +374,12 @@ async fn list_page(
     }
     main.push_str("</tbody>\n</table>\n");
     if videos.is_empty() {
-        let empty = match platform {
-            _ if page > 1 => "<p id=\"empty\" class=\"empty\">Nothing on this page.</p>\n".into(),
-            Some(name) if COMING_SOON.contains(&name) => format!(
-                "<p id=\"empty\" class=\"empty\">Syncing {0} likes is coming soon. \
-                 They'll show up here once it does.</p>\n",
-                display_name(name)
-            ),
-            _ => "<p id=\"empty\" class=\"empty\">No liked videos yet. \
-                  They show up here as each sync finishes.</p>\n"
-                .into(),
-        };
-        main.push_str(&empty);
+        main.push_str(if page > 1 {
+            "<p id=\"empty\" class=\"empty\">Nothing on this page.</p>\n"
+        } else {
+            "<p id=\"empty\" class=\"empty\">No liked videos yet. \
+             They show up here as each sync finishes.</p>\n"
+        });
     }
     main.push_str(&pager);
 
@@ -630,10 +620,10 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
         "Videos download when you click Download now on their page, right away, \
          several at a time if you like."
     } else {
-        "YouTube and TikTok each have a lane that downloads every liked video \
-         not downloaded yet, newest first, one at a time: YouTube waits 30 seconds \
-         between videos, TikTok 15 to 30. A video's Download now button downloads it \
-         right away, alongside the lanes."
+        "YouTube, TikTok and Instagram each have a lane that downloads every liked \
+         video not downloaded yet, newest first, one at a time: YouTube waits 30 seconds \
+         between videos, TikTok 15 to 30, Instagram 30 to 60. A video's Download now \
+         button downloads it right away, alongside the lanes."
     };
     let main = format!(
         "<p class=\"intro\">{about}</p>\n\
@@ -1050,8 +1040,8 @@ function connect() {
 "#;
 
 /// A video's picture, linked to `href`: YouTube's thumbnail at `size`
-/// (`mqdefault`, `hqdefault`), or for TikTok, whose picture links expire, a
-/// colored tile.
+/// (`mqdefault`, `hqdefault`), or for TikTok and Instagram, whose picture
+/// links expire, a colored tile.
 fn thumbnail(video: &db::StoredVideo, size: &str, href: &str) -> String {
     if video.platform == "youtube" {
         format!(
@@ -1101,7 +1091,6 @@ fn status_html(status: &SyncStatus) -> String {
         .iter()
         .map(|(name, label)| {
             let (light, state) = match status.get(name) {
-                None if COMING_SOON.contains(name) => ("waiting", "coming soon".into()),
                 None => ("waiting", "waiting to sync".into()),
                 Some(SyncState::Running) => ("running", "syncing…".into()),
                 Some(SyncState::Done { at, added }) => (
@@ -1202,16 +1191,17 @@ fn short_title(video: &db::StoredVideo) -> String {
     match first_line {
         Some(line) => line.into(),
         None if !video.available => "(unavailable)".into(),
-        None if video.platform == "tiktok" => "(no caption)".into(),
+        None if matches!(video.platform.as_str(), "tiktok" | "instagram") => "(no caption)".into(),
         None => "(no title)".into(),
     }
 }
 
-/// The author as the platform shows them: a channel name, or a TikTok @handle.
+/// The author as the platform shows them: a channel name, or a TikTok or
+/// Instagram @handle.
 fn author_label(video: &db::StoredVideo) -> String {
     match (video.platform.as_str(), video.author_name.as_deref()) {
         (_, None) => String::new(),
-        ("tiktok", Some(handle)) => format!("@{handle}"),
+        ("tiktok" | "instagram", Some(handle)) => format!("@{handle}"),
         (_, Some(name)) => name.into(),
     }
 }
@@ -1228,6 +1218,10 @@ fn author_html(video: &db::StoredVideo) -> String {
             .author_name
             .as_deref()
             .map(|handle| format!("https://www.tiktok.com/@{handle}")),
+        "instagram" => video
+            .author_name
+            .as_deref()
+            .map(|handle| format!("https://www.instagram.com/{handle}/")),
         _ => None,
     };
     match href {
@@ -1648,7 +1642,7 @@ mod tests {
         let tiktok = html.find("<li class=\"sync-done\"><span class=\"led\"></span><b>TikTok</b>");
         assert!(tiktok.is_some_and(|at| at > 0));
         assert!(html.contains("2 new"));
-        assert!(html.contains("<b>Instagram</b><span class=\"what\">coming soon</span>"));
+        assert!(html.contains("<b>Instagram</b><span class=\"what\">waiting to sync</span>"));
     }
 
     fn job(video: &db::StoredVideo) -> Job {

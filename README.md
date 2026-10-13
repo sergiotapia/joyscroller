@@ -4,9 +4,9 @@
 
 ## What it is
 
-Joyscroller keeps a permanent copy of every video you've liked, so a like never disappears when the platform hides it, deletes it, or buries it in an endless feed. YouTube and TikTok work today, and Instagram is planned.
+Joyscroller keeps a permanent copy of every video you've liked, so a like never disappears when the platform hides it, deletes it, or buries it in an endless feed. It covers YouTube and TikTok likes, and the videos you've saved on Instagram (Instagram's bookmark is what keeps a post, so saves are what Joyscroller archives there).
 
-It runs on your own computer and signs in with the browser you already use: it reads your login cookies straight from your browser's profile, so there's no account to connect. Every five minutes it saves your new likes to a local database, and a page on localhost lets you browse them. New likes show up on that page as soon as they're saved. For TikTok it briefly runs your browser headless in the background, with a separate throwaway profile, because TikTok only answers requests made from inside its own web page.
+It runs on your own computer and signs in with the browser you already use: it reads your login cookies straight from your browser's profile, so there's no account to connect. Every five minutes it saves your new likes to a local database, and a page on localhost lets you browse them. New likes show up on that page as soon as they're saved. For TikTok and Instagram it briefly runs your browser headless in the background, with a separate throwaway profile, and asks for your list from inside the site's own page: TikTok only answers requests made from there.
 
 Downloading each video at the best quality available is built, and will be switched back on in the app soon.
 
@@ -15,7 +15,7 @@ Downloading each video at the best quality available is built, and will be switc
 There are no prebuilt releases yet, so you build it from source. You need:
 
 - Linux
-- Brave, signed in to YouTube and TikTok in its `Default` profile, with `brave` on your `PATH`
+- Brave, signed in to YouTube, TikTok and Instagram in its `Default` profile, with `brave` on your `PATH`
 - A desktop keyring (gnome-keyring or KWallet), where Brave keeps the key to its cookies
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) on your `PATH`
 - A recent stable [Rust](https://rustup.rs) toolchain

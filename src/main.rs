@@ -3,6 +3,7 @@ mod db;
 mod download;
 mod filename;
 mod headless;
+mod instagram;
 mod pipeline;
 mod player;
 mod tiktok;
@@ -29,6 +30,7 @@ struct Cli {
 enum Platform {
     Youtube,
     Tiktok,
+    Instagram,
 }
 
 impl Platform {
@@ -37,6 +39,7 @@ impl Platform {
         match self {
             Platform::Youtube => "youtube",
             Platform::Tiktok => "tiktok",
+            Platform::Instagram => "instagram",
         }
     }
 }
@@ -55,7 +58,7 @@ enum Command {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
-    /// List the videos you've liked.
+    /// List the videos you've liked (on Instagram, the ones you've saved).
     Likes {
         #[arg(long, value_enum, default_value = "youtube")]
         platform: Platform,
@@ -178,6 +181,7 @@ async fn main() -> Result<()> {
         } => match platform {
             Platform::Youtube => print_youtube_likes(browser, &profile, limit).await?,
             Platform::Tiktok => print_tiktok_likes(browser, &profile, limit).await?,
+            Platform::Instagram => print_instagram_saves(browser, &profile, limit).await?,
         },
         Command::Sync {
             platform,
@@ -263,6 +267,25 @@ async fn print_tiktok_likes(browser: Browser, profile: &str, limit: usize) -> Re
     Ok(())
 }
 
+/// The `likes` command for Instagram, where the list is the saved videos.
+async fn print_instagram_saves(browser: Browser, profile: &str, limit: usize) -> Result<()> {
+    let cookies = browser::cookies_for(browser, profile, "instagram.com").await?;
+    eprintln!("extracted {} instagram.com cookies", cookies.len());
+    let videos = instagram::saved_videos(browser, &cookies, limit, |_| true).await?;
+    eprintln!("\n{} saved videos:\n", videos.len());
+    for (i, v) in videos.iter().enumerate() {
+        let dur = v
+            .duration_seconds
+            .map_or_else(|| "--:--".into(), |s| format!("{}:{:02}", s / 60, s % 60));
+        let author = v.author_handle.as_deref().unwrap_or("?");
+        // Captions run long with hashtags; the first line is enough here.
+        let caption = v.caption.lines().next().unwrap_or("");
+        println!("{:>3}. [{dur}] @{author} — {caption}", i + 1);
+        println!("     {}", v.url());
+    }
+    Ok(())
+}
+
 /// The app: serves the web UI and keeps running, syncing new likes every
 /// `SYNC_EVERY`. The pipeline's lanes download every liked video in the
 /// background, and the UI can ask it for one right away.
@@ -284,7 +307,11 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
     std::fs::create_dir_all(&media_root)
         .with_context(|| format!("creating {}", media_root.display()))?;
     let pipeline = pipeline::Pipeline::start(
-        &[Platform::Youtube.name(), Platform::Tiktok.name()],
+        &[
+            Platform::Youtube.name(),
+            Platform::Tiktok.name(),
+            Platform::Instagram.name(),
+        ],
         browser,
         profile,
         db_path,
@@ -312,7 +339,7 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
         ticks.tick().await;
         // A failed sync (offline, logged out) is logged, not fatal: the next
         // tick tries again, and one platform failing doesn't skip the others.
-        for platform in [Platform::Youtube, Platform::Tiktok] {
+        for platform in [Platform::Youtube, Platform::Tiktok, Platform::Instagram] {
             let name = platform.name();
             status.send_modify(|s| s.set(name, web::SyncState::Running));
             let state = match sync(platform, browser, profile, &mut conn, false).await {
@@ -388,6 +415,7 @@ async fn sync(
     match platform {
         Platform::Youtube => sync_youtube(browser, profile, conn, full).await,
         Platform::Tiktok => sync_tiktok(browser, profile, conn, full).await,
+        Platform::Instagram => sync_instagram(browser, profile, conn, full).await,
     }
 }
 
@@ -494,6 +522,51 @@ async fn sync_tiktok(
         })
         .collect();
     let added = db::insert_new(conn, "tiktok", &rows)?;
+    db::finish_sync(conn, sync_id, added)?;
+    Ok((videos.len(), added))
+}
+
+/// Pull newly saved Instagram videos into the database. Returns (listed, added).
+/// Instagram's "like" for keeping a video is saving it, so saves are what the
+/// archive holds; a liked but unsaved post isn't kept.
+async fn sync_instagram(
+    browser: Browser,
+    profile: &str,
+    conn: &mut rusqlite::Connection,
+    full: bool,
+) -> Result<(usize, usize)> {
+    let sync_id = db::start_sync(conn, "instagram")?;
+
+    // Re-read cookies on every sync: the browser rotates them while it runs.
+    let cookies = browser::cookies_for(browser, profile, "instagram.com").await?;
+    let known = db::video_ids(conn, "instagram")?;
+    let mut keep_going = until_known(&known, full);
+    let videos = instagram::saved_videos(browser, &cookies, 0, |v| keep_going(&v.code)).await?;
+
+    let urls: Vec<String> = videos.iter().map(instagram::Video::url).collect();
+    let raws: Vec<String> = videos.iter().map(|v| v.raw.to_string()).collect();
+    // Listed newest save first; insert oldest first so rowid follows save order.
+    let rows: Vec<db::NewVideo> = videos
+        .iter()
+        .zip(&urls)
+        .zip(&raws)
+        .rev()
+        .map(|((v, url), raw)| db::NewVideo {
+            video_id: &v.code,
+            url,
+            title: (!v.caption.is_empty()).then_some(v.caption.as_str()),
+            author_id: v.author_id.as_deref(),
+            author_name: v.author_handle.as_deref(),
+            duration_seconds: v.duration_seconds,
+            // Like TikTok, Instagram leaves deleted and private posts out of
+            // the saved list.
+            available: true,
+            raw_json: raw,
+            kind: "video",
+            posted_at: v.posted_at,
+        })
+        .collect();
+    let added = db::insert_new(conn, "instagram", &rows)?;
     db::finish_sync(conn, sync_id, added)?;
     Ok((videos.len(), added))
 }
