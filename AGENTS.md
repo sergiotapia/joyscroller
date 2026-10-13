@@ -47,6 +47,9 @@ assets/         The UI's look, built into the binary by web.rs (`ASSETS`) and se
                 by `just videojs` from the versions pinned in videojs/; don't edit it by hand),
                 radio.webp (rendered by blender/radio.py; the page overlays a live clock on its LCD),
                 splat.webp and icon-*.webp (rendered by blender/badges.py in the radio's materials),
+                the video page's hardware (rendered by blender/player.py: the Download now dome,
+                the player's casing, buttons, slot, thumbs, LCD and LEDs, mostly nine-slice images
+                and up/pressed sprites whose sizes player.css follows),
                 and fonts/ (Luckiest Guy, Fredoka, DSEG LCD digits, with their licenses)
 ```
 

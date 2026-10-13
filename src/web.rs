@@ -139,7 +139,7 @@ pub async fn serve(
 /// The stylesheets, scripts, fonts and pictures, as (name, type, contents).
 /// They're built into the executable, so the app stays a single file.
 /// `videojs.js` is Video.js 10, bundled by `just videojs`.
-const ASSETS: [(&str, &str, &[u8]); 17] = [
+const ASSETS: [(&str, &str, &[u8]); 28] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -199,6 +199,61 @@ const ASSETS: [(&str, &str, &[u8]); 17] = [
         "icon-downloading.webp",
         "image/webp",
         include_bytes!("../assets/icon-downloading.webp"),
+    ),
+    (
+        "casing.webp",
+        "image/webp",
+        include_bytes!("../assets/casing.webp"),
+    ),
+    (
+        "panel.webp",
+        "image/webp",
+        include_bytes!("../assets/panel.webp"),
+    ),
+    (
+        "dome-download.webp",
+        "image/webp",
+        include_bytes!("../assets/dome-download.webp"),
+    ),
+    (
+        "dome-play.webp",
+        "image/webp",
+        include_bytes!("../assets/dome-play.webp"),
+    ),
+    (
+        "button-violet.webp",
+        "image/webp",
+        include_bytes!("../assets/button-violet.webp"),
+    ),
+    (
+        "button-red.webp",
+        "image/webp",
+        include_bytes!("../assets/button-red.webp"),
+    ),
+    (
+        "groove.webp",
+        "image/webp",
+        include_bytes!("../assets/groove.webp"),
+    ),
+    (
+        "fader.webp",
+        "image/webp",
+        include_bytes!("../assets/fader.webp"),
+    ),
+    (
+        "ball.webp",
+        "image/webp",
+        include_bytes!("../assets/ball.webp"),
+    ),
+    (
+        "lcd.webp",
+        "image/webp",
+        include_bytes!("../assets/lcd.webp"),
+    ),
+    (
+        "led.webp",
+        "image/webp",
+        include_bytes!("../assets/led.webp"),
     ),
     (
         "splat.svg",
