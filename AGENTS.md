@@ -38,6 +38,10 @@ src/download.rs Downloads one video's media into its folder: with yt-dlp (`video
 src/filename.rs safe_name: text to a file/folder name valid on Linux, macOS and Windows (forbidden characters,
                 reserved device names, trailing dots, invisible characters, byte-length limits)
 src/db.rs       SQLite schema (the SCHEMA const) and every query; the only module that touches the archive DB
+assets/         The UI's look, built into the binary by web.rs (`ASSETS`) and served at /assets/<file>:
+                style.css (Windows XP desktop + Nickelodeon clock radio), desktop.svg, splat.svg,
+                radio.webp (rendered by blender/radio.py; the page overlays a live clock on its LCD),
+                and fonts/ (Luckiest Guy, Fredoka, DSEG LCD digits, with their licenses)
 ```
 
 Config: `Cargo.toml` (lint levels), `clippy.toml`, `deny.toml`, `justfile`.

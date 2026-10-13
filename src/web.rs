@@ -4,7 +4,9 @@
 //! right away, and `/downloading` shows what the pipeline is doing. Every open page
 //! keeps a Server-Sent Events connection, over which newly stored videos, the
 //! per-platform counts, what each sync is doing and the pipeline's progress
-//! arrive as soon as they change.
+//! arrive as soon as they change. The pages are dressed as a Windows XP
+//! desktop with a Nickelodeon clock radio in the side panel; the stylesheet,
+//! fonts and pictures in `assets/` are built into the executable.
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -106,9 +108,77 @@ pub async fn serve(
         )
         .route("/downloading", get(downloading_page))
         .route("/events", get(events))
+        .route("/assets/{name}", get(asset))
         .with_state(app);
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// The stylesheet, fonts and pictures, as (name, type, contents). They're
+/// built into the executable, so the app stays a single file.
+const ASSETS: [(&str, &str, &[u8]); 8] = [
+    (
+        "style.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../assets/style.css"),
+    ),
+    (
+        "desktop.svg",
+        "image/svg+xml",
+        include_bytes!("../assets/desktop.svg"),
+    ),
+    (
+        "radio.webp",
+        "image/webp",
+        include_bytes!("../assets/radio.webp"),
+    ),
+    (
+        "splat.svg",
+        "image/svg+xml",
+        include_bytes!("../assets/splat.svg"),
+    ),
+    (
+        "luckiest-guy.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/luckiest-guy.woff2"),
+    ),
+    (
+        "fredoka.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/fredoka.woff2"),
+    ),
+    (
+        "dseg7-classic-bold.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/dseg7-classic-bold.woff2"),
+    ),
+    (
+        "dseg14-classic-bold.woff2",
+        "font/woff2",
+        include_bytes!("../assets/fonts/dseg14-classic-bold.woff2"),
+    ),
+];
+
+async fn asset(Path(name): Path<String>) -> Result<Response, Failure> {
+    let &(_, content_type, body) = ASSETS
+        .iter()
+        .find(|(file, ..)| *file == name)
+        .ok_or_else(not_found)?;
+    // Fonts never change. The rest changes with the app, so the browser
+    // checks for a new copy each time.
+    let cache = if content_type.starts_with("font/") {
+        "max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, cache),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 /// A failed request: a status code and a plain-text message.
@@ -170,27 +240,27 @@ async fn list_page(
     };
     let pager = pager(platform, page, pages);
     let mut main = format!(
-        "<h1>{heading}</h1>\n\
-         <p id=\"new\" hidden><a href=\"{}\"><span id=\"new-count\">0</span> new — show them</a></p>\n\
-         {pager}\n",
+        "<p id=\"new\" class=\"balloon\" hidden><a href=\"{}\"><span id=\"new-count\">0</span> new likes — show them</a></p>\n\
+         {pager}",
         list_href(platform, 1)
     );
-    if videos.is_empty() {
-        main.push_str(if page == 1 {
-            "<p id=\"empty\">No liked videos yet. They show up here as each sync finishes.</p>\n"
-        } else {
-            "<p id=\"empty\">Nothing on this page.</p>\n"
-        });
-    }
     main.push_str(
-        "<table>\n<thead><tr><th></th><th>Title</th><th>Author</th><th>Length</th>\
-         <th>Posted</th><th>Added</th><th>Source</th></tr></thead>\n<tbody id=\"videos\">\n",
+        "<table class=\"list\">\n<thead><tr><th></th><th>Title</th><th class=\"author\">Author</th>\
+         <th class=\"num\">Length</th><th class=\"date\">Posted</th><th class=\"date\">Added</th>\
+         <th class=\"source\">Source</th></tr></thead>\n<tbody id=\"videos\">\n",
     );
     for video in &videos {
         main.push_str(&video_row(video));
         main.push('\n');
     }
     main.push_str("</tbody>\n</table>\n");
+    if videos.is_empty() {
+        main.push_str(if page == 1 {
+            "<p id=\"empty\" class=\"empty\">No liked videos yet. They show up here as each sync finishes.</p>\n"
+        } else {
+            "<p id=\"empty\" class=\"empty\">Nothing on this page.</p>\n"
+        });
+    }
     main.push_str(&pager);
 
     Ok(Html(layout(
@@ -200,6 +270,11 @@ async fn list_page(
             status: &status,
             counts: &counts,
             board: &board,
+            footer: format!(
+                "<span data-count=\"{}\">{}</span> likes",
+                platform.unwrap_or("all"),
+                count_of(&counts, platform)
+            ),
             after,
             live: page == 1,
         },
@@ -225,20 +300,14 @@ async fn video_page(
     let source = display_name(&video.platform);
     let title = short_title(&video);
 
-    let thumbnail = if video.platform == "youtube" {
-        format!(
-            "<p><a href=\"{url}\"><img src=\"https://i.ytimg.com/vi/{id}/hqdefault.jpg\" \
-             width=\"480\" height=\"360\" alt=\"\"></a></p>\n",
-            url = escape(&video.url),
-            id = escape(&video.video_id),
-        )
-    } else {
-        String::new()
-    };
+    let thumbnail = thumbnail(&video, "hqdefault", &escape(&video.url));
     // TikTok captions run to several lines; the heading only has the first.
     let caption = match video.title.as_deref() {
         Some(full) if full.trim() != title => {
-            format!("<p>{}</p>\n", escape(full).replace('\n', "<br>\n"))
+            format!(
+                "<p class=\"caption\">{}</p>\n",
+                escape(full).replace('\n', "<br>\n")
+            )
         }
         _ => String::new(),
     };
@@ -274,7 +343,6 @@ async fn video_page(
             }
             .into(),
         ),
-        ("Media", media_html(&video, download.as_ref(), &board)),
         ("ID", format!("<code>{}</code>", escape(&video.video_id))),
     ]
     .map(|(name, value)| format!("<dt>{name}</dt><dd>{value}</dd>\n"))
@@ -284,15 +352,24 @@ async fn video_page(
         .and_then(|value| serde_json::to_string_pretty(&value))
         .unwrap_or(raw_json);
     let main = format!(
-        "<p><a href=\"{back}\">← {source} likes</a></p>\n\
-         <h1>{heading}</h1>\n\
-         {thumbnail}{caption}\
-         <p><a href=\"{url}\">Open on {source}</a></p>\n\
-         <dl>\n{fields}</dl>\n\
-         <details><summary>Raw JSON</summary><pre>{json}</pre></details>\n",
+        "<div class=\"video\">\n\
+         <div class=\"preview\">\n{thumbnail}\n\
+         <a class=\"button button-go\" href=\"{url}\">{icon}Open on {source}</a>\n\
+         <a class=\"button\" href=\"{back}\">← {source} likes</a>\n\
+         </div>\n\
+         <div>\n\
+         <h2 class=\"video-title\">{heading}</h2>\n\
+         {caption}\
+         <fieldset class=\"group\"><legend>Media</legend>{media}</fieldset>\n\
+         <fieldset class=\"group\"><legend>Details</legend><dl class=\"facts\">\n{fields}</dl></fieldset>\n\
+         <details class=\"raw\"><summary>Raw JSON</summary><pre>{json}</pre></details>\n\
+         </div>\n\
+         </div>\n",
+        icon = icon(Section::Likes(Some(&video.platform))),
         back = list_href(Some(&video.platform), 1),
         heading = escape(&title),
         url = escape(&video.url),
+        media = media_html(&video, download.as_ref(), &board),
         json = escape(&pretty),
     );
 
@@ -303,6 +380,7 @@ async fn video_page(
             status: &status,
             counts: &counts,
             board: &board,
+            footer: format!("{source} · {}", escape(&author_label(&video))),
             after,
             live: false,
         },
@@ -374,7 +452,7 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
          right away, alongside the lanes."
     };
     let main = format!(
-        "<h1>Downloading</h1>\n<p>{about}</p>\n\
+        "<p class=\"intro\">{about}</p>\n\
          <div id=\"downloads\">\n{}</div>\n",
         board_html(&board)
     );
@@ -385,6 +463,10 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
             status: &status,
             counts: &counts,
             board: &board,
+            footer: format!(
+                "<span data-count=\"downloading\">{}</span> downloading",
+                busy_count(&board)
+            ),
             after,
             live: false,
         },
@@ -490,6 +572,8 @@ struct Frame<'a> {
     status: &'a SyncStatus,
     counts: &'a [(String, usize)],
     board: &'a Board,
+    /// The window's status bar, under its contents.
+    footer: String,
     /// The newest video's rowid when the page was rendered.
     after: i64,
     /// Whether new videos go straight into the table (the list's first page)
@@ -497,31 +581,102 @@ struct Frame<'a> {
     live: bool,
 }
 
-fn layout(frame: &Frame, main: &str) -> String {
-    let nav = [(None, "All")]
+/// One of the places the top bar and side panel link to.
+struct NavEntry {
+    section: Section<'static>,
+    href: String,
+    label: &'static str,
+    /// What its `data-count` element is called in the live updates.
+    count_name: &'static str,
+    count: usize,
+}
+
+fn nav_entries(frame: &Frame) -> Vec<NavEntry> {
+    [(None, "All likes")]
         .into_iter()
         .chain(PLATFORMS.map(|(name, label)| (Some(name), label)))
-        .map(|(name, label)| {
-            let link = format!("<a href=\"{}\">{label}</a>", list_href(name, 1));
-            let link = if frame.current == Section::Likes(name) {
-                format!("<b>{link}</b>")
-            } else {
-                link
-            };
+        .map(|(name, label)| NavEntry {
+            section: Section::Likes(name),
+            href: list_href(name, 1),
+            label,
+            count_name: name.unwrap_or("all"),
+            count: count_of(frame.counts, name),
+        })
+        .chain([NavEntry {
+            section: Section::Downloading,
+            href: "/downloading".into(),
+            label: "Downloading",
+            count_name: "downloading",
+            count: busy_count(frame.board),
+        }])
+        .collect()
+}
+
+/// ` aria-current="page"` on the link to the page we're on.
+fn current(frame: &Frame, section: Section) -> &'static str {
+    if frame.current == section {
+        " aria-current=\"page\""
+    } else {
+        ""
+    }
+}
+
+/// The side panel, in the manner of MSN's: a clock radio (a Blender render,
+/// see `assets/blender/radio.py`) whose LCD shows the time, the menu, and
+/// each platform's sync.
+fn panel_html(frame: &Frame, entries: &[NavEntry]) -> String {
+    let menu = |entries: &[NavEntry]| {
+        entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "<li><a href=\"{}\"{}>{}{}\
+                     <span class=\"count\" data-count=\"{}\">{}</span></a></li>\n",
+                    entry.href,
+                    current(frame, entry.section),
+                    icon(entry.section),
+                    entry.label,
+                    entry.count_name,
+                    entry.count
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat()
+    };
+    let (likes, downloads) = entries.split_at(entries.len() - 1);
+    format!(
+        "<aside class=\"panel\">\n\
+         <div class=\"radio\"><img src=\"/assets/radio.webp\" width=\"960\" height=\"691\" alt=\"\">{RADIO_LCD}</div>\n\
+         <nav>\n\
+         <h2>Likes</h2>\n<ul class=\"menu\">\n{likes}</ul>\n\
+         <h2>Downloads</h2>\n<ul class=\"menu\">\n{downloads}</ul>\n\
+         </nav>\n\
+         <h2>Sync</h2>\n<ul class=\"sync\" id=\"status\">\n{status}</ul>\n\
+         </aside>\n",
+        likes = menu(likes),
+        downloads = menu(downloads),
+        status = status_html(frame.status),
+    )
+}
+
+/// The page shell, dressed as a Windows XP desktop: a top bar with the logo
+/// and big icons, the side panel, the page in a window, and a taskbar.
+/// Elements with `data-count` hold a count the live updates change.
+fn layout(frame: &Frame, main: &str) -> String {
+    let entries = nav_entries(frame);
+    let quick = entries
+        .iter()
+        .map(|entry| {
             format!(
-                "<li>{link} (<span id=\"count-{}\">{}</span>)</li>\n",
-                name.unwrap_or("all"),
-                count_of(frame.counts, name)
+                "<a href=\"{}\"{}>{}{}</a>\n",
+                entry.href,
+                current(frame, entry.section),
+                icon(entry.section),
+                entry.label
             )
         })
         .collect::<Vec<_>>()
         .concat();
-    let downloading = "<a href=\"/downloading\">Downloading</a>";
-    let downloading = if frame.current == Section::Downloading {
-        format!("<b>{downloading}</b>")
-    } else {
-        downloading.into()
-    };
     format!(
         "<!doctype html>\n\
          <html lang=\"en\">\n\
@@ -529,16 +684,30 @@ fn layout(frame: &Frame, main: &str) -> String {
          <meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title} – joyscroller</title>\n\
+         <link rel=\"stylesheet\" href=\"/assets/style.css\">\n\
+         <link rel=\"icon\" href=\"/assets/splat.svg\">\n\
          </head>\n\
          <body data-after=\"{after}\" data-platform=\"{platform}\" data-live=\"{live}\" data-size=\"{PAGE_SIZE}\">\n\
-         <header>\n\
-         <p><a href=\"/\"><b>joyscroller</b></a></p>\n\
-         <p id=\"status\">{status}</p>\n\
+         <header class=\"topbar\">\n\
+         <a class=\"logo\" href=\"/\"><span class=\"splat\">joyscroller</span>\
+         <span class=\"edition\">Archive Edition</span></a>\n\
+         <nav class=\"quick\">\n{quick}</nav>\n\
          </header>\n\
-         <hr>\n\
-         <nav>\n<ul>\n{nav}<li>{downloading} (<span id=\"count-downloading\">{busy}</span>)</li>\n</ul>\n</nav>\n\
-         <hr>\n\
-         <main>\n{main}</main>\n\
+         <div class=\"shell\">\n\
+         {panel}\
+         <main class=\"window\">\n\
+         <div class=\"titlebar\">{icon}<h1>{title}</h1>\
+         <div class=\"controls\" aria-hidden=\"true\"><span>_</span><span>□</span>\
+         <a class=\"close\" href=\"/\" tabindex=\"-1\">✕</a></div></div>\n\
+         <div class=\"window-body\">\n{main}</div>\n\
+         <div class=\"statusbar\"><span>{footer}</span><span>Local archive</span></div>\n\
+         </main>\n\
+         </div>\n\
+         <footer class=\"taskbar\">\n\
+         <a class=\"start\" href=\"/\"><img src=\"/assets/splat.svg\" alt=\"\">start</a>\n\
+         <span class=\"task\">{icon}<span>{title}</span></span>\n\
+         <span class=\"tray\" id=\"tray-clock\"></span>\n\
+         </footer>\n\
          <script>{SCRIPT}</script>\n\
          </body>\n\
          </html>\n",
@@ -548,14 +717,47 @@ fn layout(frame: &Frame, main: &str) -> String {
             Section::Likes(platform) => platform.unwrap_or(""),
             Section::Downloading => "",
         },
-        busy = busy_count(frame.board),
         live = u8::from(frame.live),
-        status = status_html(frame.status),
+        panel = panel_html(frame, &entries),
+        icon = icon(frame.current),
+        footer = frame.footer,
     )
 }
 
-/// Formats the `<time>` elements in the viewer's own time zone and applies
-/// the live updates from `/events`.
+/// The live clock on the radio's LCD. The render leaves the glass blank;
+/// this draws the lit digits in a 100 x 45.5 box and maps it onto the glass,
+/// seen at an angle, with the `svg_matrix` that `assets/blender/radio.py`
+/// writes to its JSON. The viewBox is the render's size, so it scales with
+/// the picture.
+const RADIO_LCD: &str = "<svg class=\"radio-lcd\" viewBox=\"0 0 960 691\" aria-hidden=\"true\">\
+<g transform=\"matrix(1.98584 -0.19589 0.00196 1.91723 462.30878 326.37076)\">\
+<text class=\"lcd-ghost\" x=\"84\" y=\"33\">88:88</text>\
+<text class=\"lcd-digits\" id=\"lcd-clock\" x=\"84\" y=\"33\">!!:!!</text>\
+<text class=\"lcd-ampm\" id=\"lcd-ampm\" x=\"95\" y=\"15\"></text>\
+</g></svg>";
+
+/// A glossy little icon for a section, drawn inline. Flat fills only: an
+/// SVG gradient is looked up by id across the page, and breaks when the
+/// copy that defines it is hidden.
+fn icon(section: Section) -> &'static str {
+    match section {
+        Section::Likes(Some("youtube")) => {
+            r##"<svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="6" width="28" height="20" rx="6" fill="#e62117" stroke="#8f0c06" stroke-width="1.5"/><path d="M4 12 Q16 8 28 12 V10 Q28 7.5 25 7.5 H7 Q4 7.5 4 10Z" fill="#fff" opacity=".3"/><path d="M13 11 V21 L22 16Z" fill="#fff"/></svg>"##
+        }
+        Section::Likes(Some("tiktok")) => {
+            r##"<svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="3" width="26" height="26" rx="7" fill="#161616" stroke="#000" stroke-width="1.5"/><g fill="none" stroke-width="3" stroke-linecap="round"><path d="M17 8 V20 M17 8 Q19 12 23 12" stroke="#25f4ee" transform="translate(-1 -1)"/><path d="M17 8 V20 M17 8 Q19 12 23 12" stroke="#fe2c55" transform="translate(1 1)"/><path d="M17 8 V20 M17 8 Q19 12 23 12" stroke="#fff"/></g><circle cx="13.5" cy="21" r="3.8" fill="none" stroke="#fff" stroke-width="3"/></svg>"##
+        }
+        Section::Likes(_) => {
+            r##"<svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 28 C6 20 2 14.5 2 10 A6.8 6.8 0 0 1 16 7.5 A6.8 6.8 0 0 1 30 10 C30 14.5 26 20 16 28Z" fill="#ff3d7f" stroke="#a3123f" stroke-width="1.5"/><ellipse cx="9.5" cy="10.5" rx="4" ry="2.4" fill="#fff" opacity=".6" transform="rotate(-30 9.5 10.5)"/></svg>"##
+        }
+        Section::Downloading => {
+            r##"<svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="#3aa52c" stroke="#1d6a14" stroke-width="1.5"/><ellipse cx="16" cy="9" rx="10" ry="5" fill="#fff" opacity=".3"/><path d="M16 8 V20 M10.5 15 L16 20.5 L21.5 15 M10 24.5 H22" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+        }
+    }
+}
+
+/// Formats the `<time>` elements in the viewer's own time zone, keeps the
+/// clocks going and applies the live updates from `/events`.
 const SCRIPT: &str = r#"
 function showTimes(root) {
   for (const t of root.querySelectorAll("time[data-ts]")) {
@@ -566,6 +768,24 @@ function showTimes(root) {
   }
 }
 showTimes(document);
+
+// The LCD's font draws "!" as a blank digit, so a one-digit hour stays
+// right-aligned over the unlit "88:88".
+function tick() {
+  const now = new Date();
+  const hour = now.getHours() % 12 || 12;
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+  document.getElementById("lcd-clock").textContent = (hour < 10 ? "!" : "") + hour + ":" + minutes;
+  document.getElementById("lcd-ampm").textContent = now.getHours() < 12 ? "AM" : "PM";
+  document.getElementById("tray-clock").textContent =
+    now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+tick();
+setInterval(tick, 1000);
+
+function setCount(name, count) {
+  for (const el of document.querySelectorAll('[data-count="' + name + '"]')) el.textContent = count;
+}
 
 const page = document.body.dataset;
 const events = new EventSource("/events?after=" + page.after);
@@ -589,10 +809,7 @@ events.addEventListener("video", (e) => {
   }
 });
 events.addEventListener("counts", (e) => {
-  for (const [name, count] of Object.entries(JSON.parse(e.data))) {
-    const el = document.getElementById("count-" + name);
-    if (el) el.textContent = count;
-  }
+  for (const [name, count] of Object.entries(JSON.parse(e.data))) setCount(name, count);
 });
 events.addEventListener("status", (e) => {
   const el = document.getElementById("status");
@@ -601,7 +818,7 @@ events.addEventListener("status", (e) => {
 });
 events.addEventListener("downloads", (e) => {
   const update = JSON.parse(e.data);
-  document.getElementById("count-downloading").textContent = update.count;
+  setCount("downloading", update.count);
   const board = document.getElementById("downloads");
   if (board) {
     board.innerHTML = update.board;
@@ -623,26 +840,38 @@ events.addEventListener("downloads", (e) => {
 });
 "#;
 
-/// A video's row in the list table. Also sent as-is in `video` events.
-fn video_row(video: &db::StoredVideo) -> String {
-    let href = video_href(video);
-    let thumbnail = if video.platform == "youtube" {
+/// A video's picture, linked to `href`: YouTube's thumbnail at `size`
+/// (`mqdefault`, `hqdefault`), or for TikTok, whose picture links expire, a
+/// colored tile.
+fn thumbnail(video: &db::StoredVideo, size: &str, href: &str) -> String {
+    if video.platform == "youtube" {
         format!(
-            "<a href=\"{href}\"><img src=\"https://i.ytimg.com/vi/{}/mqdefault.jpg\" \
-             width=\"160\" height=\"90\" loading=\"lazy\" alt=\"\"></a>",
+            "<a href=\"{href}\"><img src=\"https://i.ytimg.com/vi/{}/{size}.jpg\" \
+             loading=\"lazy\" alt=\"\"></a>",
             escape(&video.video_id)
         )
     } else {
-        String::new()
-    };
+        format!(
+            "<a class=\"nothumb\" data-kind=\"{}\" href=\"{href}\" tabindex=\"-1\" aria-hidden=\"true\"></a>",
+            escape(&video.kind)
+        )
+    }
+}
+
+/// A video's row in the list table. Also sent as-is in `video` events.
+fn video_row(video: &db::StoredVideo) -> String {
+    let href = video_href(video);
+    let thumbnail = thumbnail(video, "mqdefault", &href);
     let length = if video.kind == "photo" {
         "photo".into()
     } else {
         video.duration_seconds.map(duration).unwrap_or_default()
     };
     format!(
-        "<tr data-platform=\"{platform}\"><td>{thumbnail}</td><td><a href=\"{href}\">{title}</a></td>\
-         <td>{author}</td><td>{length}</td><td>{posted}</td><td>{added}</td><td>{source}</td></tr>",
+        "<tr data-platform=\"{platform}\"><td class=\"thumb\">{thumbnail}</td>\
+         <td class=\"title\"><a href=\"{href}\">{title}</a></td><td class=\"author\">{author}</td>\
+         <td class=\"num\">{length}</td><td class=\"date\">{posted}</td><td class=\"date\">{added}</td>\
+         <td class=\"source\"><span class=\"badge badge-{platform}\">{source}</span></td></tr>",
         platform = escape(&video.platform),
         title = escape(&truncate(&short_title(video), 120)),
         author = escape(&author_label(video)),
@@ -655,27 +884,36 @@ fn video_row(video: &db::StoredVideo) -> String {
     )
 }
 
-/// The header's line about each platform's sync.
+/// The side panel's list of what each platform's sync is doing, each with
+/// a light: green when synced, blinking yellow while syncing, red when the
+/// last sync failed.
 fn status_html(status: &SyncStatus) -> String {
     PLATFORMS
         .iter()
         .map(|(name, label)| {
-            let state = match status.get(name) {
-                None => "waiting to sync".into(),
-                Some(SyncState::Running) => "syncing…".into(),
-                Some(SyncState::Done { at, added }) => {
-                    format!("synced at {}, {added} new", time(*at, "time"))
-                }
-                Some(SyncState::Failed { at, error }) => format!(
-                    "sync failed at {}: {}",
-                    time(*at, "time"),
-                    escape(&error.replace(['\r', '\n'], " "))
+            let (light, state) = match status.get(name) {
+                None => ("waiting", "waiting to sync".into()),
+                Some(SyncState::Running) => ("running", "syncing…".into()),
+                Some(SyncState::Done { at, added }) => (
+                    "done",
+                    format!("synced at {}, {added} new", time(*at, "time")),
+                ),
+                Some(SyncState::Failed { at, error }) => (
+                    "failed",
+                    format!(
+                        "failed at {}: {}",
+                        time(*at, "time"),
+                        escape(&error.replace(['\r', '\n'], " "))
+                    ),
                 ),
             };
-            format!("{label}: {state}")
+            format!(
+                "<li class=\"sync-{light}\"><span class=\"led\"></span><b>{label}</b>\
+                 <span class=\"what\">{state}</span></li>\n"
+            )
         })
         .collect::<Vec<_>>()
-        .join(" · ")
+        .concat()
 }
 
 /// `{"all": n, "youtube": n, ...}`, for the sidebar's counts.
@@ -699,20 +937,27 @@ fn count_of(counts: &[(String, usize)], platform: Option<&str>) -> usize {
 
 /// The pager line: where we are, and links to the neighboring pages.
 fn pager(platform: Option<&str>, page: usize, pages: usize) -> String {
-    let mut links = vec![format!("Page {page} of {pages}")];
-    if page > 1 {
-        links.push(format!(
-            "<a href=\"{}\">← Newer</a>",
+    let newer = if page > 1 {
+        format!(
+            "<a class=\"button\" href=\"{}\">← Newer</a>",
             list_href(platform, page - 1)
-        ));
-    }
-    if page < pages {
-        links.push(format!(
-            "<a href=\"{}\">Older →</a>",
+        )
+    } else {
+        String::new()
+    };
+    let older = if page < pages {
+        format!(
+            "<a class=\"button\" href=\"{}\">Older →</a>",
             list_href(platform, page + 1)
-        ));
-    }
-    format!("<p>{}</p>\n", links.join(" · "))
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<nav class=\"pager\"><span class=\"where\">Page {} of {}</span>{newer}{older}</nav>\n",
+        thousands(page),
+        thousands(pages)
+    )
 }
 
 fn list_href(platform: Option<&str>, page: usize) -> String {
@@ -799,16 +1044,17 @@ fn media_html(
         Some(html) => (html, " data-busy=\"1\""),
         None if can_download(video, download) => (
             format!(
-                "{}\n<form method=\"post\" action=\"{}/download\"><button>Download now</button></form>",
-                download_html(download),
-                video_href(video)
+                "<form method=\"post\" action=\"{}/download\"><button class=\"dome\">Download now</button></form>\n\
+                 <span>{}</span>",
+                video_href(video),
+                download_html(download)
             ),
             "",
         ),
         None => (download_html(download), ""),
     };
     format!(
-        "<div id=\"media\" data-key=\"{}/{}\"{busy}>{inner}</div>",
+        "<div class=\"media\" id=\"media\" data-key=\"{}/{}\"{busy}>{inner}</div>",
         escape(&video.platform),
         escape(&video.video_id)
     )
@@ -825,17 +1071,23 @@ fn job_html(board: &Board, platform: &str, video_id: &str) -> Option<String> {
 fn activity_html(active: &Active) -> String {
     let doing = active.stage.doing();
     let started = time(active.started_at, "time");
+    // A bar that slides back and forth when how far along isn't known.
+    let busy = "<span class=\"progress progress-busy\"><span></span></span>";
     let Some(progress) = &active.progress else {
-        return format!("{doing}, started {started}");
+        return format!("{doing}, started {started}{busy}");
     };
     let downloaded = progress.downloaded as f64;
-    let amount = match progress.total {
-        Some(total) if total > 0.0 => format!(
-            "{:.0}% of {:.1} MB",
-            (downloaded / total * 100.0).min(100.0),
-            total / 1e6
-        ),
-        _ => format!("{:.1} MB", downloaded / 1e6),
+    let (amount, bar) = match progress.total {
+        Some(total) if total > 0.0 => {
+            let percent = (downloaded / total * 100.0).min(100.0);
+            (
+                format!("{percent:.0}% of {:.1} MB", total / 1e6),
+                format!(
+                    "<span class=\"progress\"><span style=\"width: {percent:.1}%\"></span></span>"
+                ),
+            )
+        }
+        _ => (format!("{:.1} MB", downloaded / 1e6), busy.into()),
     };
     let speed = progress
         .speed
@@ -847,7 +1099,7 @@ fn activity_html(active: &Active) -> String {
         .map(|eta| format!(", {} left", duration(eta)))
         .unwrap_or_default();
     format!(
-        "{doing} {amount}{speed}{eta} (format {}), started {started}",
+        "{doing} {amount}{speed}{eta} (format {}), started {started}{bar}",
         escape(&progress.format_id)
     )
 }
@@ -890,7 +1142,7 @@ fn board_html(board: &Board) -> String {
     let lanes = if lanes.is_empty() {
         "<p>Automatic downloads are off.</p>\n".into()
     } else {
-        format!("<ul>\n{lanes}</ul>\n")
+        format!("<ul class=\"jobs\">\n{lanes}</ul>\n")
     };
     let requested: Vec<String> = board
         .active
@@ -901,7 +1153,7 @@ fn board_html(board: &Board) -> String {
     let requested = if requested.is_empty() {
         "<p>Nothing right now.</p>\n".into()
     } else {
-        format!("<ul>\n{}</ul>\n", requested.concat())
+        format!("<ul class=\"jobs\">\n{}</ul>\n", requested.concat())
     };
     let finished = if board.recent.is_empty() {
         "<p>Nothing since the app started.</p>\n".into()
@@ -910,26 +1162,30 @@ fn board_html(board: &Board) -> String {
             .recent
             .iter()
             .map(|finished| {
-                let outcome = match &finished.outcome {
+                let (class, outcome) = match &finished.outcome {
                     Outcome::Downloaded { bytes, seconds } => {
                         #[expect(clippy::cast_precision_loss, reason = "a size for display")]
                         let megabytes = *bytes as f64 / 1e6;
                         let seconds = i64::try_from(*seconds).unwrap_or(i64::MAX);
-                        format!("downloaded {megabytes:.1} MB in {}", duration(seconds))
+                        (
+                            "downloaded",
+                            format!("downloaded {megabytes:.1} MB in {}", duration(seconds)),
+                        )
                     }
-                    Outcome::Failed(error) => {
-                        format!("failed: {}", escape(&error.replace(['\r', '\n'], " ")))
-                    }
+                    Outcome::Failed(error) => (
+                        "failed",
+                        format!("failed: {}", escape(&error.replace(['\r', '\n'], " "))),
+                    ),
                 };
                 format!(
-                    "<li>{} {} — {outcome}</li>\n",
+                    "<li><span class=\"when\">{}</span>{} — <span class=\"outcome-{class}\">{outcome}</span></li>\n",
                     time(finished.at, "time"),
                     job_link(&finished.job)
                 )
             })
             .collect::<Vec<_>>()
             .concat();
-        format!("<ul>\n{items}</ul>\n")
+        format!("<ul class=\"jobs\">\n{items}</ul>\n")
     };
     format!(
         "<h2>Lanes</h2>\n{lanes}\
@@ -1128,11 +1384,13 @@ mod tests {
     fn rows_escape_titles_and_tag_their_platform() {
         let row = video_row(&video("youtube", Some("<b>hi</b>")));
         assert!(row.starts_with("<tr data-platform=\"youtube\">"));
+        assert!(row.contains("badge-youtube"));
         assert!(row.contains("&lt;b&gt;hi&lt;/b&gt;"));
         assert!(row.contains("i.ytimg.com/vi/abc/"));
         assert!(!row.contains('\n'));
         let tiktok = video_row(&video("tiktok", Some("x")));
         assert!(!tiktok.contains("<img"));
+        assert!(tiktok.contains("class=\"nothumb\" data-kind=\"video\""));
         assert!(tiktok.contains("@someone"));
     }
 
@@ -1169,9 +1427,13 @@ mod tests {
         );
         status.set("tiktok", SyncState::Done { at: 0, added: 2 });
         let html = status_html(&status);
-        assert!(html.starts_with("YouTube: sync failed at"));
+        assert!(
+            html.starts_with("<li class=\"sync-failed\"><span class=\"led\"></span><b>YouTube</b>")
+        );
+        assert!(html.contains("failed at"));
         assert!(html.contains("logged out"));
-        assert!(html.contains("TikTok: synced at"));
+        let tiktok = html.find("<li class=\"sync-done\"><span class=\"led\"></span><b>TikTok</b>");
+        assert!(tiktok.is_some_and(|at| at > 0));
         assert!(html.contains("2 new"));
     }
 
@@ -1207,7 +1469,7 @@ mod tests {
         };
         let html = media_html(&fresh, Some(&failed), &board);
         assert!(html.contains("2 failed tries, last error: 429"));
-        assert!(html.contains("<button>"));
+        assert!(html.contains("<button"));
 
         let saved = db::DownloadState {
             downloaded_at: Some(1),
@@ -1215,12 +1477,12 @@ mod tests {
             bytes: Some(1),
             ..failed
         };
-        assert!(!media_html(&fresh, Some(&saved), &board).contains("<button>"));
+        assert!(!media_html(&fresh, Some(&saved), &board).contains("<button"));
         let gone = db::StoredVideo {
             available: false,
             ..fresh
         };
-        assert!(!media_html(&gone, None, &board).contains("<button>"));
+        assert!(!media_html(&gone, None, &board).contains("<button"));
     }
 
     fn lane(platform: &'static str, left: Option<usize>, waiting: Option<(Wait, i64)>) -> Lane {
@@ -1243,7 +1505,7 @@ mod tests {
             ..Board::default()
         };
         let html = media_html(&tiktok, None, &board);
-        assert!(html.contains("<button>Download now</button>"));
+        assert!(html.contains("Download now</button>"));
         assert!(!html.contains("data-busy"));
 
         let downloading = |job, requested| Active {
@@ -1266,7 +1528,7 @@ mod tests {
             html.contains("downloading 25% of 10.0 MB, 1.0 MB/s, 0:08 left (format 399), started")
         );
         assert!(html.contains("data-busy=\"1\""));
-        assert!(!html.contains("<button>"));
+        assert!(!html.contains("<button"));
 
         let update: serde_json::Value = serde_json::from_str(&downloads_json(&board)).unwrap();
         assert_eq!(update["count"], 2);
@@ -1280,13 +1542,13 @@ mod tests {
         // Titles are escaped; each lane shows what it's on, and the requested
         // download has its own list.
         assert!(page.contains(
-            "<h2>Lanes</h2>\n<ul>\n<li>YouTube: <a href=\"/videos/youtube/abc\">&lt;b&gt;</a> — downloading"
+            "<h2>Lanes</h2>\n<ul class=\"jobs\">\n<li>YouTube: <a href=\"/videos/youtube/abc\">&lt;b&gt;</a> — downloading"
         ));
         assert!(page.contains("(1,234 to go)</li>"));
         assert!(page.contains("<li>TikTok: next download at <time"));
-        assert!(
-            page.contains("<h2>Requested</h2>\n<ul>\n<li>TikTok: <a href=\"/videos/tiktok/abc\">")
-        );
+        assert!(page.contains(
+            "<h2>Requested</h2>\n<ul class=\"jobs\">\n<li>TikTok: <a href=\"/videos/tiktok/abc\">"
+        ));
         assert!(page.contains("Nothing since the app started."));
     }
 
@@ -1324,6 +1586,58 @@ mod tests {
         let downloaded = html.find("downloaded 12.3 MB in 1:15").unwrap();
         let failed = html.find("failed: bad thing").unwrap();
         assert!(downloaded < failed);
+    }
+
+    #[test]
+    fn every_linked_asset_is_served() {
+        let page = layout(
+            &Frame {
+                title: "t",
+                current: Section::Downloading,
+                status: &SyncStatus::default(),
+                counts: &[],
+                board: &Board::default(),
+                footer: String::new(),
+                after: 0,
+                live: false,
+            },
+            "",
+        );
+        let css = std::str::from_utf8(ASSETS[0].2).unwrap();
+        let mut linked = 0;
+        for text in [page.as_str(), css] {
+            for (at, _) in text.match_indices("/assets/") {
+                let rest = &text[at + "/assets/".len()..];
+                let name = &rest[..rest.find(['"', ')']).unwrap()];
+                assert!(
+                    ASSETS.iter().any(|(file, ..)| *file == name),
+                    "{name} is linked but not served"
+                );
+                linked += 1;
+            }
+        }
+        assert!(linked >= ASSETS.len());
+    }
+
+    #[test]
+    fn progress_shows_as_a_bar() {
+        let video = video("youtube", None);
+        let mut active = Active {
+            job: job(&video),
+            requested: true,
+            stage: crate::pipeline::Stage::Download,
+            started_at: 0,
+            progress: None,
+        };
+        assert!(activity_html(&active).contains("progress-busy"));
+        active.progress = Some(crate::download::Progress {
+            downloaded: 2_500_000,
+            total: Some(10_000_000.0),
+            speed: None,
+            eta: None,
+            format_id: "18".into(),
+        });
+        assert!(activity_html(&active).contains("style=\"width: 25.0%\""));
     }
 
     #[test]
