@@ -23,3 +23,8 @@ slop:
 # No doctests: this is a binary crate, and nextest doesn't run them anyway.
 test:
     cargo nextest run --all-features
+
+# Rebuild assets/videojs.js, the Video.js 10 elements the player uses, from
+# the versions pinned in assets/videojs/package-lock.json. Needs Node.
+videojs:
+    cd assets/videojs && npm ci && npm run build

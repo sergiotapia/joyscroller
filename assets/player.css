@@ -1,0 +1,389 @@
+/* The player on a video's page (src/player.rs), molded in the clock radio's
+   plastic: a purple casing on the top bar's slime-green bumper, a dark
+   screen, and a strip of controls under it, with the red dome to play,
+   Explorer's progress bar to seek, a balloon tooltip for the time under the
+   pointer, and the radio's green LCD for the time. Video.js ships its
+   elements unstyled and marks their state in data-* attributes, which pick
+   the icons here. Uses style.css's colors and fonts. */
+
+video-player, audio-player, media-controls { display: contents; }
+
+/* The screen is as tall as the window allows under the top bar and the
+   page's title bar, with room for the strip and the taskbar below it. */
+:root { --screen-height: min(760px, max(320px, 100vh - 310px)); }
+
+.player {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  width: fit-content;
+  min-width: min(100%, 440px);
+  max-width: 100%;
+  margin-bottom: 12px;
+  padding: 12px 12px 0;
+  border-radius: 26px 26px 20px 20px;
+  color: #fff;
+  background: linear-gradient(170deg, #7b52dc 0%, var(--purple) 38%, var(--purple-dark) 100%);
+  box-shadow:
+    inset 0 2px 1px rgba(255, 255, 255, .45), inset 0 -4px 2px rgba(0, 0, 0, .35),
+    0 5px 0 var(--slime), 0 9px 0 var(--slime-dark), 0 16px 26px rgba(0, 0, 40, .4);
+}
+
+/* ---- The screen --------------------------------------------------------- */
+
+.player-screen {
+  position: relative;
+  display: grid;
+  place-items: center;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 14px;
+  background: #07040f;
+  box-shadow: 0 0 0 3px #1c0e3f, 0 0 0 5px rgba(255, 255, 255, .16);
+}
+.player video {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: var(--screen-height);
+}
+.player-poster { position: absolute; inset: 0; }
+.player-poster img { display: block; width: 100%; height: 100%; object-fit: contain; background: #07040f; }
+.player-poster:not([data-visible]) { display: none; }
+
+/* The big dome over the picture, until the video first plays. */
+.player-start {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  background: radial-gradient(circle at 34% 26%, #ffe0d8 0 7%, #ff7660 20%, var(--dome) 52%, #a3150e 100%);
+  box-shadow: 0 7px 0 var(--purple), 0 10px 0 var(--purple-dark), 0 14px 18px rgba(0, 0, 0, .45);
+  transform: translate(-50%, -55%);
+  transition: transform .06s, box-shadow .06s;
+}
+.player-start:hover { filter: brightness(1.08); }
+.player-start:active { transform: translate(-50%, -50%); box-shadow: 0 2px 0 var(--purple), 0 5px 0 var(--purple-dark), 0 7px 10px rgba(0, 0, 0, .35); }
+.player-start svg { width: 36px; height: 36px; margin-left: 4px; filter: drop-shadow(1px 2px 0 #7a0d08); }
+.player-start[data-started] { display: none; }
+
+.player-busy { position: absolute; top: 50%; left: 50%; display: none; transform: translate(-50%, -50%); }
+.player-busy[data-visible] { display: block; }
+.player-busy svg { width: 54px; height: 54px; color: var(--slime); filter: drop-shadow(0 0 6px rgba(166, 229, 43, .6)); animation: spin .9s linear infinite; }
+@keyframes spin { to { transform: rotate(1turn); } }
+
+.player-error {
+  position: absolute;
+  inset: auto 12px 12px;
+  margin: 0;
+  padding: 7px 12px;
+  color: #000;
+  background: #ffffe1;
+  border: 1px solid #000;
+  border-radius: 9px;
+  box-shadow: 2px 3px 5px rgba(0, 0, 0, .35);
+}
+
+/* ---- The strip of controls --------------------------------------------- */
+
+.player-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 4px 14px;
+}
+media-icon { display: inline-flex; }
+media-icon svg { width: 18px; height: 18px; }
+
+.player-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  background: radial-gradient(circle at 35% 28%, #c6b2ff 0 8%, var(--violet) 32%, #5a34b8 78%, #3b1f85);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, .5), 0 3px 0 #1a0b42, 0 4px 6px rgba(0, 0, 0, .35);
+  transition: transform .06s, box-shadow .06s;
+}
+.player-button:hover { filter: brightness(1.12); }
+.player-button:active { transform: translateY(2px); box-shadow: inset 0 1px 1px rgba(255, 255, 255, .5), 0 1px 0 #1a0b42; }
+.player-button svg { filter: drop-shadow(0 1px 0 rgba(0, 0, 0, .45)); }
+.player :focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+/* The play button is a small red dome. */
+.player-play {
+  width: 44px;
+  height: 44px;
+  background: radial-gradient(circle at 34% 26%, #ffe0d8 0 8%, #ff7660 22%, var(--dome) 55%, #a3150e 100%);
+  box-shadow: 0 4px 0 #1a0b42, 0 6px 8px rgba(0, 0, 0, .35);
+}
+.player-play:active { box-shadow: 0 1px 0 #1a0b42; }
+.player-play svg { width: 20px; height: 20px; filter: drop-shadow(1px 1px 0 #7a0d08); }
+
+/* Each button holds every icon it can show; its state picks one. */
+.when-playing, .when-ended, .when-low, .when-high, .when-fullscreen { display: none !important; }
+.player-play:not([data-paused]) .when-paused,
+.player-play[data-ended] .when-paused { display: none !important; }
+.player-play:not([data-paused]):not([data-ended]) .when-playing,
+.player-play[data-ended] .when-ended { display: inline-flex !important; }
+media-mute-button:not([data-volume-level="off"]) .when-off { display: none !important; }
+media-mute-button:is([data-volume-level="low"], [data-volume-level="medium"]) .when-low,
+media-mute-button[data-volume-level="high"] .when-high { display: inline-flex !important; }
+media-fullscreen-button[data-fullscreen] .when-windowed { display: none !important; }
+media-fullscreen-button[data-fullscreen] .when-fullscreen { display: inline-flex !important; }
+
+/* Seeking: Explorer's progress bar, with a trackbar thumb. The track is the
+   bar's inside; its outline, held off by a white shadow, is the frame. */
+.player-seek, .player-volume {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  cursor: pointer;
+  touch-action: none;
+}
+.player-seek { flex: 1; min-width: 80px; margin: 0 4px; }
+.player-seek media-slider-track {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 11px;
+  overflow: hidden;
+  background: #fff;
+  border-radius: 2px;
+  outline: 1px solid #1c0e3f;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px #fff, inset 1px 1px 2px rgba(0, 0, 0, .25);
+}
+.player-seek media-slider-buffer,
+.player-seek media-slider-fill { position: absolute; inset: 0 auto 0 0; }
+.player-seek media-slider-buffer { width: var(--media-slider-buffer); background: #e4ecd8; }
+.player-seek media-slider-fill {
+  width: var(--media-slider-fill);
+  background:
+    linear-gradient(rgba(255, 255, 255, .65), rgba(255, 255, 255, 0) 55%),
+    repeating-linear-gradient(90deg, #2ec22a 0 8px, transparent 8px 10px);
+}
+.player-seek[data-dragging] media-slider-fill { width: var(--media-slider-pointer); }
+.player-seek media-slider-thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--media-slider-fill);
+  width: 11px;
+  height: 21px;
+  background: linear-gradient(#fff, #ecebe6 86%, #d6d0c5);
+  border: 1px solid #003c74;
+  border-radius: 3px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  transform: translate(-50%, -50%);
+}
+.player-seek[data-dragging] media-slider-thumb { left: var(--media-slider-pointer); }
+.player-seek[data-interactive] media-slider-thumb { box-shadow: inset 0 -2px #fbc761, 0 1px 2px rgba(0, 0, 0, .4); }
+.player-seek media-slider-preview {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: var(--media-slider-pointer);
+  padding: 1px 7px;
+  color: #000;
+  font: 11px var(--font-ui);
+  white-space: nowrap;
+  pointer-events: none;
+  background: #ffffe1;
+  border: 1px solid #000;
+  border-radius: 4px;
+  box-shadow: 2px 2px 3px rgba(0, 0, 0, .3);
+  opacity: 0;
+  transform: translateX(-50%);
+  transition: opacity .12s;
+}
+.player-seek:is([data-pointing], [data-dragging]) media-slider-preview { opacity: 1; }
+
+/* The time, on the radio's LCD. */
+.player-lcd {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  gap: 5px;
+  padding: 7px 9px 6px;
+  color: #8dff3c;
+  font: 14px/1 "DSEG7", monospace;
+  text-shadow: 0 0 1px #b4ff5a, 0 0 6px rgba(110, 255, 40, .55);
+  background: linear-gradient(#0b1606, #15280b);
+  border-radius: 6px;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, .85), 0 1px 0 rgba(255, 255, 255, .25);
+}
+.player-lcd media-time-separator { font: 11px "DSEG14", monospace; opacity: .55; }
+.player-lcd [data-unavailable] { opacity: .35; }
+
+.player-volume { flex: none; width: 68px; }
+.player-volume media-slider-track {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(10, 0, 30, .55);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .6), 0 1px 0 rgba(255, 255, 255, .2);
+}
+.player-volume media-slider-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--media-slider-fill);
+  border-radius: inherit;
+  background: linear-gradient(#d4ff7a, var(--slime) 50%, var(--slime-dark));
+}
+.player-volume[data-dragging] media-slider-fill { width: var(--media-slider-pointer); }
+.player-volume media-slider-thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--media-slider-fill);
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff 0 15%, var(--slime) 55%, var(--slime-dark));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .5);
+  transform: translate(-50%, -50%);
+}
+.player-volume[data-dragging] media-slider-thumb { left: var(--media-slider-pointer); }
+
+/* ---- Fullscreen: the screen fills it, and the strip floats over the
+   bottom, fading out while the mouse rests. --------------------------- */
+
+.player:fullscreen {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: #000;
+  box-shadow: none;
+}
+.player:fullscreen .player-screen { width: 100%; height: 100%; border-radius: 0; box-shadow: none; }
+.player:fullscreen video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
+.player:fullscreen .player-strip {
+  position: absolute;
+  inset: auto 24px 20px;
+  width: auto;
+  padding: 10px 14px;
+  border-radius: 22px;
+  background: linear-gradient(170deg, #7b52dc 0%, var(--purple) 38%, var(--purple-dark) 100%);
+  box-shadow: inset 0 2px 1px rgba(255, 255, 255, .45), 0 4px 0 var(--slime), 0 7px 0 var(--slime-dark), 0 12px 24px rgba(0, 0, 0, .5);
+  transition: opacity .25s;
+}
+.player:fullscreen .player-strip:not([data-visible]) { opacity: 0; pointer-events: none; }
+.player:fullscreen:has(.player-strip:not([data-visible])) { cursor: none; }
+
+/* ---- A photo post's slideshow ------------------------------------------ */
+
+.slideshow {
+  display: block;
+  height: var(--screen-height);
+  aspect-ratio: 3 / 4;
+  touch-action: pan-y;
+  user-select: none;
+  cursor: grab;
+}
+.slideshow.dragging { cursor: grabbing; }
+.slides {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  transition: transform .35s cubic-bezier(.2, .8, .2, 1);
+}
+.slides img {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.slide-turn {
+  position: absolute;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  background: radial-gradient(circle at 35% 28%, #c6b2ff 0 8%, var(--violet) 32%, #5a34b8 78%, #3b1f85);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, .5), 0 4px 0 #1a0b42, 0 6px 10px rgba(0, 0, 0, .45);
+  transform: translateY(-50%);
+  transition: opacity .2s, transform .06s;
+}
+.slide-turn:hover { filter: brightness(1.12); }
+.slide-turn:active { transform: translateY(calc(-50% + 3px)); box-shadow: inset 0 1px 1px rgba(255, 255, 255, .5), 0 1px 0 #1a0b42; }
+.slide-turn:disabled { opacity: 0; pointer-events: none; }
+.slide-turn svg { width: 22px; height: 22px; filter: drop-shadow(0 1px 0 rgba(0, 0, 0, .5)); }
+.slide-prev { left: 12px; }
+.slide-prev svg { transform: scaleX(-1); }
+.slide-next { right: 12px; }
+
+/* Which picture, on a little LCD. */
+.slide-count {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 6px 8px 5px;
+  color: #8dff3c;
+  font: 12px/1 "DSEG14", monospace;
+  text-shadow: 0 0 1px #b4ff5a, 0 0 6px rgba(110, 255, 40, .55);
+  background: linear-gradient(#0b1606, #15280b);
+  border-radius: 6px;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, .85), 0 0 0 2px rgba(43, 22, 96, .8);
+  pointer-events: none;
+}
+
+/* The dots are the side panel's LEDs: the picture on show is lit. */
+.slide-dots {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+  max-width: calc(100% - 24px);
+  padding: 5px 8px;
+  border-radius: 12px;
+  background: rgba(43, 22, 96, .7);
+  transform: translateX(-50%);
+}
+.slide-dot {
+  --led: #9aa3b5;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  background: radial-gradient(circle at 35% 30%, #fff 0 14%, var(--led) 55%);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .35);
+}
+.slide-dot[aria-current] { --led: var(--slime); box-shadow: 0 0 0 1px rgba(0, 0, 0, .35), 0 0 7px var(--led); }
+.slide-dots:has(.slide-dot:nth-child(21)) { display: none; }
+
+@media (max-width: 680px) {
+  .player { padding: 8px 8px 0; border-radius: 20px 20px 16px 16px; }
+  .player-strip { gap: 7px; }
+  .player-volume { display: none; }
+  .player-lcd { font-size: 12px; padding: 6px 7px 5px; }
+}

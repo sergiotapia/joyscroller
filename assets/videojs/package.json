@@ -1,0 +1,14 @@
+{
+  "name": "joyscroller-videojs",
+  "private": true,
+  "description": "Builds the Video.js 10 elements the player uses into ../videojs.js. Run `just videojs`.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --minify --format=esm --target=es2022 --banner:js=\"// Video.js 10 (@videojs/html, Apache-2.0, see videojs/LICENSE), bundled from assets/videojs by just videojs. Don't edit.\" --outfile=../videojs.js"
+  },
+  "devDependencies": {
+    "@videojs/html": "10.0.1",
+    "esbuild": "0.25.10"
+  }
+}

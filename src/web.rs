@@ -4,16 +4,20 @@
 //! right away, and `/downloading` shows what the pipeline is doing. Every open page
 //! keeps a Server-Sent Events connection, over which newly stored videos, the
 //! per-platform counts, what each sync is doing and the pipeline's progress
-//! arrive as soon as they change. The pages are dressed as a Windows XP
-//! desktop with a Nickelodeon clock radio in the side panel; the stylesheet,
-//! fonts and pictures in `assets/` are built into the executable.
+//! arrive as soon as they change. Once a video is downloaded, its page plays
+//! it (see `player.rs`), from files served under the video's own path. The
+//! pages are dressed as a Windows XP desktop with a Nickelodeon clock radio
+//! in the side panel; the stylesheet, scripts, fonts and pictures in
+//! `assets/` are built into the executable.
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::body::Body;
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -23,9 +27,11 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tower_http::services::ServeFile;
 
 use crate::db;
 use crate::pipeline::{Active, Board, Job, Lane, Outcome, Pipeline, Wait};
+use crate::player;
 
 /// Where the UI listens. Localhost only: the archive is the user's own.
 pub const ADDR: &str = "127.0.0.1:4774";
@@ -83,6 +89,8 @@ struct App {
     db: Arc<Mutex<Connection>>,
     status: watch::Receiver<SyncStatus>,
     pipeline: Pipeline,
+    /// Where downloads are saved; each one's folder is relative to it.
+    media_root: PathBuf,
 }
 
 impl App {
@@ -101,11 +109,13 @@ pub async fn serve(
     conn: Connection,
     status: watch::Receiver<SyncStatus>,
     pipeline: Pipeline,
+    media_root: PathBuf,
 ) -> Result<()> {
     let app = App {
         db: Arc::new(Mutex::new(conn)),
         status,
         pipeline,
+        media_root,
     };
     let router = Router::new()
         .route("/", get(list_page))
@@ -113,6 +123,10 @@ pub async fn serve(
         .route(
             "/videos/{platform}/{video_id}/download",
             post(request_download),
+        )
+        .route(
+            "/videos/{platform}/{video_id}/media/{file}",
+            get(media_file),
         )
         .route("/downloading", get(downloading_page))
         .route("/events", get(events))
@@ -122,13 +136,29 @@ pub async fn serve(
     Ok(())
 }
 
-/// The stylesheet, fonts and pictures, as (name, type, contents). They're
-/// built into the executable, so the app stays a single file.
-const ASSETS: [(&str, &str, &[u8]); 14] = [
+/// The stylesheets, scripts, fonts and pictures, as (name, type, contents).
+/// They're built into the executable, so the app stays a single file.
+/// `videojs.js` is Video.js 10, bundled by `just videojs`.
+const ASSETS: [(&str, &str, &[u8]); 17] = [
     (
         "style.css",
         "text/css; charset=utf-8",
         include_bytes!("../assets/style.css"),
+    ),
+    (
+        "player.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../assets/player.css"),
+    ),
+    (
+        "player.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../assets/player.js"),
+    ),
+    (
+        "videojs.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../assets/videojs.js"),
     ),
     (
         "lab.webp",
@@ -322,6 +352,7 @@ async fn list_page(
             ),
             after,
             live: page == 1,
+            player: false,
         },
         &main,
     )))
@@ -345,7 +376,7 @@ async fn video_page(
     let source = display_name(&video.platform);
     let title = short_title(&video);
 
-    let thumbnail = thumbnail(&video, "hqdefault", &escape(&video.url));
+    let (screen, playing) = screen_html(&video, download.as_ref());
     // TikTok captions run to several lines; the heading only has the first.
     let caption = match video.title.as_deref() {
         Some(full) if full.trim() != title => {
@@ -356,9 +387,57 @@ async fn video_page(
         }
         _ => String::new(),
     };
-    let on_source = format!("On {source}");
-    let fields = [
-        ("Author", author_html(&video)),
+    let fields = facts_html(&video);
+    // Fall back to the stored text if it somehow isn't valid JSON.
+    let pretty = serde_json::from_str::<serde_json::Value>(&raw_json)
+        .and_then(|value| serde_json::to_string_pretty(&value))
+        .unwrap_or(raw_json);
+    let main = format!(
+        "<div class=\"video{playing}\">\n\
+         <div class=\"preview\">\n{screen}\n\
+         <div class=\"links\">\n\
+         <a class=\"button button-go\" href=\"{url}\">{icon}Open on {source}</a>\n\
+         <a class=\"button\" href=\"{back}\">← {source} likes</a>\n\
+         </div>\n\
+         </div>\n\
+         <div>\n\
+         <h2 class=\"video-title\">{heading}</h2>\n\
+         {caption}\
+         <fieldset class=\"group\"><legend>Media</legend>{media}</fieldset>\n\
+         <fieldset class=\"group\"><legend>Details</legend><dl class=\"facts\">\n{fields}</dl></fieldset>\n\
+         <details class=\"raw\"><summary>Raw JSON</summary><pre>{json}</pre></details>\n\
+         </div>\n\
+         </div>\n",
+        playing = if playing { " has-player" } else { "" },
+        icon = icon(Section::Likes(Some(&video.platform))),
+        back = list_href(Some(&video.platform), 1),
+        heading = escape(&title),
+        url = escape(&video.url),
+        media = media_html(&video, download.as_ref(), &board),
+        json = escape(&pretty),
+    );
+
+    Ok(Html(layout(
+        &Frame {
+            title: &title,
+            current: Section::Likes(Some(&video.platform)),
+            status: &status,
+            counts: &counts,
+            board: &board,
+            footer: format!("{source} · {}", escape(&author_label(&video))),
+            after,
+            live: false,
+            player: playing,
+        },
+        &main,
+    )))
+}
+
+/// The video page's Details: author, length, dates, whether it's still up.
+fn facts_html(video: &db::StoredVideo) -> String {
+    let on_source = format!("On {}", display_name(&video.platform));
+    [
+        ("Author", author_html(video)),
         (
             "Length",
             video.duration_seconds.map(duration).unwrap_or_default(),
@@ -391,46 +470,22 @@ async fn video_page(
         ("ID", format!("<code>{}</code>", escape(&video.video_id))),
     ]
     .map(|(name, value)| format!("<dt>{name}</dt><dd>{value}</dd>\n"))
-    .concat();
-    // Fall back to the stored text if it somehow isn't valid JSON.
-    let pretty = serde_json::from_str::<serde_json::Value>(&raw_json)
-        .and_then(|value| serde_json::to_string_pretty(&value))
-        .unwrap_or(raw_json);
-    let main = format!(
-        "<div class=\"video\">\n\
-         <div class=\"preview\">\n{thumbnail}\n\
-         <a class=\"button button-go\" href=\"{url}\">{icon}Open on {source}</a>\n\
-         <a class=\"button\" href=\"{back}\">← {source} likes</a>\n\
-         </div>\n\
-         <div>\n\
-         <h2 class=\"video-title\">{heading}</h2>\n\
-         {caption}\
-         <fieldset class=\"group\"><legend>Media</legend>{media}</fieldset>\n\
-         <fieldset class=\"group\"><legend>Details</legend><dl class=\"facts\">\n{fields}</dl></fieldset>\n\
-         <details class=\"raw\"><summary>Raw JSON</summary><pre>{json}</pre></details>\n\
-         </div>\n\
-         </div>\n",
-        icon = icon(Section::Likes(Some(&video.platform))),
-        back = list_href(Some(&video.platform), 1),
-        heading = escape(&title),
-        url = escape(&video.url),
-        media = media_html(&video, download.as_ref(), &board),
-        json = escape(&pretty),
-    );
+    .concat()
+}
 
-    Ok(Html(layout(
-        &Frame {
-            title: &title,
-            current: Section::Likes(Some(&video.platform)),
-            status: &status,
-            counts: &counts,
-            board: &board,
-            footer: format!("{source} · {}", escape(&author_label(&video))),
-            after,
-            live: false,
-        },
-        &main,
-    )))
+/// The top of a video's page: its player once the media is saved, and
+/// whether that's what it is; until then, the platform's picture.
+fn screen_html(video: &db::StoredVideo, download: Option<&db::DownloadState>) -> (String, bool) {
+    let playable = download
+        .filter(|d| d.downloaded_at.is_some())
+        .and_then(|d| player::playable(&d.files));
+    match playable {
+        Some(playable) => (
+            player::player_html(&format!("{}/media", video_href(video)), &playable),
+            true,
+        ),
+        None => (thumbnail(video, "hqdefault", &escape(&video.url)), false),
+    }
 }
 
 /// The video page's download button. Queues the video in the pipeline and
@@ -483,6 +538,35 @@ fn from_this_ui(headers: &HeaderMap) -> bool {
         .is_ok_and(|origin| origin == ours || origin == ours_by_name)
 }
 
+/// A downloaded video's file, for its player. Served with range requests,
+/// which the browser needs to seek. Only the files the download recorded are
+/// served, so no path can reach anything else on disk.
+async fn media_file(
+    State(app): State<App>,
+    Path((platform, video_id, file)): Path<(String, String, String)>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let download = app.db(|conn| db::download_state(conn, &platform, &video_id))?;
+    let Some(db::DownloadState {
+        downloaded_at: Some(_),
+        dir: Some(dir),
+        files,
+        ..
+    }) = download
+    else {
+        return Err(not_found());
+    };
+    if !files.contains(&file) {
+        return Err(not_found());
+    }
+    let path = app.media_root.join(dir).join(file);
+    let response = ServeFile::new(&path)
+        .try_call(request)
+        .await
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(response.map(Body::new))
+}
+
 async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failure> {
     let (counts, after) = app.db(|conn| Ok((db::video_counts(conn)?, db::last_rowid(conn)?)))?;
     let status = app.status.borrow().clone();
@@ -514,6 +598,7 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
             ),
             after,
             live: false,
+            player: false,
         },
         &main,
     )))
@@ -624,7 +709,15 @@ struct Frame<'a> {
     /// Whether new videos go straight into the table (the list's first page)
     /// rather than into a "new" notice.
     live: bool,
+    /// Whether the page has a player, which needs Video.js and its skin.
+    player: bool,
 }
+
+/// What a page with a player loads besides the usual. Module scripts run
+/// after the page is parsed, so the player's elements are all there.
+const PLAYER_HEAD: &str = "<link rel=\"stylesheet\" href=\"/assets/player.css\">\n\
+<script type=\"module\" src=\"/assets/videojs.js\"></script>\n\
+<script type=\"module\" src=\"/assets/player.js\"></script>\n";
 
 /// One of the places the top bar and side panel link to.
 struct NavEntry {
@@ -731,6 +824,7 @@ fn layout(frame: &Frame, main: &str) -> String {
          <title>{title} – joyscroller</title>\n\
          <link rel=\"stylesheet\" href=\"/assets/style.css\">\n\
          <link rel=\"icon\" href=\"/assets/splat.svg\">\n\
+         {player}\
          </head>\n\
          <body data-after=\"{after}\" data-platform=\"{platform}\" data-live=\"{live}\" data-size=\"{PAGE_SIZE}\">\n\
          <header class=\"topbar\">\n\
@@ -763,6 +857,7 @@ fn layout(frame: &Frame, main: &str) -> String {
             Section::Downloading => "",
         },
         live = u8::from(frame.live),
+        player = if frame.player { PLAYER_HEAD } else { "" },
         panel = panel_html(frame, &entries),
         icon = icon(frame.current),
         footer = frame.footer,
@@ -1370,7 +1465,7 @@ fn truncate(text: &str, max_chars: usize) -> String {
     short
 }
 
-fn escape(text: &str) -> String {
+pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -1529,6 +1624,7 @@ mod tests {
             last_error: Some("429".into()),
             downloaded_at: None,
             dir: None,
+            files: Vec::new(),
             bytes: None,
         };
         let html = media_html(&fresh, Some(&failed), &board);
@@ -1664,12 +1760,16 @@ mod tests {
                 footer: String::new(),
                 after: 0,
                 live: false,
+                player: true,
             },
             "",
         );
-        let css = std::str::from_utf8(ASSETS[0].2).unwrap();
+        let css = |name| {
+            let (.., body) = ASSETS.iter().find(|(file, ..)| *file == name).unwrap();
+            std::str::from_utf8(body).unwrap()
+        };
         let mut linked = 0;
-        for text in [page.as_str(), css] {
+        for text in [page.as_str(), css("style.css"), css("player.css")] {
             for (at, _) in text.match_indices("/assets/") {
                 let rest = &text[at + "/assets/".len()..];
                 let name = &rest[..rest.find(['"', ')']).unwrap()];

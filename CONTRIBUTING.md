@@ -29,7 +29,7 @@ You can run any step alone, e.g. `just lint`.
 - **Fix lints, don't silence them.** If a lint really is wrong for one spot, put `#[expect(clippy::name, reason = "...")]` on that item. Don't add a crate-wide `allow` without a good reason, written as a comment in `Cargo.toml`.
 - **No panics in app code.** Return `anyhow::Result`, add `.context()` saying what was being attempted, and let the caller decide. `unwrap` and `expect` are only allowed in tests.
 - **Test what you add.** Pure logic (parsing, decoding, formatting, SQL) gets unit tests in the same file. Tests can't touch the network, your browser, the keyring or your real database. Use in-memory SQLite.
-- **Keep modules to one job.** SQL lives in `db.rs`, browser and cookie handling in `browser.rs`, driving a headless browser in `headless.rs`, listing YouTube likes with yt-dlp in `youtube.rs`, TikTok's API in `tiktok.rs`, downloading media in `download.rs`, the web UI in `web.rs`. A new platform gets its own module next to `youtube.rs`.
+- **Keep modules to one job.** SQL lives in `db.rs`, browser and cookie handling in `browser.rs`, driving a headless browser in `headless.rs`, listing YouTube likes with yt-dlp in `youtube.rs`, TikTok's API in `tiktok.rs`, downloading media in `download.rs`, the web UI in `web.rs` and its player in `player.rs`. A new platform gets its own module next to `youtube.rs`.
 - **Comments say why, not what.** Write down the non-obvious constraint: a file-format quirk, an ordering requirement, a yt-dlp flag's side effect.
 
 ## Adding a dependency

@@ -411,15 +411,19 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 /* ---- A video's page ---------------------------------------------------- */
 
 .video { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 22px; align-items: start; }
+/* Once downloaded, the player (player.css) takes the width, over the details. */
+.video.has-player { grid-template-columns: minmax(0, 1fr); }
 .preview { display: grid; gap: 10px; justify-items: start; }
-.preview img, .preview .nothumb {
+.has-player .preview { justify-items: center; }
+.links { display: flex; flex-wrap: wrap; gap: 8px; }
+.preview > a > img, .preview .nothumb {
   width: 100%;
   height: auto;
   border: 4px solid #fff;
   outline: 1px solid #8a8a8a;
   box-shadow: 4px 4px 10px rgba(0, 0, 0, .25);
 }
-.preview img { display: block; aspect-ratio: 16 / 9; object-fit: cover; }
+.preview > a > img { display: block; aspect-ratio: 16 / 9; object-fit: cover; }
 .preview .nothumb { width: 220px; aspect-ratio: 9 / 16; }
 .preview .nothumb::before { font-size: 72px; }
 .video-title { margin: 0 0 8px !important; border: 0 !important; font-size: 21px !important; line-height: 1.25; }

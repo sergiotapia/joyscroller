@@ -4,7 +4,7 @@ Notes for coding agents working in this repo. Read this, then `CONTRIBUTING.md`.
 
 ## What this is
 
-A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves a liked video's media at the best quality available into `downloads/<platform>/<YYYY-MM-DD>/<title> [<video id>]/`, by the local date it was liked (so the first sync's day holds the whole backlog). `filename.rs` makes titles safe as folder names on every OS. That folder and the database, `joyscroller.db`, sit next to the app's executable, where people will look for them. A binary running from this repo's `target/` (so `cargo run`) uses `data/` at the repo root instead, which survives `cargo clean` and is gitignored. Videos download when the user clicks "Download now" on a video's page: the download pipeline (`pipeline.rs`) starts it right away on a track of its own, several at once if asked. The pipeline also has a lane per platform that works through the whole backlog newest first, one video at a time, waiting 30 s between YouTube videos and a random 15–30 s between TikTok ones (yt-dlp's wiki puts YouTube's logged-in limit at ~2,000 videos/hour; TikTok publishes none). The lanes are off for now (`AUTOMATIC` in `pipeline.rs`). `/downloading` shows it all live. The `download` subcommand downloads by hand. Instagram comes later: the UI already lists it, with its sync shown as coming soon (`COMING_SOON` in `web.rs`). Every table row has a `platform` column.
+A Rust app that archives the videos a user has liked. Plain `joyscroller` starts one long-running process that syncs YouTube and TikTok likes into SQLite right away and then every 5 minutes. It also serves a web UI at http://127.0.0.1:4774 for browsing the archive, where newly synced likes appear live over Server-Sent Events. `download.rs` saves a liked video's media at the best quality available into `downloads/<platform>/<YYYY-MM-DD>/<title> [<video id>]/`, by the local date it was liked (so the first sync's day holds the whole backlog). `filename.rs` makes titles safe as folder names on every OS. That folder and the database, `joyscroller.db`, sit next to the app's executable, where people will look for them. A binary running from this repo's `target/` (so `cargo run`) uses `data/` at the repo root instead, which survives `cargo clean` and is gitignored. Videos download when the user clicks "Download now" on a video's page: the download pipeline (`pipeline.rs`) starts it right away on a track of its own, several at once if asked. The pipeline also has a lane per platform that works through the whole backlog newest first, one video at a time, waiting 30 s between YouTube videos and a random 15–30 s between TikTok ones (yt-dlp's wiki puts YouTube's logged-in limit at ~2,000 videos/hour; TikTok publishes none). The lanes are off for now (`AUTOMATIC` in `pipeline.rs`). `/downloading` shows it all live. Once downloaded, a video plays on its page (`player.rs`): a video in a player, a TikTok photo post as a slideshow with its sound playing. The page loads the files from `/videos/<platform>/<id>/media/<file>`, which serves only the files the download recorded. The `download` subcommand downloads by hand. Instagram comes later: the UI already lists it, with its sync shown as coming soon (`COMING_SOON` in `web.rs`). Every table row has a `platform` column.
 
 **Product rules:**
 - End users never run subcommands. Launching `joyscroller` must start everything. The `cookies`, `likes` and `sync` subcommands are developer and debugging tools only. New user-facing features go inside the long-running process, as a background task or in the web UI, not as new CLI flags.
@@ -19,7 +19,10 @@ A Rust app that archives the videos a user has liked. Plain `joyscroller` starts
 src/main.rs     CLI (clap), the app loop (run_app), and sync_youtube / sync_tiktok, which tie the modules together
 src/web.rs      The localhost UI (axum): server-rendered HTML list and video pages (with a Download button),
                 /downloading, and /events, an SSE stream of newly stored videos, counts, sync status and
-                the download pipeline's board. run_app feeds it sync status through a watch channel
+                the download pipeline's board. run_app feeds it sync status through a watch channel.
+                Also serves downloaded files (with range requests, for seeking) to the player
+src/player.rs   The video page's player markup, from Video.js 10's elements: a video player, or a photo
+                post's slideshow over its sound, which autoplays and loops
 src/browser.rs  Finds the browser profile, copies its Cookies SQLite DB, decrypts values
                 (AES-128-CBC; v10 = fixed key, v11 = key from the keyring), writes Netscape cookies.txt
 src/youtube.rs  Runs `yt-dlp --flat-playlist --lazy-playlist --dump-json` on the Liked playlist and
@@ -40,6 +43,8 @@ src/filename.rs safe_name: text to a file/folder name valid on Linux, macOS and 
 src/db.rs       SQLite schema (the SCHEMA const) and every query; the only module that touches the archive DB
 assets/         The UI's look, built into the binary by web.rs (`ASSETS`) and served at /assets/<file>:
                 style.css (Windows XP desktop + Nickelodeon clock radio), lab.webp (the page background), splat.svg (favicon),
+                player.css (the player's skin) and player.js (the slideshow), videojs.js (Video.js 10, bundled
+                by `just videojs` from the versions pinned in videojs/; don't edit it by hand),
                 radio.webp (rendered by blender/radio.py; the page overlays a live clock on its LCD),
                 splat.webp and icon-*.webp (rendered by blender/badges.py in the radio's materials),
                 and fonts/ (Luckiest Guy, Fredoka, DSEG LCD digits, with their licenses)
@@ -52,6 +57,7 @@ Config: `Cargo.toml` (lint levels), `clippy.toml`, `deny.toml`, `justfile`.
 ```sh
 just precommit                    # must pass before every commit (fmt, machete, clippy, deny, antislop, nextest)
 just lint / just test             # run a single step
+just videojs                      # rebuild assets/videojs.js after changing assets/videojs/ (needs Node)
 
 cargo run                         # the app: UI on http://127.0.0.1:4774, syncs into the real DB every 5 min
 cp target/debug/joyscroller /tmp/x/ && /tmp/x/joyscroller   # the app on a throwaway DB and downloads folder

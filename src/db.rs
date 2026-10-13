@@ -473,6 +473,8 @@ pub struct DownloadState {
     pub last_error: Option<String>,
     pub downloaded_at: Option<i64>,
     pub dir: Option<String>,
+    /// The file names in `dir`, sorted; empty until downloaded.
+    pub files: Vec<String>,
     pub bytes: Option<i64>,
 }
 
@@ -483,21 +485,32 @@ pub fn download_state(
 ) -> Result<Option<DownloadState>> {
     let found = conn
         .query_row(
-            "SELECT attempts, last_error, downloaded_at, dir, bytes FROM downloads \
+            "SELECT attempts, last_error, downloaded_at, dir, bytes, files FROM downloads \
              WHERE platform = ?1 AND video_id = ?2",
             [platform, video_id],
             |r| {
-                Ok(DownloadState {
-                    attempts: r.get(0)?,
-                    last_error: r.get(1)?,
-                    downloaded_at: r.get(2)?,
-                    dir: r.get(3)?,
-                    bytes: r.get(4)?,
-                })
+                Ok((
+                    DownloadState {
+                        attempts: r.get(0)?,
+                        last_error: r.get(1)?,
+                        downloaded_at: r.get(2)?,
+                        dir: r.get(3)?,
+                        files: Vec::new(),
+                        bytes: r.get(4)?,
+                    },
+                    r.get::<_, Option<String>>(5)?,
+                ))
             },
         )
         .optional()?;
-    Ok(found)
+    let Some((mut state, files)) = found else {
+        return Ok(None);
+    };
+    if let Some(files) = files {
+        state.files = serde_json::from_str(&files)
+            .with_context(|| format!("reading the file list of {platform} video {video_id}"))?;
+    }
+    Ok(Some(state))
 }
 
 #[cfg(test)]
@@ -715,6 +728,9 @@ mod tests {
             .unwrap();
         assert_eq!(error, None);
         assert_eq!(stored_files, r#"["video.webm"]"#);
+        let state = download_state(&conn, "youtube", "a").unwrap().unwrap();
+        assert_eq!(state.files, ["video.webm"]);
+        assert_eq!(state.dir.as_deref(), Some("youtube/a"));
 
         // posted_at is filled in once, never overwritten.
         record_download(&mut conn, "youtube", "a", &done(Some(9))).unwrap();
@@ -781,5 +797,6 @@ mod tests {
         assert_eq!(state.attempts, 1);
         assert_eq!(state.last_error.as_deref(), Some("HTTP 429"));
         assert_eq!(state.downloaded_at, None);
+        assert!(state.files.is_empty());
     }
 }

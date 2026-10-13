@@ -4,6 +4,7 @@ mod download;
 mod filename;
 mod headless;
 mod pipeline;
+mod player;
 mod tiktok;
 mod web;
 mod youtube;
@@ -290,8 +291,9 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
         &media_root,
     );
     let web_conn = db::open(db_path)?;
+    let web_media = media_root.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::serve(listener, web_conn, status_rx, pipeline).await {
+        if let Err(e) = web::serve(listener, web_conn, status_rx, pipeline, web_media).await {
             eprintln!("web: stopped: {e:#}");
         }
     });
