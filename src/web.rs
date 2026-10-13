@@ -1022,6 +1022,20 @@ function connect() {
       board.innerHTML = update.board;
       showTimes(board);
     }
+    // The list: a row whose video has just been downloaded swaps its
+    // placeholder for the saved picture, built as `picture_html` builds it.
+    for (const [key, src] of Object.entries(update.pictures)) {
+      const cell = document.querySelector('#videos tr[data-key="' + CSS.escape(key) + '"] td.thumb');
+      if (!cell || cell.querySelector("img")?.getAttribute("src") === src) continue;
+      const link = document.createElement("a");
+      link.href = cell.parentElement.querySelector("td.title a").getAttribute("href");
+      const img = document.createElement("img");
+      img.setAttribute("src", src);
+      img.loading = "lazy";
+      img.alt = "";
+      link.append(img);
+      cell.replaceChildren(link);
+    }
     // A video page: show its progress, and once it's out of the pipeline,
     // reload for the result.
     const media = document.getElementById("media");
@@ -1039,15 +1053,23 @@ function connect() {
 }
 "#;
 
-/// A video's picture, linked to `href`: YouTube's thumbnail at `size`
-/// (`mqdefault`, `hqdefault`), or for TikTok and Instagram, whose picture
-/// links expire, a colored tile.
+/// A video's picture, linked to `href`: once its media is downloaded, the
+/// saved thumbnail; until then YouTube's at `size` (`mqdefault`,
+/// `hqdefault`), or for TikTok and Instagram, whose picture links expire, a
+/// colored tile.
 fn thumbnail(video: &db::StoredVideo, size: &str, href: &str) -> String {
-    if video.platform == "youtube" {
-        format!(
-            "<a href=\"{href}\"><img src=\"https://i.ytimg.com/vi/{}/{size}.jpg\" \
-             loading=\"lazy\" alt=\"\"></a>",
-            escape(&video.video_id)
+    if let Some(file) = &video.thumbnail {
+        picture_html(
+            href,
+            &escape(&media_src(&video.platform, &video.video_id, file)),
+        )
+    } else if video.platform == "youtube" {
+        picture_html(
+            href,
+            &format!(
+                "https://i.ytimg.com/vi/{}/{size}.jpg",
+                escape(&video.video_id)
+            ),
         )
     } else {
         format!(
@@ -1055,6 +1077,17 @@ fn thumbnail(video: &db::StoredVideo, size: &str, href: &str) -> String {
             escape(&video.kind)
         )
     }
+}
+
+/// The picture at `src` (already escaped), linked to `href`. The page's
+/// script builds the same markup when a row's video finishes downloading.
+fn picture_html(href: &str, src: &str) -> String {
+    format!("<a href=\"{href}\"><img src=\"{src}\" loading=\"lazy\" alt=\"\"></a>")
+}
+
+/// Where a downloaded video's `file` is served.
+fn media_src(platform: &str, video_id: &str, file: &str) -> String {
+    format!("/videos/{platform}/{video_id}/media/{file}")
 }
 
 /// A video's row in the list table. Also sent as-is in `video` events.
@@ -1067,11 +1100,12 @@ fn video_row(video: &db::StoredVideo) -> String {
         video.duration_seconds.map(duration).unwrap_or_default()
     };
     format!(
-        "<tr data-platform=\"{platform}\"><td class=\"thumb\">{thumbnail}</td>\
+        "<tr data-platform=\"{platform}\" data-key=\"{platform}/{id}\"><td class=\"thumb\">{thumbnail}</td>\
          <td class=\"title\"><a href=\"{href}\">{title}</a></td><td class=\"author\">{author}</td>\
          <td class=\"num\">{length}</td><td class=\"date\">{posted}</td><td class=\"date\">{added}</td>\
          <td class=\"source\"><span class=\"badge badge-{platform}\">{source}</span></td></tr>",
         platform = escape(&video.platform),
+        id = escape(&video.video_id),
         title = escape(&truncate(&short_title(video), 120)),
         author = escape(&author_label(video)),
         posted = video
@@ -1367,7 +1401,7 @@ fn board_html(board: &Board) -> String {
             .iter()
             .map(|finished| {
                 let (class, outcome) = match &finished.outcome {
-                    Outcome::Downloaded { bytes, seconds } => {
+                    Outcome::Downloaded { bytes, seconds, .. } => {
                         #[expect(clippy::cast_precision_loss, reason = "a size for display")]
                         let megabytes = *bytes as f64 / 1e6;
                         let seconds = i64::try_from(*seconds).unwrap_or(i64::MAX);
@@ -1437,9 +1471,10 @@ fn thousands(n: usize) -> String {
     out
 }
 
-/// The `downloads` event: `{"count": n, "board": html, "videos": {"platform/id": html}}`,
-/// with the sidebar count, the downloads page's `board_html`, and the Media
-/// field of each video in the pipeline.
+/// The `downloads` event: `{"count": n, "board": html, "videos": {"platform/id": html},
+/// "pictures": {"platform/id": url}}`, with the sidebar count, the downloads
+/// page's `board_html`, the Media field of each video in the pipeline, and
+/// the saved picture of each video downloaded since the app started.
 fn downloads_json(board: &Board) -> String {
     let videos: serde_json::Map<String, serde_json::Value> = board
         .active
@@ -1453,10 +1488,31 @@ fn downloads_json(board: &Board) -> String {
             ))
         })
         .collect();
+    // Downloaded since the app started, so a list showing them can swap its
+    // placeholder for the saved picture.
+    let pictures: serde_json::Map<String, serde_json::Value> = board
+        .recent
+        .iter()
+        .filter_map(|finished| {
+            let Outcome::Downloaded {
+                picture: Some(file),
+                ..
+            } = &finished.outcome
+            else {
+                return None;
+            };
+            let (platform, id) = (&finished.job.item.platform, &finished.job.item.video_id);
+            Some((
+                format!("{platform}/{id}"),
+                media_src(platform, id, file).into(),
+            ))
+        })
+        .collect();
     serde_json::json!({
         "count": busy_count(board),
         "board": board_html(board),
         "videos": videos,
+        "pictures": pictures,
     })
     .to_string()
 }
@@ -1547,6 +1603,7 @@ mod tests {
             kind: "video".into(),
             posted_at: None,
             liked_at: 1_700_000_000,
+            thumbnail: None,
         }
     }
 
@@ -1587,7 +1644,7 @@ mod tests {
     #[test]
     fn rows_escape_titles_and_tag_their_platform() {
         let row = video_row(&video("youtube", Some("<b>hi</b>")));
-        assert!(row.starts_with("<tr data-platform=\"youtube\">"));
+        assert!(row.starts_with("<tr data-platform=\"youtube\" data-key=\"youtube/abc\">"));
         assert!(row.contains("badge-youtube"));
         assert!(row.contains("&lt;b&gt;hi&lt;/b&gt;"));
         assert!(row.contains("i.ytimg.com/vi/abc/"));
@@ -1596,6 +1653,22 @@ mod tests {
         assert!(!tiktok.contains("<img"));
         assert!(tiktok.contains("class=\"nothumb\" data-kind=\"video\""));
         assert!(tiktok.contains("@someone"));
+    }
+
+    #[test]
+    fn downloaded_rows_show_the_saved_picture() {
+        for platform in ["youtube", "tiktok", "instagram"] {
+            let saved = db::StoredVideo {
+                thumbnail: Some("thumbnail.jpg".into()),
+                ..video(platform, Some("x"))
+            };
+            let row = video_row(&saved);
+            assert!(row.contains(&format!(
+                "data-key=\"{platform}/abc\"><td class=\"thumb\"><a href=\"/videos/{platform}/abc\">\
+                 <img src=\"/videos/{platform}/abc/media/thumbnail.jpg\""
+            )));
+            assert!(!row.contains("nothumb") && !row.contains("i.ytimg.com"));
+        }
     }
 
     #[test]
@@ -1787,6 +1860,7 @@ mod tests {
             outcome: Outcome::Downloaded {
                 bytes: 12_300_000,
                 seconds: 75,
+                picture: Some("thumbnail.webp".into()),
             },
         });
         let html = board_html(&board);
@@ -1795,6 +1869,13 @@ mod tests {
         let downloaded = html.find("downloaded 12.3 MB in 1:15").unwrap();
         let failed = html.find("failed: bad thing").unwrap();
         assert!(downloaded < failed);
+
+        // Only the downloaded video's picture goes to the list.
+        let update: serde_json::Value = serde_json::from_str(&downloads_json(&board)).unwrap();
+        assert_eq!(
+            update["pictures"],
+            serde_json::json!({"youtube/abc": "/videos/youtube/abc/media/thumbnail.webp"})
+        );
     }
 
     #[test]

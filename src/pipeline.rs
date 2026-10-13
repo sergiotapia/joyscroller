@@ -159,7 +159,12 @@ pub struct Finished {
 
 #[derive(Debug, Clone)]
 pub enum Outcome {
-    Downloaded { bytes: u64, seconds: u64 },
+    Downloaded {
+        bytes: u64,
+        seconds: u64,
+        /// The saved file to show as its picture, if any.
+        picture: Option<String>,
+    },
     Failed(String),
 }
 
@@ -483,6 +488,7 @@ async fn download_job(shared: &Shared, conn: &mut Connection, job: &Job) -> bool
         Ok(saved) => Outcome::Downloaded {
             bytes: saved.bytes,
             seconds: started.elapsed().as_secs(),
+            picture: saved.picture().map(Into::into),
         },
         Err(e) => Outcome::Failed(format!("{e:#}")),
     };

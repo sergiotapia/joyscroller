@@ -374,10 +374,22 @@ pub struct StoredVideo {
     pub kind: String,
     pub posted_at: Option<i64>,
     pub liked_at: i64,
+    /// Once its media is downloaded, the file in its folder to show as its
+    /// picture: the thumbnail, or a photo post's first image.
+    pub thumbnail: Option<String>,
 }
 
-const VIDEO_COLUMNS: &str = "rowid, platform, video_id, url, title, author_id, author_name, \
-     duration_seconds, available, kind, posted_at, liked_at";
+/// `StoredVideo`'s columns, for `video_from_row`, selected from
+/// `VIDEO_TABLES`. The file lists are sorted, so `MIN` is the first image.
+const VIDEO_COLUMNS: &str = "v.rowid, v.platform, v.video_id, v.url, v.title, v.author_id, \
+     v.author_name, v.duration_seconds, v.available, v.kind, v.posted_at, v.liked_at, \
+     COALESCE(\
+       (SELECT MIN(value) FROM json_each(d.files) WHERE value LIKE 'thumbnail.%'), \
+       (SELECT MIN(value) FROM json_each(d.files) WHERE value LIKE 'image-%'))";
+
+/// The videos, each with its download if that has finished.
+const VIDEO_TABLES: &str = "videos v LEFT JOIN downloads d ON d.platform = v.platform \
+     AND d.video_id = v.video_id AND d.downloaded_at IS NOT NULL";
 
 fn video_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredVideo> {
     Ok(StoredVideo {
@@ -393,6 +405,7 @@ fn video_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredVideo> {
         kind: r.get(9)?,
         posted_at: r.get(10)?,
         liked_at: r.get(11)?,
+        thumbnail: r.get(12)?,
     })
 }
 
@@ -416,8 +429,8 @@ pub fn videos_page(
     offset: usize,
 ) -> Result<Vec<StoredVideo>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {VIDEO_COLUMNS} FROM videos WHERE ?1 IS NULL OR platform = ?1 \
-         ORDER BY rowid DESC LIMIT ?2 OFFSET ?3"
+        "SELECT {VIDEO_COLUMNS} FROM {VIDEO_TABLES} WHERE ?1 IS NULL OR v.platform = ?1 \
+         ORDER BY v.rowid DESC LIMIT ?2 OFFSET ?3"
     ))?;
     let videos = stmt
         .query_map(
@@ -431,7 +444,7 @@ pub fn videos_page(
 /// Every video stored after `rowid`, oldest first.
 pub fn videos_after(conn: &Connection, rowid: i64) -> Result<Vec<StoredVideo>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {VIDEO_COLUMNS} FROM videos WHERE rowid > ?1 ORDER BY rowid"
+        "SELECT {VIDEO_COLUMNS} FROM {VIDEO_TABLES} WHERE v.rowid > ?1 ORDER BY v.rowid"
     ))?;
     let videos = stmt
         .query_map([rowid], video_from_row)?
@@ -457,10 +470,11 @@ pub fn video(
     let found = conn
         .query_row(
             &format!(
-                "SELECT {VIDEO_COLUMNS}, raw_json FROM videos WHERE platform = ?1 AND video_id = ?2"
+                "SELECT {VIDEO_COLUMNS}, v.raw_json FROM {VIDEO_TABLES} \
+                 WHERE v.platform = ?1 AND v.video_id = ?2"
             ),
             [platform, video_id],
-            |r| Ok((video_from_row(r)?, r.get(12)?)),
+            |r| Ok((video_from_row(r)?, r.get(13)?)),
         )
         .optional()?;
     Ok(found)
@@ -798,5 +812,52 @@ mod tests {
         assert_eq!(state.last_error.as_deref(), Some("HTTP 429"));
         assert_eq!(state.downloaded_at, None);
         assert!(state.files.is_empty());
+    }
+
+    #[test]
+    fn videos_carry_their_downloaded_picture() {
+        let mut conn = memory_db();
+        insert_new(
+            &mut conn,
+            "tiktok",
+            &[video("v", true), video("p", true), video("f", true)],
+        )
+        .unwrap();
+        let save = |conn: &mut Connection, id, files: &[String]| {
+            let done = Downloaded {
+                dir: "tiktok/x",
+                files,
+                bytes: 10,
+                format: None,
+                info_json: None,
+                posted_at: None,
+            };
+            record_download(conn, "tiktok", id, &done).unwrap();
+        };
+        let names = |names: &[&str]| -> Vec<String> { names.iter().map(|&n| n.into()).collect() };
+        save(&mut conn, "v", &names(&["thumbnail.jpg", "video.mp4"]));
+        save(
+            &mut conn,
+            "p",
+            &names(&["image-01.jpg", "image-02.jpg", "sound.mp3"]),
+        );
+        // A failed try has no files, so no picture.
+        record_download_failure(&conn, "tiktok", "f", "HTTP 403").unwrap();
+
+        let pictures: Vec<(String, Option<String>)> = videos_page(&conn, None, 10, 0)
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.video_id, v.thumbnail))
+            .collect();
+        assert_eq!(
+            pictures,
+            [
+                ("f".into(), None),
+                ("p".into(), Some("image-01.jpg".into())),
+                ("v".into(), Some("thumbnail.jpg".into())),
+            ]
+        );
+        let (found, _) = super::video(&conn, "tiktok", "v").unwrap().unwrap();
+        assert_eq!(found.thumbnail.as_deref(), Some("thumbnail.jpg"));
     }
 }

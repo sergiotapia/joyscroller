@@ -144,6 +144,20 @@ pub struct Saved {
     pub posted_at: Option<i64>,
 }
 
+impl Saved {
+    /// The file to show as the video's picture: its thumbnail, or a photo
+    /// post's first image. `db.rs` picks the same file in SQL for the list.
+    pub fn picture(&self) -> Option<&str> {
+        let named = |prefix| {
+            self.files
+                .iter()
+                .map(String::as_str)
+                .find(|file| file.starts_with(prefix))
+        };
+        named("thumbnail.").or_else(|| named("image-"))
+    }
+}
+
 /// How far yt-dlp is through the file it's downloading. TikTok videos come as
 /// two files, one after the other, each reported from zero.
 #[derive(Debug, Clone, PartialEq)]
@@ -741,6 +755,28 @@ fn error_lines(stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_the_thumbnail_or_first_image_as_the_picture() {
+        let saved = |files: &[&str]| Saved {
+            dir: String::new(),
+            files: files.iter().map(|&f| f.into()).collect(),
+            bytes: 0,
+            format: String::new(),
+            info_json: None,
+            posted_at: None,
+        };
+        let picture = |files| saved(files).picture().map(String::from);
+        assert_eq!(
+            picture(&["thumbnail.jpg", "video.mp4"]).as_deref(),
+            Some("thumbnail.jpg")
+        );
+        assert_eq!(
+            picture(&["image-01.webp", "image-02.webp", "sound.mp3"]).as_deref(),
+            Some("image-01.webp")
+        );
+        assert_eq!(picture(&["video.mp4"]), None);
+    }
 
     #[test]
     fn trims_formats_and_urls_from_metadata() {
