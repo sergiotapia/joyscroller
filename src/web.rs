@@ -833,56 +833,70 @@ function setCount(name, count) {
 }
 
 const page = document.body.dataset;
-const events = new EventSource("/events?after=" + page.after);
+// Brave keeps a page you leave in its back/forward cache, open stream and
+// all, and over plain HTTP it allows six connections per site. A few clicks
+// back would leave every one held by hidden pages and hang the next click.
+// So the stream closes when the page is hidden and reopens when it's shown
+// again, from the last video it got.
+let after = page.after;
+let events;
 let unseen = 0;
-events.addEventListener("video", (e) => {
-  const rows = document.getElementById("videos");
-  const template = document.createElement("template");
-  template.innerHTML = e.data;
-  const row = template.content.firstElementChild;
-  if (!rows || (page.platform && row.dataset.platform !== page.platform)) return;
-  if (page.live === "1") {
-    showTimes(row);
-    rows.prepend(row);
-    while (rows.rows.length > Number(page.size)) rows.lastElementChild.remove();
-    const empty = document.getElementById("empty");
-    if (empty) empty.hidden = true;
-  } else {
-    unseen += 1;
-    document.getElementById("new-count").textContent = unseen;
-    document.getElementById("new").hidden = false;
-  }
-});
-events.addEventListener("counts", (e) => {
-  for (const [name, count] of Object.entries(JSON.parse(e.data))) setCount(name, count);
-});
-events.addEventListener("status", (e) => {
-  const el = document.getElementById("status");
-  el.innerHTML = e.data;
-  showTimes(el);
-});
-events.addEventListener("downloads", (e) => {
-  const update = JSON.parse(e.data);
-  setCount("downloading", update.count);
-  const board = document.getElementById("downloads");
-  if (board) {
-    board.innerHTML = update.board;
-    showTimes(board);
-  }
-  // A video page: show its progress, and once it's out of the pipeline,
-  // reload for the result.
-  const media = document.getElementById("media");
-  if (media) {
-    const progress = update.videos[media.dataset.key];
-    if (progress) {
-      media.innerHTML = progress;
-      media.dataset.busy = "1";
-      showTimes(media);
-    } else if (media.dataset.busy) {
-      location.reload();
+addEventListener("pagehide", () => events.close());
+addEventListener("pageshow", (e) => { if (e.persisted) connect(); });
+connect();
+
+function connect() {
+  events = new EventSource("/events?after=" + after);
+  events.addEventListener("video", (e) => {
+    after = e.lastEventId;
+    const rows = document.getElementById("videos");
+    const template = document.createElement("template");
+    template.innerHTML = e.data;
+    const row = template.content.firstElementChild;
+    if (!rows || (page.platform && row.dataset.platform !== page.platform)) return;
+    if (page.live === "1") {
+      showTimes(row);
+      rows.prepend(row);
+      while (rows.rows.length > Number(page.size)) rows.lastElementChild.remove();
+      const empty = document.getElementById("empty");
+      if (empty) empty.hidden = true;
+    } else {
+      unseen += 1;
+      document.getElementById("new-count").textContent = unseen;
+      document.getElementById("new").hidden = false;
     }
-  }
-});
+  });
+  events.addEventListener("counts", (e) => {
+    for (const [name, count] of Object.entries(JSON.parse(e.data))) setCount(name, count);
+  });
+  events.addEventListener("status", (e) => {
+    const el = document.getElementById("status");
+    el.innerHTML = e.data;
+    showTimes(el);
+  });
+  events.addEventListener("downloads", (e) => {
+    const update = JSON.parse(e.data);
+    setCount("downloading", update.count);
+    const board = document.getElementById("downloads");
+    if (board) {
+      board.innerHTML = update.board;
+      showTimes(board);
+    }
+    // A video page: show its progress, and once it's out of the pipeline,
+    // reload for the result.
+    const media = document.getElementById("media");
+    if (media) {
+      const progress = update.videos[media.dataset.key];
+      if (progress) {
+        media.innerHTML = progress;
+        media.dataset.busy = "1";
+        showTimes(media);
+      } else if (media.dataset.busy) {
+        location.reload();
+      }
+    }
+  });
+}
 "#;
 
 /// A video's picture, linked to `href`: YouTube's thumbnail at `size`
