@@ -4,7 +4,7 @@
 #   Linux    joyscroller-<label>-linux-x86_64.tar.gz, -linux-aarch64.tar.gz
 #   macOS    joyscroller-<label>-macos-arm64.dmg, -macos-x86_64.dmg
 #            (Joyscroller.app, unsigned apart from the ad-hoc signature
-#            Apple Silicon needs; the Intel build is cross-compiled)
+#            Apple Silicon needs)
 #
 # On a pull request, <label> is the version plus the PR and commit, and the
 # files are the run's artifacts, to download and try. The release workflow
@@ -79,6 +79,9 @@ jobs:
           name: ${{ env.NAME }}
           path: ${{ env.NAME }}.tar.gz
 
+  # Each DMG is built on a Mac of its own chip, then installed and tested
+  # there, as Linux is: the Intel app can't run on Apple Silicon runners
+  # without Rosetta.
   macos:
     needs: version
     strategy:
@@ -87,11 +90,14 @@ jobs:
         include:
           - arch: arm64
             target: aarch64-apple-darwin
+            runner: macos-26
           - arch: x86_64
             target: x86_64-apple-darwin
-    runs-on: macos-26
+            runner: macos-26-intel
+    runs-on: ${{ matrix.runner }}
     env:
       NAME: joyscroller-${{ needs.version.outputs.label }}-macos-${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
       - run: rustup show active-toolchain || rustup toolchain install
@@ -100,38 +106,11 @@ jobs:
       - name: Build the app and its DMG
         run: |
           packaging/macos/make-app.sh "target/${{ matrix.target }}/release/joyscroller" \
-            "${{ needs.version.outputs.version }}" "${{ needs.version.outputs.label }}" \
-            "${{ matrix.arch }}" dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.NAME }}
-          path: dist/${{ env.NAME }}.dmg
-
-  # Each DMG on a Mac of its own kind; the Intel app can't run on Apple
-  # Silicon runners without Rosetta, so it gets an Intel runner.
-  macos-smoke:
-    needs: [version, macos]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-26
-          - arch: x86_64
-            runner: macos-26-intel
-    runs-on: ${{ matrix.runner }}
-    env:
-      NAME: joyscroller-${{ needs.version.outputs.label }}-macos-${{ matrix.arch }}
-      VERSION: ${{ needs.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.NAME }}
+            "$VERSION" "${{ needs.version.outputs.label }}" "${{ matrix.arch }}" dist
       - name: Install from the DMG, as a user would
         run: |
           mnt=$(mktemp -d)
-          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$NAME.dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "dist/$NAME.dmg"
           [ -L "$mnt/Applications" ]
           ditto "$mnt/Joyscroller.app" /Applications/Joyscroller.app
           hdiutil detach "$mnt"
@@ -153,3 +132,7 @@ jobs:
           ! xattr -p com.apple.quarantine "$app" 2> /dev/null
       - name: Smoke test
         run: packaging/smoke.sh /Applications/Joyscroller.app/Contents/MacOS/joyscroller "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}.dmg

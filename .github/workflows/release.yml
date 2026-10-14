@@ -63,7 +63,7 @@ jobs:
     with:
       label: ${{ github.ref_name }}
 
-  upload:
+  publish:
     needs: package
     runs-on: ubuntu-24.04
     steps:
@@ -78,10 +78,4 @@ jobs:
           sha256sum joyscroller-* > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$TAG" joyscroller-* SHA256SUMS --repo "$GITHUB_REPOSITORY"
-
-  publish:
-    needs: upload
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - run: gh release edit "$TAG" --draft=false --latest
+      - run: gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
