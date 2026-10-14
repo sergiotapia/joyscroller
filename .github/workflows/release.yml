@@ -3,8 +3,11 @@
 # bump `version` in Cargo.toml, commit, then
 #   git tag v0.2.0 && git push origin v0.2.0
 #
-# The release starts as a draft and is only published once every build has
-# uploaded, so a failed build never leaves a release with missing downloads.
+# The release's description is the version's section of CHANGELOG.md plus
+# its compare link, and the release fails without them, so a version can't
+# ship undescribed. It starts as a draft and is only published once every
+# build has uploaded, so a failed build never leaves a release with missing
+# downloads.
 # Ubuntu 22.04 runners keep the glibc requirement at 2.35, old enough for any
 # current distro.
 
@@ -33,7 +36,21 @@ jobs:
             echo "tag $TAG doesn't match Cargo.toml's version $version" >&2
             exit 1
           fi
-      - run: gh release create "$TAG" --draft --verify-tag --generate-notes --title "$TAG"
+      - name: Take the release notes from CHANGELOG.md
+        run: |
+          version=${TAG#v}
+          # The version's section, without its heading or the blank lines around it.
+          notes=$(awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }' CHANGELOG.md | sed '/./,$!d')
+          compare=$(grep -m1 "^\[$version\]: " CHANGELOG.md | cut -d' ' -f2 || true)
+          if [ -z "${notes//[[:space:]]/}" ] || [ -z "$compare" ]; then
+            echo "CHANGELOG.md has no notes or no compare link for $version" >&2
+            exit 1
+          fi
+          printf '%s\n\n\n**Full Changelog**: %s\n' "$notes" "$compare" > notes.md
+      - run: gh release create "$TAG" --draft --verify-tag --notes-file notes.md --title "$TAG"
 
   build:
     needs: draft
