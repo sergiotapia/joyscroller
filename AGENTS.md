@@ -120,3 +120,4 @@ The real archive is `joyscroller.db` and `downloads/` in `data/` at the repo roo
 - Commit straight to `master`. Never create branches. The remote is `origin` on GitHub; push and tag only when asked.
 - Run `just precommit` before committing. Don't commit if it fails.
 - Commit message: an imperative subject line, then a body explaining what changed and why.
+- A change users would notice gets a line under `## [Unreleased]` in `CHANGELOG.md`, in the same commit, written for users rather than developers. To release, rename that section to the new version and date, add a fresh `[Unreleased]` above it and fix the compare links at the bottom, bump `version` in Cargo.toml, commit, then push a `v<version>` tag.

@@ -41,3 +41,4 @@ Use `cargo add <crate>`, then run `just deny`. If the crate's license isn't in `
 - Commit straight to `master`. There are no feature branches.
 - Each commit should be one logical change that passes `just precommit` by itself.
 - Message format: an imperative subject (`Store liked videos in SQLite`), a blank line, then a body explaining what changed and why.
+- If users would notice the change, add a line under `## [Unreleased]` in `CHANGELOG.md` in the same commit.

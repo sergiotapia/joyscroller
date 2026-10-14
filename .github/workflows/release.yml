@@ -1,5 +1,6 @@
 # Builds joyscroller for Linux and publishes a GitHub Release when a version
-# tag is pushed: bump `version` in Cargo.toml, commit, then
+# tag is pushed: move CHANGELOG.md's Unreleased notes under the new version,
+# bump `version` in Cargo.toml, commit, then
 #   git tag v0.2.0 && git push origin v0.2.0
 #
 # The release starts as a draft and is only published once every build has
