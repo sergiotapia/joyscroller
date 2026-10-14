@@ -51,15 +51,24 @@ jobs:
           dbus-run-session -- bash -ec '
             echo -n ci | gnome-keyring-daemon --unlock --components=secrets > /dev/null
             XDG_CURRENT_DESKTOP=GNOME xvfb-run -a python spike/cookie_probe.py'
-      # The first run showed that reading a Keychain item a browser created
-      # waits for the user to click Allow, which CI can't do. Creating the items
-      # first, readable by any app, lets the browsers use them and the probe
-      # check the decryption itself.
+      # Reading a Keychain item a browser created waits for the user to click
+      # Allow, which CI can't do. So the items are made beforehand in a
+      # keychain with a known password, readable by any app (-A), with a
+      # partition list naming the browsers' signing teams (Google, Microsoft,
+      # Brave) and Apple's tools; otherwise macOS still prompts the browser.
       - name: Create the Safe Storage items (macOS)
         if: runner.os == 'macOS'
         run: |
+          kc=probe.keychain-db
+          security create-keychain -p ci "$kc"
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p ci "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -d user -s "$kc"
           for pair in "Chrome Safe Storage:Chrome" "Microsoft Edge Safe Storage:Microsoft Edge" "Brave Safe Storage:Brave"; do
-            security add-generic-password -A -s "${pair%%:*}" -a "${pair#*:}" -w "$(openssl rand -base64 16)"
+            security add-generic-password -A -s "${pair%%:*}" -a "${pair#*:}" -w "$(openssl rand -base64 16)" "$kc"
+            security set-generic-password-partition-list -s "${pair%%:*}" -a "${pair#*:}" -k ci \
+              -S apple-tool:,apple:,teamid:EQHXZ8M8AV,teamid:UBF8T346G9,teamid:KL8N8XSYF4 "$kc" > /dev/null
           done
       - name: Probe (macOS, Windows)
         if: runner.os != 'Linux'

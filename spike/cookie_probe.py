@@ -385,6 +385,22 @@ def read_firefox_cookie(db, uri_params):
         return None, f"{type(e).__name__}: {e}"
 
 
+def copy_with_wal(db):
+    """Copy cookies.sqlite with its -wal file, where Firefox's newest writes sit
+    until a checkpoint, and look for the cookie in the copy."""
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            dst = Path(d) / "cookies.sqlite"
+            shutil.copy(db, dst)
+            wal = db.with_name(db.name + "-wal")
+            if wal.exists():
+                shutil.copy(wal, dst.with_name(dst.name + "-wal"))
+            row, err = read_firefox_cookie(dst, "mode=rw")
+            return "ok" if row else (err or "copied, cookie not visible")
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
+
+
 def probe_firefox():
     r = {"browser": "firefox", "prefix": "unencrypted", "key_source": "none needed"}
     exe = next((p for p in FIREFOX["exe"] if p.exists()), None)
@@ -414,6 +430,7 @@ def probe_firefox():
             return r
         r["db_path"] = str(db)
         r["while_running_copy"] = try_copy(db)
+        r["while_running_copy_with_wal"] = copy_with_wal(db)
         row, err = read_firefox_cookie(db, "mode=ro")
         r["while_running_readonly"] = "ok" if row else (err or "opened, cookie not visible")
     finally:
@@ -470,12 +487,12 @@ def main():
 
     md = [f"## {os_name}: {report['platform']} ({report['machine']})", ""]
     md += [
-        "| Browser | Version | Prefix | DB ver | Read while running (immutable / read-only / copy) | Key | Decrypts? |",
+        "| Browser | Version | Prefix | DB ver | Read while running (immutable / read-only / copy / copy with WAL) | Key | Decrypts? |",
         "|---|---|---|---|---|---|---|",
     ]
     for r in results:
         running = " / ".join(
-            r.get(k, "-") for k in ("while_running_immutable", "while_running_readonly", "while_running_copy")
+            r.get(k, "-") for k in ("while_running_immutable", "while_running_readonly", "while_running_copy", "while_running_copy_with_wal")
         )
         decrypted = {True: "yes", False: "no"}.get(r.get("decrypted_ok"), r.get("decrypt_error", r.get("error", "-")))
         cells = [r["browser"], r.get("version", "-"), r.get("prefix", "-"), str(r.get("db_version", "-")),
