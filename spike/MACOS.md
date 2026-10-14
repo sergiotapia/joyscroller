@@ -76,9 +76,40 @@ It finds the profile under `~/Library/Application Support`, reads the key
 from the browser's "Safe Storage" Keychain item through Security.framework
 (so the dialog names Joyscroller, not `security`) and keeps it for the rest of
 the run. It also finds the browser for the headless listing in
-`/Applications` or `~/Applications`. Checked on a real Mac (Apple Silicon,
-Brave): YouTube likes list. TikTok and Instagram still need checking with a
-profile signed in to them.
+`/Applications` or `~/Applications`, and starts it with `--use-mock-keychain`.
+
+## Turn 2 results (2026-10-14, Apple Silicon, macOS 26, Brave)
+
+Run from the PR's DMG with a browser's quarantine flag, then from a local
+build of the second-launch fix installed over it.
+
+- [x] Gatekeeper: *"Joyscroller" Not Opened. Apple could not verify
+  "Joyscroller" is free of malware that may harm your Mac or compromise your
+  privacy.* Buttons: **Move to Trash** (highlighted, the default) and **Done**.
+  Pressing Return deletes the app, so the docs say to click Done. Then
+  System Settings → Privacy & Security → Open Anyway works.
+- [x] Keychain: asks for the Mac's password. After installing a new build
+  over it, it asked again (two dialogs, likely use + change access). After
+  Always Allow, a relaunch read the key without asking.
+- [x] Launch: the UI opens in the browser; the data is in Application Support
+  and the videos in `~/Movies/Joyscroller`. macOS runs a quarantined app from
+  an AppTranslocation folder, which changes nothing here.
+- [x] Second launch: **was broken**, opening the app again did nothing,
+  because the bundle's first process stayed running so macOS only
+  re-activated it. Fixed (the app now runs detached and the launcher exits);
+  checked on the Mac, and the smoke test now opens the app a second time
+  with `open`.
+- [x] Tools: yt-dlp fetched and not quarantined. ffmpeg and bun came from
+  `PATH` (Homebrew, ~/.bun) because `open` from a terminal passes its `PATH`;
+  a Finder launch has a bare `PATH` and would fetch them.
+- [x] Sync: 4,989 YouTube likes. TikTok and Instagram weren't signed in on
+  that Mac, so not checked.
+- [x] Download and play: YouTube videos downloaded in 11 to 29 s, AV1 and VP9
+  turned into H.264 playback copies, served with range requests; plays and
+  seeks in Brave.
+- [x] Turn off: nothing left running.
+- [ ] Not checked: TikTok and Instagram, the Intel build, live updates (item 7)
+  and sleep (item 8).
 
 ## Turn 2: the app end to end
 
