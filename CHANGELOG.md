@@ -4,6 +4,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-14
+
 ### Added
 
 - Every page now shows which version of Joyscroller is running, in the status bar at the bottom of the window, linking to that version's release notes. The version is also in the first line Joyscroller prints when it starts, and `joyscroller --version` prints it. ([#12](https://github.com/sergiotapia/joyscroller/issues/12))
@@ -52,7 +54,8 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/sergiotapia/joyscroller/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sergiotapia/joyscroller/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sergiotapia/joyscroller/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sergiotapia/joyscroller/releases/tag/v0.1.0
