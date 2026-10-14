@@ -50,13 +50,14 @@ impl Browser {
     }
 
     /// The `application` attribute Chromium stores its keyring secret under.
+    /// Edge's was found by the cookie probe in spike/ (Edge 152-155).
     fn keyring_application(self) -> &'static str {
         match self {
             Browser::Brave => "brave",
             Browser::Chrome => "chrome",
-            Browser::Chromium => "chromium",
+            // Edge keeps Chromium's own name rather than its brand.
+            Browser::Chromium | Browser::Edge => "chromium",
             Browser::Vivaldi => "vivaldi",
-            Browser::Edge => "microsoft-edge",
         }
     }
 }

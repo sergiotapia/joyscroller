@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+
+- Syncing with Microsoft Edge on Linux now reads all of your logins. Joyscroller looked for Edge's key in the keyring under the wrong name, so it skipped most of Edge's cookies.
+
 ## [0.4.0] - 2026-10-14
 
 ### Added
