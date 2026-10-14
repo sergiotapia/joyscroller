@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Joyscroller.app's description. make-app.sh fills in @VERSION@.
+     LSUIElement: no Dock icon or menu bar, since the app has no window; it
+     shows itself by opening its UI in the browser. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Joyscroller</string>
+	<key>CFBundleDisplayName</key>
+	<string>Joyscroller</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.sergiotapia.joyscroller</string>
+	<key>CFBundleExecutable</key>
+	<string>joyscroller</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT License</string>
+</dict>
+</plist>

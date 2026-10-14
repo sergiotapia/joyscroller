@@ -1,15 +1,15 @@
-# Builds joyscroller for Linux and publishes a GitHub Release when a version
-# tag is pushed: move CHANGELOG.md's Unreleased notes under the new version,
-# bump `version` in Cargo.toml, commit, then
+# Publishes a GitHub Release when a version tag is pushed: move
+# CHANGELOG.md's Unreleased notes under the new version, bump `version` in
+# Cargo.toml, commit, then
 #   git tag v0.2.0 && git push origin v0.2.0
 #
 # The release's description is the version's section of CHANGELOG.md plus
-# its compare link, and the release fails without them, so a version can't
-# ship undescribed. It starts as a draft and is only published once every
-# build has uploaded, so a failed build never leaves a release with missing
-# downloads.
-# Ubuntu 22.04 runners keep the glibc requirement at 2.35, old enough for any
-# current distro.
+# its compare link and how to install on each OS, and the release fails
+# without the changelog section, so a version can't ship undescribed. The
+# downloads come from the Package workflow (package.yml), which builds them
+# for Linux, macOS and Windows and smoke-tests each, plus a SHA256SUMS. The
+# release starts as a draft and is only published once everything has
+# uploaded, so a failed build never leaves a release with missing downloads.
 
 name: Release
 
@@ -49,35 +49,33 @@ jobs:
             echo "CHANGELOG.md has no notes or no compare link for $version" >&2
             exit 1
           fi
-          printf '%s\n\n\n**Full Changelog**: %s\n' "$notes" "$compare" > notes.md
+          printf '%s\n\n%s\n\n**Full Changelog**: %s\n' "$notes" "$(cat packaging/install-notes.md)" "$compare" > notes.md
       - run: gh release create "$TAG" --draft --verify-tag --notes-file notes.md --title "$TAG"
 
-  build:
+  package:
     needs: draft
-    strategy:
-      matrix:
-        include:
-          - runner: ubuntu-22.04
-            arch: x86_64
-          - runner: ubuntu-22.04-arm
-            arch: aarch64
-    runs-on: ${{ matrix.runner }}
+    uses: ./.github/workflows/package.yml
+    with:
+      label: ${{ github.ref_name }}
+
+  upload:
+    needs: package
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo test --locked
-      - run: cargo build --release --locked
-      - name: Package
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: joyscroller-*
+          merge-multiple: true
+          path: dist
+      - name: Upload the downloads and their checksums
+        working-directory: dist
         run: |
-          name="joyscroller-$TAG-linux-${{ matrix.arch }}"
-          mkdir "$name"
-          cp target/release/joyscroller README.md LICENSE "$name/"
-          tar -czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-          gh release upload "$TAG" "$name.tar.gz" "$name.tar.gz.sha256"
+          sha256sum joyscroller-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" joyscroller-* SHA256SUMS --repo "$GITHUB_REPOSITORY"
 
   publish:
-    needs: build
+    needs: upload
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
