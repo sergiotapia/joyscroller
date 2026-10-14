@@ -64,7 +64,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
-      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: rustup show active-toolchain || rustup toolchain install
       - run: cargo test --locked
       - run: cargo build --release --locked
       - name: Package

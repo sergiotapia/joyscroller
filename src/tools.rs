@@ -521,10 +521,6 @@ fn resolve_redirect(url: &str) -> Result<String> {
 
 /// What each of our tools prints with its version flag, one line per tool
 /// with the path that ran, for checking that a fetched set works.
-#[expect(
-    dead_code,
-    reason = "the CI smoke test that calls it is wired up separately"
-)]
 pub async fn versions() -> Result<String> {
     let mut lines = String::new();
     for (name, flag) in [

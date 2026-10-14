@@ -94,6 +94,10 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Fetch the app's own yt-dlp, ffmpeg, ffprobe and bun into tools/ (as the
+    /// app does on launch) and print each one's version, to check a build's
+    /// tools work on this OS.
+    Tools,
     /// Download the media of the next few liked videos that don't have it yet.
     Download {
         #[arg(long, value_enum, default_value = "brave")]
@@ -212,6 +216,11 @@ async fn main() -> Result<()> {
                 platform.name(),
                 db_path.display()
             );
+        }
+        Command::Tools => {
+            tools::ensure_yt_dlp().await?;
+            tools::ensure_helpers().await?;
+            print!("{}", tools::versions().await?);
         }
         Command::Download {
             browser,
