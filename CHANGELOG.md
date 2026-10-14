@@ -4,6 +4,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
 - Joyscroller runs on macOS. Download the `.dmg` for your Mac's chip, drag Joyscroller to Applications, and it opens in your browser. It reads your logins from Brave like it does on Linux, after asking once for its key in the Keychain. Videos are saved in `~/Movies/Joyscroller`. ([#1](https://github.com/sergiotapia/joyscroller/issues/1))
@@ -64,7 +66,8 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/sergiotapia/joyscroller/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sergiotapia/joyscroller/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sergiotapia/joyscroller/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sergiotapia/joyscroller/compare/v0.1.0...v0.2.0
