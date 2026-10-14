@@ -14,7 +14,8 @@ cookies live):
 Firefox, the fallback where a Chromium browser can't be read, is checked the
 same way; its cookies aren't encrypted.
 
-Writes a Markdown report to stdout (and the job summary) and report-<os>.json.
+Takes the browsers to probe as arguments (chrome, edge, brave, firefox), or
+probes all of them. Writes a Markdown report to stdout (and the job summary) and report-<os>.json.
 Never prints a key or password, only whether it was found and its length.
 """
 
@@ -42,6 +43,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 COOKIE_NAME = "joyscroller_probe"
 WAIT_FOR_COOKIE = 90  # Chromium commits cookies to disk about every 30 s.
+# On a real Mac the Keychain read waits for the user to click Allow; in CI
+# nobody can, so give up quickly there.
+KEYCHAIN_TIMEOUT = 20 if os.environ.get("CI") else 180
 
 HOME = Path.home()
 if sys.platform == "win32":
@@ -230,7 +234,7 @@ def decrypt(info, r, enc):
         return AESGCM(key).decrypt(enc[3:15], enc[15:], None)
     if sys.platform == "darwin":
         service, account = info["keychain"]
-        code, out, err = run(["security", "find-generic-password", "-w", "-s", service, "-a", account], timeout=20)
+        code, out, err = run(["security", "find-generic-password", "-w", "-s", service, "-a", account], timeout=KEYCHAIN_TIMEOUT)
         if code != 0:
             r["key_source"] = f"Keychain '{service}' read failed (exit {code}): {err}"
             return None
@@ -466,16 +470,23 @@ def keyring_inventory():
 def main():
     os_name = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")
     results = []
+    # Browsers named on the command line, or all of them.
+    wanted = set(sys.argv[1:]) or {*BROWSERS, "firefox"}
     for name, info in BROWSERS.items():
+        if name not in wanted:
+            continue
+        print(f"probe: {name}: opening it, waiting for the cookie, then quitting it", file=sys.stderr, flush=True)
         try:
             results.append(probe(name, info))
         except Exception:
             results.append({"browser": name, "error": traceback.format_exc()})
         print(json.dumps(results[-1], indent=2), file=sys.stderr, flush=True)
-    try:
-        results.append(probe_firefox())
-    except Exception:
-        results.append({"browser": "firefox", "error": traceback.format_exc()})
+    if "firefox" in wanted:
+        print("probe: firefox: opening it, waiting for the cookie, then quitting it", file=sys.stderr, flush=True)
+        try:
+            results.append(probe_firefox())
+        except Exception:
+            results.append({"browser": "firefox", "error": traceback.format_exc()})
     report = {
         "os": os_name,
         "platform": platform.platform(),
