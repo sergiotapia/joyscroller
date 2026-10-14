@@ -6,7 +6,8 @@
 //! them (writing inside it breaks its signature), so there the downloads go in
 //! `~/Movies/Joyscroller` and everything else in
 //! `~/Library/Application Support/Joyscroller`. A bundled app also has no
-//! terminal, so it opens the UI itself and logs to a file.
+//! terminal, so it opens the UI itself and logs to a file, and it runs detached
+//! from the process macOS launched, so opening the app again reaches it.
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -103,9 +104,16 @@ pub async fn already_running(addr: &str) -> bool {
 
 /// In a macOS bundle, run the app as a child process whose output goes to
 /// `joyscroller.log` (a bundle's own output goes nowhere anyone can read) and
-/// return its exit code for this process to exit with. Elsewhere, or in that
+/// return the exit code for this process to exit with. Elsewhere, or in that
 /// child, returns `None` and the app runs here.
-pub fn run_logged_if_bundled() -> Result<Option<i32>> {
+///
+/// The app itself (`detach`) is left running on its own and this process
+/// exits at once. While a bundle's first process runs, macOS counts the app
+/// as open, and opening it again only re-activates it, which with no window
+/// does nothing. Exiting means every double-click starts a new copy, which
+/// finds the running one and opens its UI. A subcommand is waited for, so its
+/// output is in the log when it returns.
+pub fn run_logged_if_bundled(detach: bool) -> Result<Option<i32>> {
     if bundle().is_none() || std::env::var_os(LOGGING_ENV).is_some() {
         return Ok(None);
     }
@@ -113,15 +121,22 @@ pub fn run_logged_if_bundled() -> Result<Option<i32>> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let log = open_log(&dir.join("joyscroller.log"))?;
     let exe = std::env::current_exe().context("finding the app's executable")?;
-    let status = std::process::Command::new(exe)
-        .args(std::env::args_os().skip(1))
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1))
         .env(LOGGING_ENV, "1")
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone().context("opening the log")?)
-        .stderr(log)
-        .status()
-        .context("starting the app")?;
-    Ok(Some(status.code().unwrap_or(1)))
+        .stderr(log);
+    if !detach {
+        let status = cmd.status().context("starting the app")?;
+        return Ok(Some(status.code().unwrap_or(1)));
+    }
+    // Its own process group, so nothing aimed at this one's (a terminal's
+    // Ctrl-C, when started from one) reaches it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    cmd.spawn().context("starting the app")?;
+    Ok(Some(0))
 }
 
 /// The log, appended to, after moving a log that's grown too big aside.

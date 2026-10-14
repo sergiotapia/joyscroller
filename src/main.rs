@@ -181,7 +181,7 @@ const QUIT_GRACE: Duration = Duration::from_secs(5);
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(code) = desktop::run_logged_if_bundled()? {
+    if let Some(code) = desktop::run_logged_if_bundled(cli.command.is_none())? {
         std::process::exit(code);
     }
     let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;

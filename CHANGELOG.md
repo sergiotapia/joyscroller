@@ -6,6 +6,7 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ### Added
 
+- Joyscroller runs on macOS. Download the `.dmg` for your Mac's chip, drag Joyscroller to Applications, and it opens in your browser. It reads your logins from Brave like it does on Linux, after asking once for its key in the Keychain. Videos are saved in `~/Movies/Joyscroller`.
 - A red **Turn off** button at the end of the taskbar stops Joyscroller, along with any download in progress, after asking you to confirm.
 - Starting Joyscroller while it's already running opens the running copy in your browser, instead of stopping with an error about its address being in use.
 

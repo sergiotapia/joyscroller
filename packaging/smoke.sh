@@ -68,8 +68,19 @@ echo "the UI answers at $url"
 echo "the database is in $data and downloads go to $media"
 
 echo "== second launch"
-# Hands over to the running copy (opening its UI) and exits successfully.
-"$exe"
+# Hands over to the running copy (opening its UI) and exits successfully. A
+# Mac app is opened again the way Finder would, which only reaches the new
+# copy if macOS no longer counts the app as open.
+if [ "$os" = macos ]; then
+  open "$app"
+  for _ in $(seq 15); do
+    grep -q "joyscroller is already running" "$log" && break
+    sleep 1
+  done
+  grep -q "joyscroller is already running" "$log"
+else
+  "$exe"
+fi
 
 echo "== turn off"
 curl -fsS -X POST -H "Origin: $url" "$url/quit" > /dev/null
