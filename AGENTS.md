@@ -62,7 +62,6 @@ src/db/playback.rs  The playback-copy queue and what each try made
 src/db/list.rs      The UI's pages: platform filter, search, and the column sorts with their indexes
 src/db/search.rs    Turns a parsed search into SQL against the FTS5 indexes (tests in db/search/tests.rs)
 src/db/test_support.rs  Fixtures the db tests share (in-memory database, sample rows, a search helper)
-                Also turns a parsed search into SQL against the FTS5 indexes, and orders the list
 src/query.rs    Parses what's typed in the search box: words, "quoted text", -exclusions, a|b alternatives,
                 prefix* and *patterns (magnetissimo's operators); splits text into tokens the way unicode61 does
 assets/         The UI's look, built into the binary by web.rs (`ASSETS`) and served at /assets/<file>:

@@ -4,6 +4,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-14
+
 ### Added
 
 - Every downloaded video now plays in every browser, phones and cars included. Most videos come in formats only some browsers play (YouTube's AV1, TikTok's HEVC, Instagram's VP9), so Joyscroller makes a playback copy in H.264 next to each one, at the same resolution, in the background and one at a time. The original is kept as downloaded. A video's page plays the original where the browser handles it smoothly and the copy everywhere else, and a button switches between them. ([#4](https://github.com/sergiotapia/joyscroller/issues/4))
@@ -46,6 +48,7 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/sergiotapia/joyscroller/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sergiotapia/joyscroller/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sergiotapia/joyscroller/releases/tag/v0.1.0
