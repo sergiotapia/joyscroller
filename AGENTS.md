@@ -84,10 +84,9 @@ assets/         The UI's look, built into the binary by web.rs (`ASSETS`) and se
 Config: `Cargo.toml` (lint levels), `clippy.toml`, `deny.toml`, `justfile`, `rust-toolchain.toml` (the Rust release every build uses, locally and in CI; upgrade it on purpose and fix what new lints find).
 
 CI (`.github/workflows/`):
-- `ci.yml`: clippy and the tests on Linux, macOS and Windows for every push to master and every pull request; fmt, machete, deny and antislop once.
-- `package.yml`: builds every download (Linux tarballs, a macOS DMG per chip holding `Joyscroller.app`, Windows zips for x64 and arm64) and smoke-tests each on a machine of its kind with `packaging/smoke.sh`. Pull requests run it, so a PR's run has builds to try. The Mac app is never signed with a Developer ID or notarized: `packaging/macos/make-app.sh` only gives it the free ad-hoc signature Apple Silicon needs.
-- `release.yml`: when a `v*` tag matching Cargo.toml's version is pushed, calls `package.yml` and publishes a GitHub Release with the files, a `SHA256SUMS`, the CHANGELOG section and `packaging/install-notes.md`.
-- `cookie-probe.yml` with `spike/`: the probe of how each OS and browser stores cookies (PR #13); `spike/MACOS.md` is the checklist for testing on a real Mac.
+- `ci.yml`: clippy and the tests on Linux, macOS and Windows for every push to master, every pull request and every release; fmt, machete, deny and antislop once.
+- `package.yml`: builds every download (Linux tarballs for x86_64 and aarch64, a macOS DMG per chip holding `Joyscroller.app`) and smoke-tests each on a machine of its kind with `packaging/smoke.sh`. Pull requests run it, so a PR's run has builds to try. The Mac app is never signed with a Developer ID or notarized: `packaging/macos/make-app.sh` only gives it the free ad-hoc signature Apple Silicon needs.
+- `release.yml`: when a `v*` tag matching Cargo.toml's version is pushed, runs `ci.yml`, then `package.yml`, and publishes a GitHub Release with the files, a `SHA256SUMS`, the CHANGELOG section and `packaging/install-notes.md`.
 
 ## Commands
 
@@ -108,7 +107,7 @@ cargo run -- cookies --out c.txt  # export cookies.txt (contains live credential
 cargo run -- tools                # fetch the app's yt-dlp, ffmpeg, ffprobe and bun and print their versions
 ```
 
-Runtime needs: Linux or macOS (Windows is being ported in PR #13: the tools, packaging and desktop fit work there, reading browser logins doesn't yet), a Chromium-family browser profile signed in to YouTube, TikTok and Instagram (default `--browser brave --profile Default`), and that browser's executable (TikTok and Instagram run it headless): on Linux on `PATH`, on macOS in `/Applications` or `~/Applications`. On Linux, v11 cookies need a Secret Service keyring (gnome-keyring or KWallet). On macOS, the first cookie read of each run asks the user to let Joyscroller use the browser's "Safe Storage" Keychain item, unless they clicked Always Allow.
+Runtime needs: Linux or macOS (Windows isn't released yet: the tools and desktop fit work there and CI tests it, but reading browser logins doesn't, see #2), a Chromium-family browser profile signed in to YouTube, TikTok and Instagram (default `--browser brave --profile Default`), and that browser's executable (TikTok and Instagram run it headless): on Linux on `PATH`, on macOS in `/Applications` or `~/Applications`. On Linux, v11 cookies need a Secret Service keyring (gnome-keyring or KWallet). On macOS, the first cookie read of each run asks the user to let Joyscroller use the browser's "Safe Storage" Keychain item, unless they clicked Always Allow.
 
 A full TikTok listing takes about 2 minutes for 5,000 likes (one request per 30). In testing, TikTok's liked list ended after exactly 200 pages (about 5,100 likes, back to January 2026). That looks like a server-side cap rather than the true end of the list.
 

@@ -74,7 +74,7 @@ mkdir -p /tmp/joyscroller-dev && cp target/debug/joyscroller /tmp/joyscroller-de
 
 The debugging subcommands (`likes`, `sync`, `download`, `cookies`, `tools`) are listed in [AGENTS.md](AGENTS.md). They use the app's own yt-dlp and ffmpeg once it has fetched them, and otherwise whatever is on your `PATH`.
 
-CI checks every pull request on Linux, macOS and Windows and builds downloads for all three, smoke-testing each one. Pushing a version tag publishes them as a release (see [.github/workflows/release.yml](.github/workflows/release.yml)). Run `just precommit` before every commit. [CONTRIBUTING.md](CONTRIBUTING.md) has the conventions, and [AGENTS.md](AGENTS.md) has the architecture and data model.
+CI checks every pull request on Linux, macOS and Windows, and builds and smoke-tests the Linux and macOS downloads. Pushing a version tag runs the same checks and builds and publishes them as a release (see [.github/workflows/release.yml](.github/workflows/release.yml)). Run `just precommit` before every commit. [CONTRIBUTING.md](CONTRIBUTING.md) has the conventions, and [AGENTS.md](AGENTS.md) has the architecture and data model.
 
 ## License
 

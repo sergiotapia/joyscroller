@@ -5,7 +5,6 @@
 #   macOS    joyscroller-<label>-macos-arm64.dmg, -macos-x86_64.dmg
 #            (Joyscroller.app, unsigned apart from the ad-hoc signature
 #            Apple Silicon needs; the Intel build is cross-compiled)
-#   Windows  joyscroller-<label>-windows-x64.zip, -windows-arm64.zip
 #
 # On a pull request, <label> is the version plus the PR and commit, and the
 # files are the run's artifacts, to download and try. The release workflow
@@ -154,48 +153,3 @@ jobs:
           ! xattr -p com.apple.quarantine "$app" 2> /dev/null
       - name: Smoke test
         run: packaging/smoke.sh /Applications/Joyscroller.app/Contents/MacOS/joyscroller "$VERSION"
-
-  windows:
-    needs: version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-2025
-            arch: x64
-            target: x86_64-pc-windows-msvc
-          - runner: windows-11-arm
-            arch: arm64
-            target: aarch64-pc-windows-msvc
-    runs-on: ${{ matrix.runner }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      NAME: joyscroller-${{ needs.version.outputs.label }}-windows-${{ matrix.arch }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install rustup if the runner hasn't got it
-        run: |
-          if ! command -v rustup > /dev/null; then
-            curl -fsSLo rustup-init.exe "https://static.rust-lang.org/rustup/dist/${{ matrix.target }}/rustup-init.exe"
-            ./rustup-init.exe -y --default-toolchain none --profile minimal
-            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
-          fi
-      - run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory $env:NAME | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/joyscroller.exe, README.md, LICENSE $env:NAME
-          Compress-Archive -Path $env:NAME -DestinationPath "$env:NAME.zip"
-      - name: Smoke test
-        run: |
-          mkdir smoke
-          (cd smoke && unzip -q "../$NAME.zip")
-          packaging/smoke.sh "smoke/$NAME/joyscroller.exe" "${{ needs.version.outputs.version }}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.NAME }}
-          path: ${{ env.NAME }}.zip

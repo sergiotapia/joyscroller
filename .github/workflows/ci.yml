@@ -1,7 +1,8 @@
 # Checks every push to master and every pull request on Linux, macOS and
 # Windows: clippy and the tests on each, and the checks that don't depend on
 # the OS (formatting, unused dependencies, cargo-deny, antislop) once, on
-# Linux. `just precommit` runs the same steps locally.
+# Linux. `just precommit` runs the same steps locally. The release workflow
+# runs it too, so a version only ships if it passes.
 
 name: CI
 
@@ -9,6 +10,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}

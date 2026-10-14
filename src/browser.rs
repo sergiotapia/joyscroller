@@ -102,8 +102,7 @@ impl Browser {
     }
 
     /// The Keychain item holding the cookie password, as (service, account).
-    /// Checked on a real Mac for Brave and Edge, and by the cookie probe in
-    /// spike/ for Chrome.
+    /// Checked on a real Mac for Brave and Edge, and on CI's Macs for Chrome.
     #[cfg(target_os = "macos")]
     fn keychain_item(self) -> (&'static str, &'static str) {
         match self {
@@ -116,7 +115,7 @@ impl Browser {
     }
 
     /// The `application` attribute Chromium stores its keyring secret under.
-    /// Edge's was found by the cookie probe in spike/ (Edge 152-155).
+    /// Edge's was found on CI's Linux runners (Edge 152-155).
     #[cfg(target_os = "linux")]
     fn keyring_application(self) -> &'static str {
         match self {

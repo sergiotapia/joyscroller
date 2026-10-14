@@ -6,10 +6,12 @@
 # The release's description is the version's section of CHANGELOG.md plus
 # its compare link and how to install on each OS, and the release fails
 # without the changelog section, so a version can't ship undescribed. The
-# downloads come from the Package workflow (package.yml), which builds them
-# for Linux, macOS and Windows and smoke-tests each, plus a SHA256SUMS. The
-# release starts as a draft and is only published once everything has
-# uploaded, so a failed build never leaves a release with missing downloads.
+# tagged commit has to pass CI (ci.yml: the lints and the tests on every OS)
+# before anything is built. The downloads come from the Package workflow
+# (package.yml), which builds them for Linux and macOS and smoke-tests each,
+# plus a SHA256SUMS. The release starts as a draft and is only published once
+# everything has uploaded, so a failed build never leaves a release with
+# missing downloads.
 
 name: Release
 
@@ -25,6 +27,9 @@ env:
   TAG: ${{ github.ref_name }}
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   draft:
     runs-on: ubuntu-24.04
     steps:
@@ -53,7 +58,7 @@ jobs:
       - run: gh release create "$TAG" --draft --verify-tag --notes-file notes.md --title "$TAG"
 
   package:
-    needs: draft
+    needs: [ci, draft]
     uses: ./.github/workflows/package.yml
     with:
       label: ${{ github.ref_name }}
