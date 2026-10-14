@@ -1,7 +1,7 @@
 //! What the user typed into the list's search box, read as a query: words,
 //! quoted text, exclusions, alternatives and patterns. The operators are
 //! magnetissimo's (`lib/magnetissimo/torrents/query.ex`), so they work the
-//! same in both apps; `db.rs` turns a `Query` into SQL against the archive's
+//! same in both apps; `db/search.rs` turns a `Query` into SQL against the archive's
 //! two FTS5 indexes and says how each part is matched.
 //!
 //! * `cat piano` finds both words, each anywhere, in any order.

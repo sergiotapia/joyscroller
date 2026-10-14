@@ -51,4 +51,5 @@ todo = "warn"
 unimplemented = "warn"
 dbg_macro = "warn"
 redundant_clone = "warn"           # .clone() sprinkled to appease the borrow checker
+mod_module_files = "warn"          # a module with submodules is foo.rs + foo/, never foo/mod.rs
 needless_collect = "warn"

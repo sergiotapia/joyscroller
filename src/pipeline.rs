@@ -5,24 +5,31 @@
 //! for in the UI doesn't wait for its lane: it downloads right away, on a
 //! track of its own, alongside the lanes and any other requested videos.
 //!
-//! A video goes through each `Stage` in turn; for now the only one is the
-//! download itself. What the lanes and tracks are doing is kept on a `Board`,
-//! which the web UI watches. Nothing about the pipeline is stored: the lanes
-//! pick up from the database when the app starts again, and a requested
-//! download that was cut off needs asking for again.
+//! Once downloaded, a video goes to the converter, which makes its playback
+//! copy (`transcode.rs`) for browsers that can't play the original. It works
+//! on one video at a time at low priority, newest first, so the backlog of
+//! copies fills in behind the downloads without making the computer
+//! sluggish. A page that can't play a video's original asks for its copy,
+//! which puts it at the front.
+//!
+//! What the lanes, tracks and converter are doing is kept on a `Board`, which
+//! the web UI watches. Nothing about the pipeline is stored: the lanes and
+//! the converter pick up from the database when the app starts again, and a
+//! requested download that was cut off needs asking for again.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use crate::browser::Browser;
-use crate::db::{self, PendingDownload};
+use crate::db::{self, PendingDownload, PendingPlayback};
 use crate::download::{self, Credentials, Progress, Saved};
+use crate::transcode;
 
 /// Whether the lanes download the backlog, every liked video (thousands of
 /// them) with the user's logins. When off, videos download only when asked
@@ -70,6 +77,10 @@ const DB_RETRY: Duration = Duration::from_mins(1);
 
 /// How many finished videos the board remembers.
 const RECENT: usize = 20;
+
+/// The pause after a playback copy fails, so a broken ffmpeg doesn't spin
+/// through the backlog. The video itself waits out its own retry delay.
+const CONVERT_FAILURE_PAUSE: Duration = Duration::from_secs(10);
 
 /// A step a video goes through, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +177,33 @@ pub enum Outcome {
         picture: Option<String>,
     },
     Failed(String),
+    /// Its playback copy was made.
+    Converted {
+        bytes: u64,
+        seconds: u64,
+        /// `transcode::Plan::method`: `remux` or `encode`.
+        method: &'static str,
+    },
+    /// Its playback copy couldn't be made.
+    ConvertFailed(String),
+}
+
+/// What the converter, which makes playback copies, is doing.
+#[derive(Debug, Clone, Default)]
+pub struct Converter {
+    /// Downloaded videos still waiting for a copy, counting the one it's on,
+    /// as of the last time it looked. None until it first looks.
+    pub left: Option<usize>,
+    pub current: Option<Converting>,
+}
+
+/// A video the converter is making a playback copy of.
+#[derive(Debug, Clone)]
+pub struct Converting {
+    pub job: Job,
+    pub started_at: i64,
+    /// ffmpeg's latest progress report, once there is one.
+    pub progress: Option<transcode::Progress>,
 }
 
 /// What the pipeline is doing.
@@ -177,6 +215,7 @@ pub struct Board {
     pub active: Vec<Active>,
     /// Since the app started, newest first, up to `RECENT`.
     pub recent: VecDeque<Finished>,
+    pub converter: Converter,
 }
 
 impl Board {
@@ -189,6 +228,14 @@ impl Board {
 
     pub fn find_active(&self, platform: &str, video_id: &str) -> Option<&Active> {
         self.active.iter().find(|a| a.job.is(platform, video_id))
+    }
+
+    /// The video the converter is on, if it's this one.
+    pub fn find_converting(&self, platform: &str, video_id: &str) -> Option<&Converting> {
+        self.converter
+            .current
+            .as_ref()
+            .filter(|c| c.job.is(platform, video_id))
     }
 
     fn lane_mut(&mut self, platform: &str) -> Option<&mut Lane> {
@@ -218,12 +265,39 @@ impl Board {
     fn finish(&mut self, job: &Job, outcome: Outcome) {
         self.active
             .retain(|a| !a.job.is(&job.item.platform, &job.item.video_id));
+        self.remember(job, outcome);
+    }
+
+    fn remember(&mut self, job: &Job, outcome: Outcome) {
         self.recent.push_front(Finished {
             job: job.clone(),
             at: db::now(),
             outcome,
         });
         self.recent.truncate(RECENT);
+    }
+
+    fn start_converting(&mut self, job: &Job) {
+        self.converter.current = Some(Converting {
+            job: job.clone(),
+            started_at: db::now(),
+            progress: None,
+        });
+    }
+
+    fn converting(&mut self, progress: transcode::Progress) {
+        if let Some(current) = &mut self.converter.current {
+            current.progress = Some(progress);
+        }
+    }
+
+    /// Take the converter's video off the board. A video that needed no copy
+    /// isn't worth listing among the finished.
+    fn finish_converting(&mut self, job: &Job, outcome: Option<Outcome>) {
+        self.converter.current = None;
+        if let Some(outcome) = outcome {
+            self.remember(job, outcome);
+        }
     }
 }
 
@@ -234,6 +308,24 @@ struct Shared {
     db_path: PathBuf,
     media_root: PathBuf,
     board: watch::Sender<Board>,
+    /// Wakes the converter when there's a new download to convert.
+    wake: Notify,
+    /// Videos whose copies pages asked for, to convert before the backlog.
+    asked: Mutex<VecDeque<(String, String)>>,
+}
+
+impl Shared {
+    fn new(browser: Browser, profile: &str, db_path: &Path, media_root: &Path) -> Shared {
+        Shared {
+            browser,
+            profile: profile.to_owned(),
+            db_path: db_path.to_owned(),
+            media_root: media_root.to_owned(),
+            board: watch::Sender::new(Board::default()),
+            wake: Notify::new(),
+            asked: Mutex::new(VecDeque::new()),
+        }
+    }
 }
 
 /// The handle the web UI asks for downloads through.
@@ -260,19 +352,16 @@ impl Pipeline {
         let pipeline = Pipeline::new(
             platforms,
             AUTOMATIC,
-            Shared {
-                browser,
-                profile: profile.to_owned(),
-                db_path: db_path.to_owned(),
-                media_root: media_root.to_owned(),
-                board: watch::Sender::new(Board::default()),
-            },
+            Shared::new(browser, profile, db_path, media_root),
         );
         if AUTOMATIC {
             for &platform in platforms {
                 tokio::spawn(run_lane(platform, Arc::clone(&pipeline.shared)));
             }
         }
+        // Copies are made on this computer from files already here, so the
+        // converter runs whether or not the lanes do.
+        tokio::spawn(run_converter(Arc::clone(&pipeline.shared)));
         pipeline
     }
 
@@ -335,6 +424,23 @@ impl Pipeline {
             }
             !known
         }))
+    }
+
+    /// Make `platform`/`video_id`'s playback copy next, before the backlog:
+    /// a page can't play its original.
+    pub fn convert_soon(&self, platform: &str, video_id: &str) {
+        let key = (platform.to_owned(), video_id.to_owned());
+        {
+            let mut asked = self
+                .shared
+                .asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !asked.contains(&key) {
+                asked.push_back(key);
+            }
+        }
+        self.shared.wake.notify_one();
     }
 
     pub fn board(&self) -> Board {
@@ -501,7 +607,169 @@ async fn download_job(shared: &Shared, conn: &mut Connection, job: &Job) -> bool
     }
     let downloaded = matches!(outcome, Outcome::Downloaded { .. });
     shared.board.send_modify(|board| board.finish(job, outcome));
+    if downloaded {
+        shared.wake.notify_one();
+    }
     downloaded
+}
+
+/// The converter: make every downloaded video's playback copy, one at a
+/// time, forever. Failures are recorded and logged; nothing stops it.
+async fn run_converter(shared: Arc<Shared>) {
+    // Its own connection, as the lanes have.
+    let mut conn = loop {
+        match db::open(&shared.db_path) {
+            Ok(conn) => break conn,
+            Err(e) => {
+                eprintln!("playback: can't open the database: {e:#}");
+                tokio::time::sleep(DB_RETRY).await;
+            }
+        }
+    };
+    // ffmpeg may still be on its way on first launch.
+    loop {
+        match crate::tools::ffmpeg_ready() {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(e) => eprintln!("playback: can't check for ffmpeg: {e:#}"),
+        }
+        tokio::time::sleep(TOOLS_RETRY).await;
+    }
+    loop {
+        match next_conversion(&shared, &conn) {
+            Ok(Some((job, pending))) => {
+                if !convert_job(&shared, &mut conn, &job, &pending).await {
+                    tokio::time::sleep(CONVERT_FAILURE_PAUSE).await;
+                }
+            }
+            Ok(None) => {
+                // New downloads wake it; the timeout catches retries coming due.
+                tokio::select! {
+                    () = shared.wake.notified() => {}
+                    () = tokio::time::sleep(IDLE) => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("playback: can't read the queue: {e:#}");
+                tokio::time::sleep(DB_RETRY).await;
+            }
+        }
+    }
+}
+
+/// The next video to make a playback copy of, put on the board as the
+/// converter's: one a page asked for, or else the newest in the backlog.
+/// Also updates the converter's count of what's left.
+fn next_conversion(shared: &Shared, conn: &Connection) -> Result<Option<(Job, PendingPlayback)>> {
+    let mut next = None;
+    loop {
+        let asked = shared
+            .asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front();
+        let Some((platform, video_id)) = asked else {
+            break;
+        };
+        // Already made, or not downloaded after all: nothing to do.
+        if let Some(pending) = db::playback_item(conn, &platform, &video_id)? {
+            next = Some(pending);
+            break;
+        }
+    }
+    if next.is_none() {
+        next = db::pending_playback(conn, 1)?.into_iter().next();
+    }
+    let left = db::pending_playback_count(conn)?;
+    let picked = next.map(|pending| (Job::new(pending.item.clone()), pending));
+    shared.board.send_modify(|board| {
+        board.converter.left = Some(left);
+        if let Some((job, _)) = &picked {
+            board.start_converting(job);
+        }
+    });
+    Ok(picked)
+}
+
+/// Make the playback copy of a video that's on the board as the
+/// converter's, record how it went, and take it off the board. True unless
+/// it failed.
+async fn convert_job(
+    shared: &Shared,
+    conn: &mut Connection,
+    job: &Job,
+    pending: &PendingPlayback,
+) -> bool {
+    let started = Instant::now();
+    let (platform, video_id) = (&job.item.platform, &job.item.video_id);
+    let on_progress = |progress| shared.board.send_modify(|board| board.converting(progress));
+    let result = transcode::make(
+        &shared.media_root.join(&pending.folder),
+        &pending.files,
+        &on_progress,
+    )
+    .await;
+    let seconds = started.elapsed().as_secs();
+    let recorded = match &result {
+        Ok(made) => db::record_playback(
+            conn,
+            platform,
+            video_id,
+            &db::MadePlayback {
+                download_folder: &pending.folder,
+                downloaded_at: pending.downloaded_at,
+                file_name: made.file,
+                size_bytes: made.bytes,
+                method: made.method,
+                original_config_json: made.source.as_deref(),
+            },
+        ),
+        Err(e) => db::record_playback_failure(
+            conn,
+            platform,
+            video_id,
+            (&pending.folder, pending.downloaded_at),
+            &format!("{e:#}"),
+        )
+        .map(|()| true),
+    };
+    let mut outcome = match &result {
+        // Downloaded again while this copy was made; that download's turn
+        // comes next.
+        Ok(_) if matches!(recorded, Ok(false)) => {
+            eprintln!(
+                "playback: {platform} video {video_id} was downloaded again; its copy is made afresh"
+            );
+            None
+        }
+        Ok(made) if made.file.is_some() => {
+            #[expect(clippy::cast_precision_loss, reason = "a size for a log line")]
+            let megabytes = made.bytes as f64 / 1e6;
+            eprintln!(
+                "playback: made {platform} video {video_id}'s copy ({megabytes:.1} MB, {}) in {seconds}s",
+                made.method
+            );
+            Some(Outcome::Converted {
+                bytes: made.bytes,
+                seconds,
+                method: made.method,
+            })
+        }
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("playback: {platform} video {video_id}'s copy failed: {e:#}");
+            Some(Outcome::ConvertFailed(format!("{e:#}")))
+        }
+    };
+    if let Err(e) = recorded {
+        eprintln!("playback: couldn't record {platform} video {video_id}'s copy: {e:#}");
+        outcome = Some(Outcome::ConvertFailed(format!("couldn't record it: {e:#}")));
+    }
+    let ok = !matches!(outcome, Some(Outcome::ConvertFailed(_)));
+    shared
+        .board
+        .send_modify(|board| board.finish_converting(job, outcome));
+    ok
 }
 
 /// Store how a download went and log it. A failure counts as an attempt, so
@@ -521,11 +789,11 @@ pub fn record(
                 &item.platform,
                 &item.video_id,
                 &db::Downloaded {
-                    dir: &saved.dir,
+                    folder: &saved.dir,
                     files: &saved.files,
-                    bytes: saved.bytes,
-                    format: Some(&saved.format),
-                    info_json: saved.info_json.as_deref(),
+                    size_bytes: saved.bytes,
+                    formats: Some(&saved.format),
+                    metadata_json: saved.info_json.as_deref(),
                     posted_at: saved.posted_at,
                 },
             )
@@ -559,7 +827,7 @@ mod tests {
             kind: "video".into(),
             title: None,
             author_name: None,
-            liked_on: "2026-10-12".into(),
+            added_on: "2026-10-12".into(),
         }
     }
 
@@ -571,13 +839,12 @@ mod tests {
         Pipeline::new(
             &["youtube", "tiktok"],
             true,
-            Shared {
-                browser: Browser::Brave,
-                profile: "Default".into(),
-                db_path: PathBuf::from("/nonexistent/joyscroller.db"),
-                media_root: PathBuf::from("/nonexistent/downloads"),
-                board: watch::Sender::new(Board::default()),
-            },
+            Shared::new(
+                Browser::Brave,
+                "Default",
+                Path::new("/nonexistent/joyscroller.db"),
+                Path::new("/nonexistent/downloads"),
+            ),
         )
     }
 
@@ -671,7 +938,7 @@ mod tests {
         db::init(&mut conn).unwrap();
         for id in ["old", "new"] {
             conn.execute(
-                "INSERT INTO videos (platform, video_id, url, raw_json, liked_at) \
+                "INSERT INTO videos (platform, video_id, url, listing_json, added_at) \
                  VALUES ('tiktok', ?1, 'https://example.com', '{}', 0)",
                 [id],
             )
@@ -694,6 +961,76 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_converter_takes_asked_for_videos_first() {
+        let pipeline = pipeline();
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::init(&mut conn).unwrap();
+        for id in ["old", "new"] {
+            conn.execute(
+                "INSERT INTO videos (platform, video_id, url, listing_json, added_at) \
+                 VALUES ('tiktok', ?1, 'https://example.com', '{}', 0)",
+                [id],
+            )
+            .unwrap();
+            let files = ["video.mp4".to_string()];
+            let done = db::Downloaded {
+                folder: id,
+                files: &files,
+                size_bytes: 1,
+                formats: None,
+                metadata_json: None,
+                posted_at: None,
+            };
+            db::record_download(&mut conn, "tiktok", id, &done).unwrap();
+        }
+        // Asking twice queues it once; asking for a video that isn't
+        // downloaded does nothing.
+        pipeline.convert_soon("tiktok", "nope");
+        pipeline.convert_soon("tiktok", "old");
+        pipeline.convert_soon("tiktok", "old");
+        let (job, pending) = next_conversion(&pipeline.shared, &conn).unwrap().unwrap();
+        assert_eq!(job.item.video_id, "old");
+        assert_eq!(pending.files, ["video.mp4"]);
+        let board = pipeline.board();
+        assert_eq!(board.converter.left, Some(2));
+        assert!(board.find_converting("tiktok", "old").is_some());
+        assert!(board.find_converting("tiktok", "new").is_none());
+
+        pipeline.shared.board.send_modify(|board| {
+            board.converting(transcode::Progress {
+                done: 1.0,
+                total: Some(4.0),
+                speed: None,
+            });
+        });
+        assert!(
+            pipeline
+                .board()
+                .converter
+                .current
+                .unwrap()
+                .progress
+                .is_some()
+        );
+        pipeline
+            .shared
+            .board
+            .send_modify(|board| board.finish_converting(&job, None));
+        let board = pipeline.board();
+        assert!(board.converter.current.is_none());
+        // A video that needed no copy isn't listed as finished.
+        assert!(board.recent.is_empty());
+
+        // Then the backlog, newest first.
+        let (job, _) = next_conversion(&pipeline.shared, &conn).unwrap().unwrap();
+        assert_eq!(job.item.video_id, "new");
+        pipeline.shared.board.send_modify(|board| {
+            board.finish_converting(&job, Some(Outcome::ConvertFailed("no".into())));
+        });
+        assert_eq!(pipeline.board().recent.len(), 1);
     }
 
     #[test]

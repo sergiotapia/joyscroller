@@ -4,6 +4,15 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- Every downloaded video now plays in every browser, phones and cars included. Most videos come in formats only some browsers play (YouTube's AV1, TikTok's HEVC, Instagram's VP9), so Joyscroller makes a playback copy in H.264 next to each one, at the same resolution, in the background and one at a time. The original is kept as downloaded. A video's page plays the original where the browser handles it smoothly and the copy everywhere else, and a button switches between them. ([#4](https://github.com/sergiotapia/joyscroller/issues/4))
+- Before updating your library to a new version, Joyscroller now saves a copy of it in a `backups` folder beside it, so an update can always be undone.
+
+### Changed
+
+- This version updates your library in a way older versions can't read. If you go back to an older Joyscroller, restore the copy it saved in `backups` first. From this version on, Joyscroller says plainly when a library was made by a newer version, instead of failing with database errors.
+
 ## [0.2.0] - 2026-10-14
 
 ### Added

@@ -31,7 +31,7 @@ use tokio::sync::watch;
 use tower_http::services::ServeFile;
 
 use crate::db;
-use crate::pipeline::{Active, Board, Job, Lane, Outcome, Pipeline, Wait};
+use crate::pipeline::{Active, Board, Converter, Converting, Job, Lane, Outcome, Pipeline, Wait};
 use crate::player;
 
 /// Where the UI listens. Localhost only: the archive is the user's own.
@@ -120,6 +120,10 @@ pub async fn serve(
         .route(
             "/videos/{platform}/{video_id}/download",
             post(request_download),
+        )
+        .route(
+            "/videos/{platform}/{video_id}/playback",
+            post(request_playback),
         )
         .route(
             "/videos/{platform}/{video_id}/media/{file}",
@@ -664,10 +668,11 @@ async fn video_page(
     State(app): State<App>,
     Path((platform, video_id)): Path<(String, String)>,
 ) -> Result<Html<String>, Failure> {
-    let (found, download, counts, after) = app.db(|conn| {
+    let (found, download, playback, counts, after) = app.db(|conn| {
         Ok((
             db::video(conn, &platform, &video_id)?,
             db::download_state(conn, &platform, &video_id)?,
+            db::playback_state(conn, &platform, &video_id)?,
             db::video_counts(conn)?,
             db::last_rowid(conn)?,
         ))
@@ -678,7 +683,7 @@ async fn video_page(
     let source = display_name(&video.platform);
     let title = short_title(&video);
 
-    let (screen, playing) = screen_html(&video, download.as_ref());
+    let (screen, playing) = screen_html(&video, download.as_ref(), playback.as_ref());
     // TikTok captions run to several lines; the heading only has the first.
     let caption = match video.title.as_deref() {
         Some(full) if full.trim() != title => {
@@ -700,6 +705,7 @@ async fn video_page(
          <div class=\"links\">\n\
          <a class=\"button button-go\" href=\"{url}\">{icon}Open on {source}</a>\n\
          <a class=\"button\" href=\"{back}\">← {source} likes</a>\n\
+         {pick}\
          </div>\n\
          </div>\n\
          <div>\n\
@@ -715,7 +721,13 @@ async fn video_page(
         back = list_href(Some(&video.platform), 1),
         heading = escape(&title),
         url = escape(&video.url),
-        media = media_html(&video, download.as_ref(), &board),
+        // `player.js` shows it and names the file it would switch to.
+        pick = if screen.contains("data-copy=") {
+            "<button class=\"button\" id=\"player-pick\" type=\"button\" hidden></button>\n"
+        } else {
+            ""
+        },
+        media = media_html(&video, download.as_ref(), playback.as_ref(), &board),
         json = escape(&pretty),
     );
 
@@ -760,7 +772,7 @@ fn facts_html(video: &db::StoredVideo) -> String {
                 .posted_at
                 .map_or_else(|| "not known yet".into(), |at| time(at, "datetime")),
         ),
-        ("Added", time(video.liked_at, "datetime")),
+        ("Added", time(video.added_at, "datetime")),
         (
             &on_source,
             if video.available {
@@ -778,17 +790,38 @@ fn facts_html(video: &db::StoredVideo) -> String {
 
 /// The top of a video's page: its player once the media is saved, and
 /// whether that's what it is; until then, the platform's picture.
-fn screen_html(video: &db::StoredVideo, download: Option<&db::DownloadState>) -> (String, bool) {
-    let playable = download
-        .filter(|d| d.downloaded_at.is_some())
-        .and_then(|d| player::playable(&d.files));
-    match playable {
-        Some(playable) => (
-            player::player_html(&format!("{}/media", video_href(video)), &playable),
-            true,
-        ),
-        None => (thumbnail(video, "hqdefault", &escape(&video.url)), false),
+fn screen_html(
+    video: &db::StoredVideo,
+    download: Option<&db::DownloadState>,
+    playback: Option<&db::PlaybackState>,
+) -> (String, bool) {
+    let Some(download) = download.filter(|d| d.downloaded_at.is_some()) else {
+        return (thumbnail(video, "hqdefault", &escape(&video.url)), false);
+    };
+    let Some(mut playable) = player::playable(&download.files) else {
+        return (thumbnail(video, "hqdefault", &escape(&video.url)), false);
+    };
+    if let player::Playable::Video { copy, .. } = &mut playable {
+        *copy = playback_copy(download, playback);
     }
+    (player::player_html(&video_href(video), &playable), true)
+}
+
+/// The video's playback copy, if one was made from the files it has now.
+fn playback_copy<'a>(
+    download: &db::DownloadState,
+    playback: Option<&'a db::PlaybackState>,
+) -> Option<player::PlaybackCopy<'a>> {
+    let playback = playback?;
+    if playback.finished_at.is_none()
+        || download.folder.as_deref() != Some(playback.download_folder.as_str())
+    {
+        return None;
+    }
+    Some(player::PlaybackCopy {
+        file: playback.file_name.as_deref()?,
+        source: playback.original_config_json.as_deref(),
+    })
 }
 
 /// The video page's download button. Queues the video in the pipeline and
@@ -827,6 +860,45 @@ async fn request_download(
     Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
 }
 
+/// Asked by the player when this browser can't play a video's original and
+/// there's no playback copy yet: make it before the rest of the backlog.
+async fn request_playback(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path((platform, video_id)): Path<(String, String)>,
+) -> Result<StatusCode, Failure> {
+    if !from_this_ui(&headers) {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "refusing a playback request from another site".into(),
+        ));
+    }
+    let (download, playback) = app.db(|conn| {
+        Ok((
+            db::download_state(conn, &platform, &video_id)?,
+            db::playback_state(conn, &platform, &video_id)?,
+        ))
+    })?;
+    // A copy on record whose file has gone (tidied away by hand, say) is
+    // made again.
+    if let Some(download) = &download
+        && let Some(copy) = playback_copy(download, playback.as_ref())
+        && let Some(dir) = &download.folder
+        && !app.media_root.join(dir).join(copy.file).is_file()
+    {
+        app.db(|conn| db::forget_playback(conn, &platform, &video_id))?;
+    }
+    // Nothing to make now: already made, or waiting out a failed try.
+    if app
+        .db(|conn| db::playback_item(conn, &platform, &video_id))?
+        .is_none()
+    {
+        return Ok(StatusCode::CONFLICT);
+    }
+    app.pipeline.convert_soon(&platform, &video_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Any page on the web can make the browser POST to localhost. Browsers say
 /// which site a POST comes from in `Origin`, so refuse it unless it's this UI.
 fn from_this_ui(headers: &HeaderMap) -> bool {
@@ -842,26 +914,29 @@ fn from_this_ui(headers: &HeaderMap) -> bool {
 }
 
 /// A downloaded video's file, for its player. Served with range requests,
-/// which the browser needs to seek. Only the files the download recorded are
-/// served, so no path can reach anything else on disk.
+/// which the browser needs to seek. Only the files the download recorded and
+/// its playback copy are served, so no path can reach anything else on disk.
 async fn media_file(
     State(app): State<App>,
     Path((platform, video_id, file)): Path<(String, String, String)>,
     request: Request,
 ) -> Result<Response, Failure> {
-    let download = app.db(|conn| db::download_state(conn, &platform, &video_id))?;
-    let Some(db::DownloadState {
-        downloaded_at: Some(_),
-        dir: Some(dir),
-        files,
-        ..
-    }) = download
+    let (download, playback) = app.db(|conn| {
+        Ok((
+            db::download_state(conn, &platform, &video_id)?,
+            db::playback_state(conn, &platform, &video_id)?,
+        ))
+    })?;
+    let Some(download) = download.filter(|d| d.downloaded_at.is_some()) else {
+        return Err(not_found());
+    };
+    let copy = playback_copy(&download, playback.as_ref()).map(|copy| copy.file);
+    let Some(dir) = download
+        .folder
+        .filter(|_| download.files.contains(&file) || copy == Some(&file))
     else {
         return Err(not_found());
     };
-    if !files.contains(&file) {
-        return Err(not_found());
-    }
     let path = app.media_root.join(dir).join(file);
     let response = ServeFile::new(&path)
         .try_call(request)
@@ -883,6 +958,11 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
          between videos, TikTok 15 to 30, Instagram 30 to 60. A video's Download now \
          button downloads it right away, alongside the lanes."
     };
+    let about = format!(
+        "{about} Videos that won't play in every browser (most of them: YouTube's AV1, \
+         TikTok's HEVC, Instagram's VP9) then get a playback copy in H.264 next to the \
+         original, made one at a time in the background."
+    );
     let main = format!(
         "<p class=\"intro\">{about}</p>\n\
          <div id=\"downloads\">\n{}</div>\n",
@@ -1238,6 +1318,14 @@ function tick() {
 tick();
 setInterval(tick, 1000);
 
+// Whether the video on the page has been started and plays: reloading
+// would lose the viewer's place.
+function watching() {
+  const video = document.querySelector(".player video");
+  const failed = document.querySelector(".player-error:not([hidden])");
+  return Boolean(video && video.currentTime > 0 && !video.ended && !failed);
+}
+
 function setCount(name, count) {
   for (const el of document.querySelectorAll('[data-count="' + name + '"]')) el.textContent = count;
 }
@@ -1313,8 +1401,13 @@ function connect() {
       const progress = update.videos[media.dataset.key];
       if (progress) {
         media.innerHTML = progress;
-        media.dataset.busy = "1";
+        media.dataset.busy = update.converting === media.dataset.key ? "convert" : "1";
         showTimes(media);
+      } else if (media.dataset.busy === "convert" && watching()) {
+        // A playback copy finished while the original plays: the next
+        // visit uses it, and this one carries on.
+        delete media.dataset.busy;
+        media.textContent = "Playback copy made. It's used the next time this page loads.";
       } else if (media.dataset.busy) {
         location.reload();
       }
@@ -1382,7 +1475,7 @@ fn video_row(video: &db::StoredVideo) -> String {
             .posted_at
             .map(|at| time(at, "date"))
             .unwrap_or_default(),
-        added = time(video.liked_at, "date"),
+        added = time(video.added_at, "date"),
         source = display_name(&video.platform),
     )
 }
@@ -1542,9 +1635,18 @@ fn can_download(video: &db::StoredVideo, download: Option<&db::DownloadState>) -
 fn media_html(
     video: &db::StoredVideo,
     download: Option<&db::DownloadState>,
+    playback: Option<&db::PlaybackState>,
     board: &Board,
 ) -> String {
     let (inner, busy) = match job_html(board, &video.platform, &video.video_id) {
+        // A finished copy reloads the page only if it isn't playing.
+        Some(html)
+            if board
+                .find_active(&video.platform, &video.video_id)
+                .is_none() =>
+        {
+            (html, " data-busy=\"convert\"")
+        }
         Some(html) => (html, " data-busy=\"1\""),
         None if can_download(video, download) => (
             format!(
@@ -1555,7 +1657,14 @@ fn media_html(
             ),
             "",
         ),
-        None => (download_html(download), ""),
+        None => (
+            format!(
+                "{}{}",
+                download_html(download),
+                playback_html(video, download, playback)
+            ),
+            "",
+        ),
     };
     format!(
         "<div class=\"media\" id=\"media\" data-key=\"{}/{}\"{busy}>{inner}</div>",
@@ -1566,7 +1675,104 @@ fn media_html(
 
 /// What the pipeline is doing with a video, if it's on it.
 fn job_html(board: &Board, platform: &str, video_id: &str) -> Option<String> {
-    board.find_active(platform, video_id).map(activity_html)
+    board
+        .find_active(platform, video_id)
+        .map(activity_html)
+        .or_else(|| {
+            board
+                .find_converting(platform, video_id)
+                .map(converting_html)
+        })
+}
+
+/// What the converter is doing with a video, e.g. "making a playback copy:
+/// 45% of 3:21, 2.1× real time, 1:02 left, started 3:04:05 PM".
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "whole seconds of a video's length, for display"
+)]
+fn converting_html(converting: &Converting) -> String {
+    let started = time(converting.started_at, "time");
+    let busy = "<span class=\"progress progress-busy\"><span></span></span>";
+    let Some(progress) = &converting.progress else {
+        return format!("making a playback copy, started {started}{busy}");
+    };
+    let speed = progress
+        .speed
+        .map(|speed| format!(", {speed:.1}× real time"))
+        .unwrap_or_default();
+    let Some(total) = progress.total.filter(|&t| t > 0.0) else {
+        return format!(
+            "making a playback copy: {} done{speed}, started {started}{busy}",
+            duration(progress.done.round() as i64)
+        );
+    };
+    let percent = (progress.done / total * 100.0).min(100.0);
+    let eta = progress
+        .speed
+        .map(|speed| {
+            format!(
+                ", {} left",
+                duration(((total - progress.done).max(0.0) / speed).round() as i64)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "making a playback copy: {percent:.0}% of {}{speed}{eta}, started {started}\
+         <span class=\"progress\"><span style=\"width: {percent:.1}%\"></span></span>",
+        duration(total.round() as i64)
+    )
+}
+
+/// The Media field's line about a downloaded video's playback copy.
+fn playback_html(
+    video: &db::StoredVideo,
+    download: Option<&db::DownloadState>,
+    playback: Option<&db::PlaybackState>,
+) -> String {
+    let downloaded = download.is_some_and(|d| d.downloaded_at.is_some());
+    if !downloaded || video.kind != "video" {
+        return String::new();
+    }
+    let line = match playback {
+        None => "playback copy: waiting its turn".into(),
+        Some(db::PlaybackState {
+            finished_at: Some(at),
+            file_name: Some(_),
+            size_bytes,
+            method,
+            ..
+        }) => {
+            #[expect(clippy::cast_precision_loss, reason = "a size for display")]
+            let megabytes = size_bytes.unwrap_or(0) as f64 / 1e6;
+            let how = if method.as_deref() == Some("remux") {
+                "the picture as it is, the sound in AAC"
+            } else {
+                "re-encoded to H.264"
+            };
+            format!(
+                "playback copy made {} ({how}), {megabytes:.1} MB",
+                time(*at, "datetime")
+            )
+        }
+        Some(db::PlaybackState {
+            finished_at: Some(_),
+            ..
+        }) => "plays in every browser as downloaded".into(),
+        Some(state) => {
+            let tries = if state.failures == 1 { "try" } else { "tries" };
+            let last_error = state
+                .last_error
+                .as_deref()
+                .map(|error| format!(", last error: {}", escape(error)))
+                .unwrap_or_default();
+            format!(
+                "playback copy not made; {} failed {tries}{last_error}",
+                state.failures
+            )
+        }
+    };
+    format!("<br>{line}")
 }
 
 /// What a lane is doing with a video, e.g. "downloading 45% of 12.3 MB,
@@ -1666,21 +1872,7 @@ fn board_html(board: &Board) -> String {
             .recent
             .iter()
             .map(|finished| {
-                let (class, outcome) = match &finished.outcome {
-                    Outcome::Downloaded { bytes, seconds, .. } => {
-                        #[expect(clippy::cast_precision_loss, reason = "a size for display")]
-                        let megabytes = *bytes as f64 / 1e6;
-                        let seconds = i64::try_from(*seconds).unwrap_or(i64::MAX);
-                        (
-                            "downloaded",
-                            format!("downloaded {megabytes:.1} MB in {}", duration(seconds)),
-                        )
-                    }
-                    Outcome::Failed(error) => (
-                        "failed",
-                        format!("failed: {}", escape(&error.replace(['\r', '\n'], " "))),
-                    ),
-                };
+                let (class, outcome) = outcome_html(&finished.outcome);
                 format!(
                     "<li><span class=\"when\">{}</span>{} — <span class=\"outcome-{class}\">{outcome}</span></li>\n",
                     time(finished.at, "time"),
@@ -1694,8 +1886,69 @@ fn board_html(board: &Board) -> String {
     format!(
         "<h2>Lanes</h2>\n{lanes}\
          <h2>Requested</h2>\n{requested}\
-         <h2>Finished</h2>\n{finished}"
+         <h2>Playback copies</h2>\n{converter}\
+         <h2>Finished</h2>\n{finished}",
+        converter = converter_html(&board.converter, &job_link)
     )
+}
+
+/// How a finished video came out, as its CSS class and description.
+#[expect(clippy::cast_precision_loss, reason = "sizes for display")]
+fn outcome_html(outcome: &Outcome) -> (&'static str, String) {
+    let one_line = |error: &str| escape(&error.replace(['\r', '\n'], " "));
+    match outcome {
+        Outcome::Downloaded { bytes, seconds, .. } => {
+            let megabytes = *bytes as f64 / 1e6;
+            let seconds = i64::try_from(*seconds).unwrap_or(i64::MAX);
+            (
+                "downloaded",
+                format!("downloaded {megabytes:.1} MB in {}", duration(seconds)),
+            )
+        }
+        Outcome::Failed(error) => ("failed", format!("failed: {}", one_line(error))),
+        Outcome::Converted {
+            bytes,
+            seconds,
+            method,
+        } => {
+            let megabytes = *bytes as f64 / 1e6;
+            let seconds = i64::try_from(*seconds).unwrap_or(i64::MAX);
+            let how = if *method == "remux" {
+                "sound converted"
+            } else {
+                "re-encoded"
+            };
+            (
+                "downloaded",
+                format!(
+                    "playback copy made ({how}), {megabytes:.1} MB in {}",
+                    duration(seconds)
+                ),
+            )
+        }
+        Outcome::ConvertFailed(error) => (
+            "failed",
+            format!("playback copy failed: {}", one_line(error)),
+        ),
+    }
+}
+
+/// The downloads page's Playback copies: what the converter is on.
+fn converter_html(converter: &Converter, job_link: &dyn Fn(&Job) -> String) -> String {
+    let left = match converter.left {
+        Some(left) if left > 0 => format!(" ({} to go)", thousands(left)),
+        _ => String::new(),
+    };
+    match (&converter.current, converter.left) {
+        (Some(current), _) => format!(
+            "<ul class=\"jobs\">\n<li>{} — {}{left}</li>\n</ul>\n",
+            job_link(&current.job),
+            converting_html(current)
+        ),
+        (None, None) => "<p>Starting.</p>\n".into(),
+        (None, Some(0)) => "<p>Every downloaded video plays in every browser.</p>\n".into(),
+        (None, Some(_)) => format!("<p>Waiting{left}.</p>\n"),
+    }
 }
 
 /// What a lane that isn't downloading is doing.
@@ -1742,10 +1995,12 @@ fn thousands(n: usize) -> String {
 /// page's `board_html`, the Media field of each video in the pipeline, and
 /// the saved picture of each video downloaded since the app started.
 fn downloads_json(board: &Board) -> String {
+    let converting = board.converter.current.as_ref().map(|c| &c.job);
     let videos: serde_json::Map<String, serde_json::Value> = board
         .active
         .iter()
         .map(|active| &active.job)
+        .chain(converting)
         .filter_map(|job| {
             let (platform, id) = (&job.item.platform, &job.item.video_id);
             Some((
@@ -1778,6 +2033,7 @@ fn downloads_json(board: &Board) -> String {
         "count": busy_count(board),
         "board": board_html(board),
         "videos": videos,
+        "converting": converting.map(|job| format!("{}/{}", job.item.platform, job.item.video_id)),
         "pictures": pictures,
     })
     .to_string()
@@ -1789,14 +2045,14 @@ fn download_html(download: Option<&db::DownloadState>) -> String {
     };
     if let Some(at) = download.downloaded_at {
         #[expect(clippy::cast_precision_loss, reason = "a size for display")]
-        let megabytes = download.bytes.unwrap_or(0) as f64 / 1e6;
+        let megabytes = download.size_bytes.unwrap_or(0) as f64 / 1e6;
         return format!(
             "downloaded {}, {megabytes:.1} MB, in <code>{}</code>",
             time(at, "datetime"),
-            escape(download.dir.as_deref().unwrap_or(""))
+            escape(download.folder.as_deref().unwrap_or(""))
         );
     }
-    let tries = if download.attempts == 1 {
+    let tries = if download.failures == 1 {
         "try"
     } else {
         "tries"
@@ -1808,7 +2064,7 @@ fn download_html(download: Option<&db::DownloadState>) -> String {
         .unwrap_or_default();
     format!(
         "not downloaded; {} failed {tries}{last_error}",
-        download.attempts
+        download.failures
     )
 }
 
@@ -1868,7 +2124,7 @@ mod tests {
             available: true,
             kind: "video".into(),
             posted_at: None,
-            liked_at: 1_700_000_000,
+            added_at: 1_700_000_000,
             thumbnail: None,
         }
     }
@@ -2080,7 +2336,7 @@ mod tests {
                 kind: video.kind.clone(),
                 title: video.title.clone(),
                 author_name: video.author_name.clone(),
-                liked_on: "2026-10-12".into(),
+                added_on: "2026-10-12".into(),
             },
             title: "<b>".into(),
         }
@@ -2091,33 +2347,172 @@ mod tests {
         let board = Board::default();
         let fresh = video("youtube", None);
         assert!(
-            media_html(&fresh, None, &board).contains("action=\"/videos/youtube/abc/download\"")
+            media_html(&fresh, None, None, &board)
+                .contains("action=\"/videos/youtube/abc/download\"")
         );
 
         let failed = db::DownloadState {
-            attempts: 2,
+            failures: 2,
             last_error: Some("429".into()),
             downloaded_at: None,
-            dir: None,
+            folder: None,
             files: Vec::new(),
-            bytes: None,
+            size_bytes: None,
         };
-        let html = media_html(&fresh, Some(&failed), &board);
+        let html = media_html(&fresh, Some(&failed), None, &board);
         assert!(html.contains("2 failed tries, last error: 429"));
         assert!(html.contains("<button"));
 
         let saved = db::DownloadState {
             downloaded_at: Some(1),
-            dir: Some("youtube/abc".into()),
-            bytes: Some(1),
+            folder: Some("youtube/abc".into()),
+            size_bytes: Some(1),
             ..failed
         };
-        assert!(!media_html(&fresh, Some(&saved), &board).contains("<button"));
+        assert!(!media_html(&fresh, Some(&saved), None, &board).contains("<button"));
         let gone = db::StoredVideo {
             available: false,
             ..fresh
         };
-        assert!(!media_html(&gone, None, &board).contains("<button"));
+        assert!(!media_html(&gone, None, None, &board).contains("<button"));
+    }
+
+    fn downloaded() -> db::DownloadState {
+        db::DownloadState {
+            failures: 0,
+            last_error: None,
+            downloaded_at: Some(1),
+            folder: Some("youtube/abc".into()),
+            files: vec!["video.webm".into()],
+            size_bytes: Some(1),
+        }
+    }
+
+    fn playback(file: Option<&str>, method: &str) -> db::PlaybackState {
+        db::PlaybackState {
+            download_folder: "youtube/abc".into(),
+            failures: 0,
+            last_error: None,
+            finished_at: Some(1),
+            file_name: file.map(Into::into),
+            size_bytes: Some(2_500_000),
+            method: Some(method.into()),
+            original_config_json: Some("{}".into()),
+        }
+    }
+
+    #[test]
+    fn media_says_where_the_playback_copy_stands() {
+        let board = Board::default();
+        let fresh = video("youtube", None);
+        let saved = downloaded();
+        let line =
+            |state: Option<&db::PlaybackState>| media_html(&fresh, Some(&saved), state, &board);
+        assert!(line(None).contains("<br>playback copy: waiting its turn"));
+        assert!(
+            line(Some(&playback(Some("playback.mp4"), "encode")))
+                .contains("(re-encoded to H.264), 2.5 MB")
+        );
+        assert!(
+            line(Some(&playback(Some("playback.mp4"), "remux")))
+                .contains("the picture as it is, the sound in AAC")
+        );
+        assert!(
+            line(Some(&playback(None, "none"))).contains("plays in every browser as downloaded")
+        );
+        let failed = db::PlaybackState {
+            finished_at: None,
+            failures: 1,
+            last_error: Some("ffmpeg <failed>".into()),
+            ..playback(None, "encode")
+        };
+        assert!(
+            line(Some(&failed)).contains(
+                "playback copy not made; 1 failed try, last error: ffmpeg &lt;failed&gt;"
+            )
+        );
+        // Photo posts have nothing to convert.
+        let photo = db::StoredVideo {
+            kind: "photo".into(),
+            ..video("tiktok", None)
+        };
+        assert!(!media_html(&photo, Some(&saved), None, &board).contains("playback"));
+    }
+
+    #[test]
+    fn the_copy_belongs_to_the_files_it_was_made_from() {
+        let saved = downloaded();
+        let made = playback(Some("playback.mp4"), "encode");
+        let copy = playback_copy(&saved, Some(&made)).unwrap();
+        assert_eq!(copy.file, "playback.mp4");
+        assert_eq!(copy.source, Some("{}"));
+        let elsewhere = db::DownloadState {
+            folder: Some("youtube/other".into()),
+            ..downloaded()
+        };
+        assert!(playback_copy(&elsewhere, Some(&made)).is_none());
+        assert!(playback_copy(&saved, Some(&playback(None, "none"))).is_none());
+        let unfinished = db::PlaybackState {
+            finished_at: None,
+            ..made.clone()
+        };
+        assert!(playback_copy(&saved, Some(&unfinished)).is_none());
+
+        let fresh = video("youtube", None);
+        let (screen, playing) = screen_html(&fresh, Some(&saved), Some(&made));
+        assert!(playing);
+        assert!(screen.contains("data-copy=\"/videos/youtube/abc/media/playback.mp4\""));
+        let (screen, _) = screen_html(&fresh, Some(&saved), None);
+        assert!(screen.contains("data-convert=\"/videos/youtube/abc/playback\""));
+    }
+
+    #[test]
+    fn media_and_the_board_show_the_converter() {
+        let youtube = video("youtube", None);
+        let mut board = Board::default();
+        assert!(board_html(&board).contains("<h2>Playback copies</h2>\n<p>Starting.</p>"));
+        board.converter.left = Some(0);
+        assert!(board_html(&board).contains("Every downloaded video plays in every browser."));
+
+        board.converter = Converter {
+            left: Some(1500),
+            current: Some(Converting {
+                job: job(&youtube),
+                started_at: 0,
+                progress: Some(crate::transcode::Progress {
+                    done: 30.0,
+                    total: Some(120.0),
+                    speed: Some(2.0),
+                }),
+            }),
+        };
+        let html = media_html(&youtube, Some(&downloaded()), None, &board);
+        assert!(html.contains("data-busy=\"convert\""));
+        assert!(html.contains("making a playback copy: 25% of 2:00, 2.0× real time, 0:45 left"));
+        let page = board_html(&board);
+        assert!(page.contains("<h2>Playback copies</h2>\n<ul class=\"jobs\">\n<li>YouTube: <a"));
+        assert!(page.contains("(1,500 to go)</li>"));
+
+        let update: serde_json::Value = serde_json::from_str(&downloads_json(&board)).unwrap();
+        assert_eq!(update["converting"], "youtube/abc");
+        assert!(
+            update["videos"]["youtube/abc"]
+                .as_str()
+                .unwrap()
+                .starts_with("making a playback copy")
+        );
+        assert_eq!(update["count"], 0);
+
+        board.recent.push_front(crate::pipeline::Finished {
+            job: job(&youtube),
+            at: 0,
+            outcome: Outcome::Converted {
+                bytes: 3_000_000,
+                seconds: 75,
+                method: "encode",
+            },
+        });
+        assert!(board_html(&board).contains("playback copy made (re-encoded), 3.0 MB in 1:15"));
     }
 
     fn lane(platform: &'static str, left: Option<usize>, waiting: Option<(Wait, i64)>) -> Lane {
@@ -2139,7 +2534,7 @@ mod tests {
             ],
             ..Board::default()
         };
-        let html = media_html(&tiktok, None, &board);
+        let html = media_html(&tiktok, None, None, &board);
         assert!(html.contains("Download now</button>"));
         assert!(!html.contains("data-busy"));
 
@@ -2158,7 +2553,7 @@ mod tests {
         };
         board.active.push(downloading(job(&youtube), false));
         board.active.push(downloading(job(&tiktok), true));
-        let html = media_html(&youtube, None, &board);
+        let html = media_html(&youtube, None, None, &board);
         assert!(
             html.contains("downloading 25% of 10.0 MB, 1.0 MB/s, 0:08 left (format 399), started")
         );

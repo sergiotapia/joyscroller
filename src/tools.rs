@@ -112,14 +112,38 @@ pub fn ffmpeg() -> Result<Command> {
     Ok(Command::new(program("ffmpeg")?))
 }
 
+/// An ffmpeg command at low CPU priority, for long work in the background
+/// (making playback copies) that mustn't make the computer sluggish. `nice`
+/// comes with every Linux and macOS; without it, ffmpeg runs as usual.
+pub fn ffmpeg_in_background() -> Result<Command> {
+    let ffmpeg = program("ffmpeg")?;
+    Ok(match on_path(&["nice"]) {
+        Some(nice) => {
+            let mut cmd = Command::new(nice);
+            cmd.arg("-n").arg("10").arg(ffmpeg);
+            cmd
+        }
+        None => Command::new(ffmpeg),
+    })
+}
+
 pub fn ffprobe() -> Result<Command> {
     Ok(Command::new(program("ffprobe")?))
 }
 
 /// Whether everything downloads need is here, our own copy or on `PATH`.
 pub fn ready() -> Result<bool> {
+    have_all(&["yt-dlp", "ffmpeg", "ffprobe", "bun"])
+}
+
+/// Whether ffmpeg and ffprobe are here, all that playback copies need.
+pub fn ffmpeg_ready() -> Result<bool> {
+    have_all(&["ffmpeg", "ffprobe"])
+}
+
+fn have_all(names: &[&str]) -> Result<bool> {
     let dir = dir()?;
-    Ok(["yt-dlp", "ffmpeg", "ffprobe", "bun"]
+    Ok(names
         .iter()
         .all(|name| dir.join(name).is_file() || on_path(&[name]).is_some()))
 }

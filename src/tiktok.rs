@@ -70,7 +70,7 @@ const POST_ITEM: &str = "JSON.parse(document.getElementById('__UNIVERSAL_DATA_FO
 
 /// A photo post (slideshow) with its media, fetched through TikTok's site.
 pub struct PhotoPost {
-    /// The item, minus its media links, as `raw_json` stores it.
+    /// The item, minus its media links, as `listing_json` stores it.
     pub item: Value,
     /// The images in order, at the size they were posted.
     pub images: Vec<Fetched>,

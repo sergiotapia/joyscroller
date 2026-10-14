@@ -1,6 +1,7 @@
 // The player's own behavior (src/player.rs builds its markup; Video.js runs
-// the controls): the photo slideshow, starting a photo post's sound when the
-// browser held it back, and saying so when a file can't play here.
+// the controls): picking between a video's original and its playback copy,
+// the photo slideshow, starting a photo post's sound when the browser held
+// it back, and saying so when a file can't play here.
 
 for (const show of document.querySelectorAll(".slideshow")) slideshow(show);
 
@@ -101,14 +102,76 @@ for (const audio of document.querySelectorAll("audio[autoplay]")) {
   audio.addEventListener("playing", stop, { once: true });
 }
 
+// A video with a playback copy (H.264, plays everywhere) next to its
+// original (often AV1, HEVC or VP9) plays the original only if the browser
+// says it decodes it smoothly and power-efficiently, which in practice means
+// in hardware. "Can play" isn't enough: a Tesla or an older phone can decode
+// AV1 in software and stutters through it, draining the battery.
+for (const video of document.querySelectorAll(".player video[data-copy]")) pick(video);
+
+async function pick(video) {
+  let original = false;
+  let decodes = true;
+  try {
+    const config = JSON.parse(video.dataset.source);
+    const info = await navigator.mediaCapabilities.decodingInfo({ type: "file", video: config });
+    original = info.supported && info.smooth && info.powerEfficient;
+    decodes = info.supported;
+  } catch {
+    // No MediaCapabilities, or no description of the original: the copy.
+  }
+  use(video, original ? video.dataset.original : video.dataset.copy);
+  // A switch to an original this browser can't decode would only fall back.
+  const button = document.getElementById("player-pick");
+  if (!button || !decodes) return;
+  const label = () => {
+    const playing = video.getAttribute("src") === video.dataset.original;
+    button.textContent = playing ? "Play the playback copy" : "Play the original";
+  };
+  label();
+  button.hidden = false;
+  button.addEventListener("click", () => {
+    const playing = video.getAttribute("src") === video.dataset.original;
+    use(video, playing ? video.dataset.copy : video.dataset.original);
+    label();
+  });
+  video.addEventListener("emptied", label);
+}
+
+// Switch `video` to the file at `src`, carrying on from the same moment.
+function use(video, src) {
+  if (video.getAttribute("src") === src) return;
+  const at = video.currentTime;
+  const playing = !video.paused;
+  video.closest(".player").querySelector(".player-error").hidden = true;
+  video.src = src;
+  if (at > 0) video.addEventListener("loadedmetadata", () => (video.currentTime = at), { once: true });
+  if (playing) video.play().catch(() => {});
+}
+
 // A file the browser can't decode fails with an error, except a video whose
 // sound it can play: then it plays the sound over a blank screen, which is
-// what Chromium does with TikTok's HEVC when the GPU can't decode it.
+// what Chromium does with TikTok's HEVC when the GPU can't decode it. A
+// video with a playback copy switches to it. When nothing plays (no copy
+// yet, or its file has gone), the page asks for one and reloads into it
+// once it's made.
 for (const media of document.querySelectorAll(".player video, .player audio")) {
   const note = media.closest(".player").querySelector(".player-error");
-  const show = () => (note.hidden = false);
+  const failed = () => {
+    const copy = media.dataset.copy;
+    if (copy && media.getAttribute("src") !== copy) return use(media, copy);
+    if (!note.hidden) return;
+    note.hidden = false;
+    if (media.dataset.convert) {
+      fetch(media.dataset.convert, { method: "POST" })
+        .then((response) => {
+          if (response.ok) note.querySelector(".player-converting").hidden = false;
+        })
+        .catch(() => {});
+    }
+  };
   const noPicture = () => media.localName === "video" && media.readyState >= 1 && media.videoWidth === 0;
-  if (media.error || noPicture()) show();
-  media.addEventListener("error", show);
-  media.addEventListener("loadedmetadata", () => noPicture() && show());
+  if (media.error || noPicture()) failed();
+  media.addEventListener("error", failed);
+  media.addEventListener("loadedmetadata", () => noPicture() && failed());
 }

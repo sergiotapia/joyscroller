@@ -2,7 +2,10 @@
 //! elements around the saved files. A video gets a screen with a strip of
 //! controls under it; a TikTok photo post gets a slideshow of its pictures
 //! over the same strip, playing the post's sound, which starts by itself and
-//! loops as it does on TikTok. Video.js is built into `assets/videojs.js`
+//! loops as it does on TikTok. A video with a playback copy (`transcode.rs`)
+//! names both files, and `assets/player.js` picks the original only where the
+//! browser says it plays it smoothly and power-efficiently; elsewhere, and
+//! whenever the original fails, it plays the copy. Video.js is built into `assets/videojs.js`
 //! (see `assets/videojs/`), `assets/player.css` dresses it in the clock
 //! radio's plastic, and `assets/player.js` runs the slideshow.
 
@@ -16,11 +19,24 @@ pub enum Playable<'a> {
     Video {
         video: &'a str,
         poster: Option<&'a str>,
+        /// Its playback copy, once made. `playable` leaves it out: it isn't
+        /// one of the download's files.
+        copy: Option<PlaybackCopy<'a>>,
     },
     Photos {
         images: Vec<&'a str>,
         sound: Option<&'a str>,
     },
+}
+
+/// A video's playback copy, for browsers that can't play the original.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PlaybackCopy<'a> {
+    /// Its file name in the video's folder.
+    pub file: &'a str,
+    /// The original's `MediaCapabilities` video configuration, JSON, which the
+    /// page asks the browser about.
+    pub source: Option<&'a str>,
 }
 
 /// Sort a download's files (see `download.rs` for their names) into
@@ -36,6 +52,7 @@ pub fn playable(files: &[String]) -> Option<Playable<'_>> {
         return Some(Playable::Video {
             video,
             poster: named("thumbnail."),
+            copy: None,
         });
     }
     // The download names them image-01, image-02, …, and the list is sorted.
@@ -53,11 +70,16 @@ pub fn playable(files: &[String]) -> Option<Playable<'_>> {
     })
 }
 
-/// The player for `playable`, whose files are served under `base`.
-pub fn player_html(base: &str, playable: &Playable) -> String {
-    let src = |file: &str| format!("{base}/{}", escape(file));
+/// The player for `playable`, the media of the video page at `video_href`.
+/// Its files are served under `<video_href>/media`.
+pub fn player_html(video_href: &str, playable: &Playable) -> String {
+    let src = |file: &str| format!("{video_href}/media/{}", escape(file));
     match playable {
-        Playable::Video { video, poster } => {
+        Playable::Video {
+            video,
+            poster,
+            copy,
+        } => {
             let poster = poster
                 .map(|file| {
                     format!(
@@ -70,7 +92,7 @@ pub fn player_html(base: &str, playable: &Playable) -> String {
                 "<video-player>\n\
                  <media-container class=\"player\">\n\
                  <div class=\"player-screen\">\n\
-                 <video src=\"{video}\" preload=\"metadata\" playsinline></video>\n\
+                 <video {files} preload=\"metadata\" playsinline></video>\n\
                  {poster}\
                  <media-buffering-indicator class=\"player-busy\"><media-icon name=\"spinner\"></media-icon></media-buffering-indicator>\n\
                  <media-play-button class=\"player-start\"><media-icon name=\"play\"></media-icon></media-play-button>\n\
@@ -91,7 +113,7 @@ pub fn player_html(base: &str, playable: &Playable) -> String {
                  </media-controls-content>\n</media-controls>\n\
                  </media-container>\n\
                  </video-player>\n",
-                video = src(video),
+                files = video_files(video_href, video, copy.as_ref()),
                 error = cant_play(&src(video)),
                 hotkeys = HOTKEYS,
                 controls = CONTROLS,
@@ -152,11 +174,32 @@ pub fn player_html(base: &str, playable: &Playable) -> String {
     }
 }
 
+/// The `<video>` element's attributes naming its files.
+fn video_files(video_href: &str, video: &str, copy: Option<&PlaybackCopy>) -> String {
+    let src = |file: &str| format!("{video_href}/media/{}", escape(file));
+    // Where `player.js` asks for a copy when nothing here plays: there's
+    // none yet, or its file has gone.
+    let convert = format!("data-convert=\"{video_href}/playback\"");
+    match copy {
+        // `player.js` sets the source once it has picked one.
+        Some(copy) => format!(
+            "data-original=\"{}\" data-copy=\"{}\" data-source=\"{}\" {convert}",
+            src(video),
+            src(copy.file),
+            escape(copy.source.unwrap_or(""))
+        ),
+        None => format!("src=\"{}\" {convert}", src(video)),
+    }
+}
+
 /// Shown by `player.js` if the browser can't play the file. TikTok's videos
-/// are HEVC, which Chromium plays only where the GPU can decode it.
+/// are HEVC, which Chromium plays only where the GPU can decode it. When a
+/// playback copy has been asked for, it says so too.
 fn cant_play(href: &str) -> String {
     format!(
         "<p class=\"player-error\" hidden>This browser can't play this file. \
+         <span class=\"player-converting\" hidden>A copy that plays everywhere is being made, \
+         and this page switches to it when it's ready. </span>\
          <a href=\"{href}\">Open it</a> to play it in another app.</p>\n"
     )
 }
@@ -215,7 +258,8 @@ mod tests {
             playable(&video),
             Some(Playable::Video {
                 video: "video.webm",
-                poster: Some("thumbnail.webp")
+                poster: Some("thumbnail.webp"),
+                copy: None,
             })
         );
         let photos = names(&["image-01.jpg", "image-02.webp", "sound.mp3"]);
@@ -233,13 +277,17 @@ mod tests {
     #[test]
     fn a_video_gets_a_screen_and_controls() {
         let html = player_html(
-            "/videos/youtube/abc/media",
+            "/videos/youtube/abc",
             &Playable::Video {
                 video: "video.webm",
                 poster: Some("thumbnail.webp"),
+                copy: None,
             },
         );
-        assert!(html.contains("<video src=\"/videos/youtube/abc/media/video.webm\""));
+        assert!(html.contains(
+            "<video src=\"/videos/youtube/abc/media/video.webm\" \
+             data-convert=\"/videos/youtube/abc/playback\""
+        ));
         assert!(html.contains("<img src=\"/videos/youtube/abc/media/thumbnail.webp\""));
         assert!(html.contains("<media-fullscreen-button"));
         assert!(html.contains("<media-time-slider"));
@@ -247,9 +295,31 @@ mod tests {
     }
 
     #[test]
+    fn a_video_with_a_copy_names_both_files() {
+        let html = player_html(
+            "/videos/tiktok/1",
+            &Playable::Video {
+                video: "video.mp4",
+                poster: None,
+                copy: Some(PlaybackCopy {
+                    file: "playback.mp4",
+                    source: Some(r#"{"width":1080}"#),
+                }),
+            },
+        );
+        assert!(html.contains(
+            "<video data-original=\"/videos/tiktok/1/media/video.mp4\" \
+             data-copy=\"/videos/tiktok/1/media/playback.mp4\" \
+             data-source=\"{&quot;width&quot;:1080}\" \
+             data-convert=\"/videos/tiktok/1/playback\" preload"
+        ));
+        assert!(!html.contains(" src=\"/videos/tiktok/1/media/video.mp4\""));
+    }
+
+    #[test]
     fn photos_get_a_slideshow_and_their_sound() {
         let html = player_html(
-            "/videos/tiktok/1/media",
+            "/videos/tiktok/1",
             &Playable::Photos {
                 images: vec!["image-01.jpg", "image-02.jpg"],
                 sound: Some("sound.mp3"),
@@ -282,9 +352,10 @@ mod tests {
             &Playable::Video {
                 video: "video.\"><b>",
                 poster: None,
+                copy: None,
             },
         );
-        assert!(html.contains("/m/video.&quot;&gt;&lt;b&gt;"));
+        assert!(html.contains("/m/media/video.&quot;&gt;&lt;b&gt;"));
         assert!(!html.contains("<media-poster"));
     }
 }

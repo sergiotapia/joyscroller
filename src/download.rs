@@ -146,7 +146,7 @@ pub struct Saved {
 
 impl Saved {
     /// The file to show as the video's picture: its thumbnail, or a photo
-    /// post's first image. `db.rs` picks the same file in SQL for the list.
+    /// post's first image. `db/videos.rs` picks the same file in SQL for the list.
     pub fn picture(&self) -> Option<&str> {
         let named = |prefix| {
             self.files
@@ -247,13 +247,13 @@ pub async fn download(
         bail!("refusing unusual video id {:?}", item.video_id);
     }
     if !item
-        .liked_on
+        .added_on
         .chars()
         .all(|c| c.is_ascii_digit() || c == '-')
     {
-        bail!("refusing unusual date {:?}", item.liked_on);
+        bail!("refusing unusual date {:?}", item.added_on);
     }
-    let rel = format!("{}/{}/{}", item.platform, item.liked_on, folder_name(item));
+    let rel = format!("{}/{}/{}", item.platform, item.added_on, folder_name(item));
     let final_dir = root.join(&rel);
     let work = root
         .join(&item.platform)
@@ -856,7 +856,7 @@ mod tests {
             kind: "video".into(),
             title: title.map(Into::into),
             author_name: author_name.map(Into::into),
-            liked_on: "2026-10-12".into(),
+            added_on: "2026-10-12".into(),
         }
     }
 
@@ -884,7 +884,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_dates_that_could_escape_the_media_root() {
         let item = PendingDownload {
-            liked_on: "../..".into(),
+            added_on: "../..".into(),
             ..pending("youtube", None, None)
         };
         let root = tempfile::tempdir().unwrap();

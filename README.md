@@ -30,6 +30,8 @@ You need Linux and [Brave](https://brave.com), signed in to YouTube, TikTok and 
 
 Keep it running to stay up to date, and press Ctrl-C to stop it. Your library is saved right next to the app: `joyscroller.db` and a `downloads` folder. Move the folder and your library moves with it.
 
+Videos are saved as the platform serves them, at their best quality, and most come in formats only some browsers play. So Joyscroller also makes a `playback.mp4` beside each of those, in H.264 at the same resolution, which plays in any browser: on a phone, a tablet or a car. It works on one video at a time in the background, at low priority.
+
 The first time it starts, Joyscroller fetches the helpers it downloads videos with (yt-dlp, plus ffmpeg and bun if you don't already have them) into a `tools` folder beside it, and keeps them up to date. There's nothing else to install.
 
 ### Building from source

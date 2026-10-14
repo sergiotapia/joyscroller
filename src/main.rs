@@ -9,6 +9,7 @@ mod player;
 mod query;
 mod tiktok;
 mod tools;
+mod transcode;
 mod web;
 mod youtube;
 
@@ -498,7 +499,7 @@ async fn sync_youtube(
             author_name: v.channel.as_deref(),
             duration_seconds: v.duration_seconds,
             available: v.available(),
-            raw_json: raw,
+            listing_json: raw,
             kind: "video",
             // YouTube's liked list doesn't say; the download fills it in.
             posted_at: None,
@@ -543,7 +544,7 @@ async fn sync_tiktok(
             // TikTok leaves deleted and private videos out of the liked list
             // rather than listing them stripped down, as YouTube does.
             available: true,
-            raw_json: raw,
+            listing_json: raw,
             kind: if v.is_photo { "photo" } else { "video" },
             posted_at: v.posted_at,
         })
@@ -588,7 +589,7 @@ async fn sync_instagram(
             // Like TikTok, Instagram leaves deleted and private posts out of
             // the saved list.
             available: true,
-            raw_json: raw,
+            listing_json: raw,
             kind: "video",
             posted_at: v.posted_at,
         })
