@@ -25,7 +25,7 @@ allow = [
 crate = "matchit"
 allow = ["BSD-3-Clause"]
 
-# rustls (HTTPS for fetching yt-dlp, ffmpeg and deno) uses these two.
+# rustls (HTTPS for fetching yt-dlp, ffmpeg and bun) uses these two.
 [[licenses.exceptions]]
 crate = "subtle"
 allow = ["BSD-3-Clause"]

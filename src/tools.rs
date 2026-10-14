@@ -1,11 +1,11 @@
 //! The programs joyscroller runs: yt-dlp (lists YouTube likes and downloads
-//! videos), ffmpeg and ffprobe (mux and probe media), and deno, which yt-dlp
-//! needs to solve YouTube's JavaScript challenges. The app fetches its own
+//! videos), ffmpeg and ffprobe (mux and probe media), and bun, the JavaScript
+//! runtime yt-dlp needs to solve YouTube's signature and n-parameter challenges. The app fetches its own
 //! copies into `tools/` next to its data, so users don't install anything.
 //!
 //! yt-dlp is always our own copy, kept up to date with `yt-dlp -U`: sites
 //! change often and a stale yt-dlp is what usually breaks downloads, while
-//! distro packages lag weeks behind. ffmpeg and deno don't go stale that way,
+//! distro packages lag weeks behind. ffmpeg and bun don't go stale that way,
 //! so copies already on `PATH` are used as they are, which spares most users
 //! a ~150 MB download. Where no prebuilt copies exist (`ASSETS` has no entry
 //! for the platform), everything comes from `PATH`.
@@ -27,7 +27,9 @@ const YT_DLP_RELEASE: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/d
 /// yt-dlp's own ffmpeg builds, the ones its README recommends. Rebuilt daily
 /// under the same `latest` tag and file names.
 const FFMPEG_RELEASE: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest";
-const DENO_RELEASE: &str = "https://github.com/denoland/deno/releases/latest/download";
+/// Bun rather than deno: Cloudflare bought Deno in October 2026 and will stop
+/// developing the standalone runtime after a year of maintenance releases.
+const BUN_RELEASE: &str = "https://github.com/oven-sh/bun/releases/latest/download";
 
 /// The release files to fetch on one platform.
 struct Assets {
@@ -37,8 +39,8 @@ struct Assets {
     yt_dlp: &'static str,
     /// A `.tar.xz` with `bin/ffmpeg` and `bin/ffprobe` inside.
     ffmpeg: &'static str,
-    /// A `.zip` with the `deno` executable inside.
-    deno: &'static str,
+    /// A `.zip` with the `bun` executable in a folder named like the zip.
+    bun: &'static str,
 }
 
 const ASSETS: &[Assets] = &[
@@ -47,14 +49,16 @@ const ASSETS: &[Assets] = &[
         arch: "x86_64",
         yt_dlp: "yt-dlp_linux",
         ffmpeg: "ffmpeg-master-latest-linux64-gpl.tar.xz",
-        deno: "deno-x86_64-unknown-linux-gnu.zip",
+        // The default x86_64 build needs AVX2; baseline runs on any x86_64 CPU,
+        // and solving YouTube's challenges is too little work to tell them apart.
+        bun: "bun-linux-x64-baseline.zip",
     },
     Assets {
         os: "linux",
         arch: "aarch64",
         yt_dlp: "yt-dlp_linux_aarch64",
         ffmpeg: "ffmpeg-master-latest-linuxarm64-gpl.tar.xz",
-        deno: "deno-aarch64-unknown-linux-gnu.zip",
+        bun: "bun-linux-aarch64.zip",
     },
 ];
 
@@ -85,17 +89,21 @@ fn program(name: &str) -> Result<PathBuf> {
     Ok(if own.is_file() { own } else { name.into() })
 }
 
-/// A yt-dlp command, pointed at our own ffmpeg and deno when we have them.
+/// A yt-dlp command, pointed at our own ffmpeg and bun when we have them.
 pub fn yt_dlp() -> Result<Command> {
     let dir = dir()?;
     let mut cmd = Command::new(program("yt-dlp")?);
     if dir.join("ffmpeg").is_file() && dir.join("ffprobe").is_file() {
         cmd.arg("--ffmpeg-location").arg(&dir);
     }
-    let deno = dir.join("deno");
-    if deno.is_file() {
+    // yt-dlp only turns on deno by itself; bun has to be asked for, even
+    // from `PATH`.
+    let bun = dir.join("bun");
+    if bun.is_file() {
         cmd.arg("--js-runtimes")
-            .arg([OsStr::new("deno:"), deno.as_os_str()].join(OsStr::new("")));
+            .arg([OsStr::new("bun:"), bun.as_os_str()].join(OsStr::new("")));
+    } else if on_path(&["bun"]).is_some() {
+        cmd.arg("--js-runtimes").arg("bun");
     }
     Ok(cmd)
 }
@@ -111,7 +119,7 @@ pub fn ffprobe() -> Result<Command> {
 /// Whether everything downloads need is here, our own copy or on `PATH`.
 pub fn ready() -> Result<bool> {
     let dir = dir()?;
-    Ok(["yt-dlp", "ffmpeg", "ffprobe", "deno"]
+    Ok(["yt-dlp", "ffmpeg", "ffprobe", "bun"]
         .iter()
         .all(|name| dir.join(name).is_file() || on_path(&[name]).is_some()))
 }
@@ -131,13 +139,21 @@ pub async fn ensure_yt_dlp() -> Result<()> {
     Ok(())
 }
 
-/// Fetch ffmpeg, ffprobe and deno, unless they're here or on `PATH`.
+/// Fetch ffmpeg, ffprobe and bun, unless they're here or on `PATH`.
 /// Downloading videos needs them; syncing doesn't.
 pub async fn ensure_helpers() -> Result<()> {
+    let dir = dir()?;
+    // Older versions fetched deno; nothing runs it now.
+    let old_deno = dir.join("deno");
+    match std::fs::remove_file(&old_deno) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing {}", old_deno.display()));
+        }
+        _ => {}
+    }
     let Some(assets) = assets() else {
         return Ok(());
     };
-    let dir = dir()?;
     let have = |name: &str| dir.join(name).is_file() || on_path(&[name]).is_some();
     if !(have("ffmpeg") && have("ffprobe")) {
         eprintln!("tools: downloading ffmpeg (about 150 MB)");
@@ -145,11 +161,11 @@ pub async fn ensure_helpers() -> Result<()> {
         blocking(move || fetch_ffmpeg(&dir, assets.ffmpeg)).await?;
         eprintln!("tools: ffmpeg ready");
     }
-    if !have("deno") {
-        eprintln!("tools: downloading deno");
+    if !have("bun") {
+        eprintln!("tools: downloading bun");
         let dir = dir.clone();
-        blocking(move || fetch_deno(&dir, assets.deno)).await?;
-        eprintln!("tools: deno ready");
+        blocking(move || fetch_bun(&dir, assets.bun)).await?;
+        eprintln!("tools: bun ready");
     }
     Ok(())
 }
@@ -241,23 +257,30 @@ fn fetch_ffmpeg(dir: &Path, asset: &str) -> Result<()> {
     install(ffmpeg, &dir.join("ffmpeg"))
 }
 
-fn fetch_deno(dir: &Path, asset: &str) -> Result<()> {
+fn fetch_bun(dir: &Path, asset: &str) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let sums = fetch_text(&format!("{DENO_RELEASE}/{asset}.sha256sum"))?;
+    let sums = fetch_text(&format!("{BUN_RELEASE}/SHASUMS256.txt"))?;
     let mut archive = tempfile::tempfile_in(dir)?;
     download_verified(
-        &format!("{DENO_RELEASE}/{asset}"),
+        &format!("{BUN_RELEASE}/{asset}"),
         &sums,
         asset,
         &mut archive,
     )?;
-    let mut zip = zip::ZipArchive::new(archive).context("reading the deno archive")?;
+    let inside = bun_in_zip(asset);
+    let mut zip = zip::ZipArchive::new(archive).context("reading the bun archive")?;
     let mut entry = zip
-        .by_name("deno")
-        .context("the deno archive has no deno")?;
+        .by_name(&inside)
+        .with_context(|| format!("the bun archive has no {inside}"))?;
     let mut out = NamedTempFile::new_in(dir)?;
-    std::io::copy(&mut entry, &mut out).context("unpacking deno")?;
-    install(out, &dir.join("deno"))
+    std::io::copy(&mut entry, &mut out).context("unpacking bun")?;
+    install(out, &dir.join("bun"))
+}
+
+/// Where the executable sits in bun's zip: `bun-linux-x64.zip` holds
+/// `bun-linux-x64/bun`.
+fn bun_in_zip(asset: &str) -> String {
+    format!("{}/bun", asset.strip_suffix(".zip").unwrap_or(asset))
 }
 
 /// Make `file` executable and move it to `dest` in one rename, so nothing
@@ -342,6 +365,15 @@ mod tests {
         assert_eq!(checksum(sums, "yt-dlp_linux").as_deref(), Some("bbb"));
         assert_eq!(checksum(sums, "yt-dlp_macos").as_deref(), Some("ccc"));
         assert_eq!(checksum(sums, "yt-dlp"), None);
+    }
+
+    #[test]
+    fn finds_bun_inside_its_zip() {
+        assert_eq!(
+            bun_in_zip("bun-linux-x64-baseline.zip"),
+            "bun-linux-x64-baseline/bun"
+        );
+        assert_eq!(bun_in_zip("bun-linux-aarch64.zip"), "bun-linux-aarch64/bun");
     }
 
     #[test]

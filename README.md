@@ -30,7 +30,7 @@ You need Linux and [Brave](https://brave.com), signed in to YouTube, TikTok and 
 
 Keep it running to stay up to date, and press Ctrl-C to stop it. Your library is saved right next to the app: `joyscroller.db` and a `downloads` folder. Move the folder and your library moves with it.
 
-The first time it starts, Joyscroller fetches the helpers it downloads videos with (yt-dlp, plus ffmpeg and deno if you don't already have them) into a `tools` folder beside it, and keeps them up to date. There's nothing else to install.
+The first time it starts, Joyscroller fetches the helpers it downloads videos with (yt-dlp, plus ffmpeg and bun if you don't already have them) into a `tools` folder beside it, and keeps them up to date. There's nothing else to install.
 
 ### Building from source
 

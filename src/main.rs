@@ -337,7 +337,7 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
         media_root.display()
     );
 
-    // Only downloads need ffmpeg and deno, so fetching them (ffmpeg is large)
+    // Only downloads need ffmpeg and bun, so fetching them (ffmpeg is large)
     // doesn't hold up the first sync.
     tokio::spawn(async {
         while let Err(e) = tools::ensure_helpers().await {
