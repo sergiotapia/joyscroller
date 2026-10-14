@@ -51,6 +51,16 @@ jobs:
           dbus-run-session -- bash -ec '
             echo -n ci | gnome-keyring-daemon --unlock --components=secrets > /dev/null
             XDG_CURRENT_DESKTOP=GNOME xvfb-run -a python spike/cookie_probe.py'
+      # The first run showed that reading a Keychain item a browser created
+      # waits for the user to click Allow, which CI can't do. Creating the items
+      # first, readable by any app, lets the browsers use them and the probe
+      # check the decryption itself.
+      - name: Create the Safe Storage items (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for pair in "Chrome Safe Storage:Chrome" "Microsoft Edge Safe Storage:Microsoft Edge" "Brave Safe Storage:Brave"; do
+            security add-generic-password -A -s "${pair%%:*}" -a "${pair#*:}" -w "$(openssl rand -base64 16)"
+          done
       - name: Probe (macOS, Windows)
         if: runner.os != 'Linux'
         run: python spike/cookie_probe.py

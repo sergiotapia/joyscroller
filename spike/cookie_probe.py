@@ -1,4 +1,4 @@
-"""Probe how Chromium-family browsers store cookies on this OS (issues #1, #2, #3).
+"""Probe how browsers store cookies on this OS (issues #1, #2, #3).
 
 For each browser installed here, on its default profile (where real users'
 cookies live):
@@ -10,6 +10,9 @@ cookies live):
 3. Quit it, then decrypt the cookie the way joyscroller would have to on this
    OS: the fixed or Secret Service key on Linux, the Keychain password on
    macOS, the DPAPI-protected key in `Local State` on Windows.
+
+Firefox, the fallback where a Chromium browser can't be read, is checked the
+same way; its cookies aren't encrypted.
 
 Writes a Markdown report to stdout (and the job summary) and report-<os>.json.
 Never prints a key or password, only whether it was found and its length.
@@ -98,19 +101,19 @@ else:
         "chrome": {
             "exe": which("google-chrome-stable", "google-chrome"),
             "data": CONFIG / "google-chrome",
-            "secret_app": "chrome",
+            "secret_app": ["chrome"],
             "kill": ["pkill", "-f", "/opt/google/chrome/"],
         },
         "edge": {
             "exe": which("microsoft-edge-stable", "microsoft-edge"),
             "data": CONFIG / "microsoft-edge",
-            "secret_app": "microsoft-edge",
+            "secret_app": ["microsoft-edge", "chromium"],
             "kill": ["pkill", "-f", "/opt/microsoft/msedge/"],
         },
         "brave": {
             "exe": which("brave-browser-stable", "brave-browser"),
             "data": CONFIG / "BraveSoftware/Brave-Browser",
-            "secret_app": "brave",
+            "secret_app": ["brave"],
             "kill": ["pkill", "-f", "/opt/brave.com/"],
         },
     }
@@ -238,13 +241,23 @@ def decrypt(info, r, enc):
     if prefix == b"v10":
         r["key_source"] = "fixed 'peanuts' key (v10)"
         return aes_cbc(hashlib.pbkdf2_hmac("sha1", b"peanuts", b"saltysalt", 1, 16), enc[3:])
-    code, out, err = run(["secret-tool", "lookup", "application", info["secret_app"]])
-    if code != 0 or not out:
-        r["key_source"] = f"Secret Service lookup application={info['secret_app']} failed (exit {code}): {err}"
-        return None
-    password = out.rstrip("\n").encode()
-    r["key_source"] = f"Secret Service application={info['secret_app']} ({len(password)}-char password)"
-    return aes_cbc(hashlib.pbkdf2_hmac("sha1", password, b"saltysalt", 1, 16), enc[3:])
+    tried = []
+    for app in info["secret_app"]:
+        code, out, err = run(["secret-tool", "lookup", "application", app])
+        if code != 0 or not out:
+            tried.append(f"{app}: exit {code}")
+            continue
+        password = out.rstrip("\n").encode()
+        key = hashlib.pbkdf2_hmac("sha1", password, b"saltysalt", 1, 16)
+        try:
+            plain = aes_cbc(key, enc[3:])
+        except ValueError:
+            tried.append(f"{app}: wrong key")
+            continue
+        r["key_source"] = f"Secret Service application={app} ({len(password)}-char password)"
+        return plain
+    r["key_source"] = "Secret Service lookup failed: " + "; ".join(tried)
+    return None
 
 
 def probe(name, info):
@@ -280,8 +293,8 @@ def probe(name, info):
             return r
         r["db_path"] = str(db.relative_to(info["data"]))
         r["while_running_copy"] = try_copy(db)
-        _, _, err = read_cookie(db, "mode=ro")
-        r["while_running_readonly"] = err or "ok"
+        row, _, err = read_cookie(db, "mode=ro")
+        r["while_running_readonly"] = "ok" if row else (err or "opened, cookie not visible")
     finally:
         proc.terminate()
         run(info["kill"])
@@ -317,6 +330,109 @@ def probe(name, info):
     return r
 
 
+# Firefox keeps cookies unencrypted in cookies.sqlite, in a profile named by
+# profiles.ini. Newer Linux builds use XDG paths and Ubuntu's is often a snap.
+if sys.platform == "win32":
+    FIREFOX = {
+        "exe": [PF / "Mozilla Firefox/firefox.exe", PF86 / "Mozilla Firefox/firefox.exe"],
+        "roots": [Path(os.environ["APPDATA"]) / "Mozilla/Firefox"],
+        "kill": ["taskkill", "/F", "/T", "/IM", "firefox.exe"],
+    }
+elif sys.platform == "darwin":
+    FIREFOX = {
+        "exe": [APPS / "Firefox.app/Contents/MacOS/firefox"],
+        "roots": [SUPPORT / "Firefox"],
+        "kill": ["pkill", "-f", "Firefox.app"],
+    }
+else:
+    FIREFOX = {
+        "exe": which("firefox"),
+        "roots": [CONFIG / "mozilla/firefox", HOME / ".mozilla/firefox", HOME / "snap/firefox/common/.mozilla/firefox"],
+        "kill": ["pkill", "-f", "firefox"],
+    }
+
+
+def firefox_profile():
+    """The default profile's folder, from the first profiles.ini found."""
+    import configparser
+
+    for root in FIREFOX["roots"]:
+        ini = root / "profiles.ini"
+        if not ini.exists():
+            continue
+        cfg = configparser.ConfigParser()
+        cfg.read(ini)
+        # [Install...] Default= is the profile this install uses; fall back to
+        # the [Profile...] marked Default=1.
+        paths = [cfg[s]["Default"] for s in cfg.sections() if s.startswith("Install") and "Default" in cfg[s]]
+        paths += [cfg[s]["Path"] for s in cfg.sections() if s.startswith("Profile") and cfg[s].get("Default") == "1"]
+        for rel in paths:
+            folder = root / rel if not Path(rel).is_absolute() else Path(rel)
+            if folder.exists():
+                return folder
+    return None
+
+
+def read_firefox_cookie(db, uri_params):
+    try:
+        conn = sqlite3.connect(db.as_uri() + "?" + uri_params, uri=True, timeout=2)
+        try:
+            row = conn.execute("SELECT value FROM moz_cookies WHERE name = ?", (COOKIE_NAME,)).fetchone()
+            return row, None
+        finally:
+            conn.close()
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def probe_firefox():
+    r = {"browser": "firefox", "prefix": "unencrypted", "key_source": "none needed"}
+    exe = next((p for p in FIREFOX["exe"] if p.exists()), None)
+    if exe is None:
+        r["error"] = "not installed"
+        return r
+    r["version"] = browser_version(exe)
+    value = secrets.token_hex(8)
+    server, url = serve_cookie(value)
+    proc = subprocess.Popen([str(exe), url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    db = None
+    try:
+        deadline = time.time() + WAIT_FOR_COOKIE
+        while time.time() < deadline:
+            time.sleep(5)
+            profile = firefox_profile()
+            db = profile / "cookies.sqlite" if profile else None
+            if db is None or not db.exists():
+                continue
+            row, err = read_firefox_cookie(db, "mode=ro&immutable=1")
+            r["while_running_immutable"] = "ok" if row else (err or "cookie not written yet")
+            if row:
+                break
+        r["seconds_until_on_disk"] = round(WAIT_FOR_COOKIE - (deadline - time.time()))
+        if db is None or not db.exists():
+            r["error"] = f"no cookies.sqlite under {FIREFOX['roots']}"
+            return r
+        r["db_path"] = str(db)
+        r["while_running_copy"] = try_copy(db)
+        row, err = read_firefox_cookie(db, "mode=ro")
+        r["while_running_readonly"] = "ok" if row else (err or "opened, cookie not visible")
+    finally:
+        proc.terminate()
+        run(FIREFOX["kill"])
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        time.sleep(3)
+        server.shutdown()
+    row, err = read_firefox_cookie(db, "mode=ro")
+    if row is None:
+        r["error"] = f"cookie not found after quitting: {err or 'no row'}"
+        return r
+    r["decrypted_ok"] = row[0] == value
+    return r
+
+
 def keyring_inventory():
     """Names of the browser secrets in the OS keyring, without their values."""
     if sys.platform == "darwin":
@@ -339,6 +455,10 @@ def main():
         except Exception:
             results.append({"browser": name, "error": traceback.format_exc()})
         print(json.dumps(results[-1], indent=2), file=sys.stderr, flush=True)
+    try:
+        results.append(probe_firefox())
+    except Exception:
+        results.append({"browser": "firefox", "error": traceback.format_exc()})
     report = {
         "os": os_name,
         "platform": platform.platform(),
