@@ -63,20 +63,48 @@ tool. The probe uses it the way joyscroller will use the Keychain.
 Afterwards you can delete the `joyscroller` folder. The `joyscroller_probe`
 cookie is harmless, but you can clear it in each browser's settings.
 
-## Turn 2: the app end to end, after the macOS port
+## Before turn 2: what's done, and what's yours
+
+Done in this PR and passing in CI on real Macs (both chips): the app
+builds as a DMG holding `Joyscroller.app`, installs from it, fetches its own
+yt-dlp, ffmpeg and bun, keeps its data in the right folders, opens its UI,
+hands a second launch over to the running copy, and turns off from the UI.
+The `Package` workflow's smoke test checks all of that on every push.
+
+Not done: **reading browser logins on macOS**, so a Mac build can't sync
+yet. That's yours, in `src/browser.rs`, which is Linux-only today:
+
+- where each browser keeps its profile on macOS (under
+  `~/Library/Application Support`, e.g. `BraveSoftware/Brave-Browser`,
+  `Google/Chrome`, `Microsoft Edge`),
+- getting the browser's key from the Keychain, and decrypting with it (the
+  findings comment on #13 has the scheme the probe confirmed),
+- finding the browser's executable for the headless TikTok and Instagram
+  listing (`Browser::executable`, which only looks on `PATH`), in
+  `/Applications/<Browser>.app/Contents/MacOS/`,
+- making `secret-service` a Linux-only dependency in `Cargo.toml`.
+
+Turn 1's probe results will tell you what the Keychain prompt looks like
+from your Mac. Push your changes to this branch; CI checks them on both
+chips.
+
+## Turn 2: the app end to end
 
 The Mac release is a `.dmg` per chip (`macos-arm64` for Apple Silicon,
 `macos-x86_64` for Intel) holding `Joyscroller.app`. Like
 [obs-rust's](https://github.com/obs-rust/obs-studio/releases), it's unsigned:
 no Apple Developer ID and no notarization, ever. Apple Silicon only runs code
-with some signature, so the build gives it the free ad-hoc one, which needs no
-account. macOS blocks it the first time. The app has no window and no Dock icon: it opens its UI in the
-browser. Downloads go to `~/Movies/Joyscroller`, and everything else to
-`~/Library/Application Support/Joyscroller`.
+with some signature, so the build gives it the free ad-hoc one, which needs
+no account. macOS blocks it the first time. The app has no window and no Dock
+icon: it opens its UI in the browser. Downloads go to `~/Movies/Joyscroller`,
+and everything else to `~/Library/Application Support/Joyscroller`.
 
-Download the `.dmg` from the release (or the PR that lands the port)
-**through the browser**. A browser download carries the same quarantine flag
-a user's would, which matters for step 1.
+Get the DMG from this PR: on the PR's **Checks** tab, open the latest
+**Package** run, and under **Artifacts** download
+`joyscroller-<version>-pr13-<commit>-macos-arm64` (or `-x86_64` on an Intel
+Mac). Do it **in the browser**, not with `gh run download`: a browser download
+carries the same quarantine flag a user's would, which matters for step 1.
+GitHub wraps it in a zip; double-click that to get the `.dmg`.
 
 1. **Install and Gatekeeper.** Open the `.dmg` and drag Joyscroller to
    Applications. Double-click it and expect macOS to block it ("Apple could not
