@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<!-- The Mac app icon: the top bar's splat (assets/splat.svg) on a tile in
+     the taskbar's blue, sized to macOS's icon grid (824 px tile, 100 px
+     margin). Render it with
+       rsvg-convert -w 1024 -h 1024 packaging/macos/icon.svg -o packaging/macos/icon.png
+     after changing it; packaging/macos/make-app.sh turns icon.png into AppIcon.icns. -->
+<defs>
+<linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#4993e6"/>
+<stop offset=".45" stop-color="#2663e0"/>
+<stop offset="1" stop-color="#1941a5"/>
+</linearGradient>
+<linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#fff" stop-opacity=".35"/>
+<stop offset="1" stop-color="#fff" stop-opacity="0"/>
+</linearGradient>
+</defs>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#0c2f86" stroke-width="8"/>
+<path d="M285 100h454a185 185 0 0 1 185 185v95c-180-60-640-60-824 0v-95A185 185 0 0 1 285 100z" fill="url(#gloss)"/>
+<g transform="translate(152 365) scale(3.27)">
+
+<path d="M192.7 45.0C191.9 50.1 199.6 55.1 196.2 59.8C192.9 64.5 183.4 69.9 172.5 72.9C161.7 76.0 144.7 77.8 131.2 78.1C117.6 78.3 106.1 74.7 91.3 74.2C76.4 73.8 51.1 78.1 42.1 75.4C33.1 72.6 42.3 62.5 37.2 57.5C32.2 52.4 11.7 49.2 11.7 45.0C11.8 40.8 33.2 38.0 37.4 32.5C41.6 27.1 27.8 14.9 36.9 12.3C46.0 9.7 76.3 17.0 92.0 16.9C107.7 16.8 118.7 11.5 131.2 11.9C143.7 12.3 155.6 16.5 167.2 19.4C178.8 22.4 196.3 25.2 200.6 29.5C204.8 33.7 193.4 39.9 192.7 45.0Z" fill="#2b1660" transform="translate(3 5)"/>
+<path d="M192.7 45.0C191.9 50.1 199.6 55.1 196.2 59.8C192.9 64.5 183.4 69.9 172.5 72.9C161.7 76.0 144.7 77.8 131.2 78.1C117.6 78.3 106.1 74.7 91.3 74.2C76.4 73.8 51.1 78.1 42.1 75.4C33.1 72.6 42.3 62.5 37.2 57.5C32.2 52.4 11.7 49.2 11.7 45.0C11.8 40.8 33.2 38.0 37.4 32.5C41.6 27.1 27.8 14.9 36.9 12.3C46.0 9.7 76.3 17.0 92.0 16.9C107.7 16.8 118.7 11.5 131.2 11.9C143.7 12.3 155.6 16.5 167.2 19.4C178.8 22.4 196.3 25.2 200.6 29.5C204.8 33.7 193.4 39.9 192.7 45.0Z" fill="#ff7a00" stroke="#c94f00" stroke-width="2"/>
+<ellipse cx="80" cy="24" rx="46" ry="9" fill="#fff" opacity=".28" transform="rotate(-6 80 24)"/>
+<circle cx="18" cy="76" r="5" fill="#ff7a00" stroke="#c94f00" stroke-width="1.5"/>
+<circle cx="205" cy="14" r="4" fill="#ff7a00" stroke="#c94f00" stroke-width="1.5"/>
+</g>
+</svg>

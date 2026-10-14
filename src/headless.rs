@@ -50,8 +50,10 @@ impl Headless {
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--mute-audio")
-            // Keep the throwaway profile away from the desktop keyring.
+            // Keep the throwaway profile away from the desktop keyring
+            // (Linux) and the Keychain (macOS), which would ask the user.
             .arg("--password-store=basic")
+            .arg("--use-mock-keychain")
             .arg("about:blank")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

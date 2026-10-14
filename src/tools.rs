@@ -7,8 +7,9 @@
 //! change often and a stale yt-dlp is what usually breaks downloads, while
 //! distro packages lag weeks behind. ffmpeg and bun don't go stale that way,
 //! so copies already on `PATH` are used as they are, which spares most users
-//! a ~150 MB download. Where no prebuilt copies exist (`ASSETS` has no entry
-//! for the platform), everything comes from `PATH`.
+//! a ~150 MB download. Prebuilt copies exist for Linux, macOS and Windows on
+//! `x86_64` and `aarch64` (`ASSETS`); anywhere else, everything comes from `PATH`.
+//! Tool files carry the platform's executable suffix (`.exe` on Windows).
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -22,6 +23,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use tokio::process::Command;
+use ureq::ResponseExt as _;
 
 const YT_DLP_RELEASE: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
 /// yt-dlp's own ffmpeg builds, the ones its README recommends. Rebuilt daily
@@ -30,6 +32,12 @@ const FFMPEG_RELEASE: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/d
 /// Bun rather than deno: Cloudflare bought Deno in October 2026 and will stop
 /// developing the standalone runtime after a year of maintenance releases.
 const BUN_RELEASE: &str = "https://github.com/oven-sh/bun/releases/latest/download";
+/// ffmpeg release builds for macOS, which yt-dlp's builds don't cover.
+const MARTIN_RIEDL: &str = "https://ffmpeg.martin-riedl.de";
+
+/// What the programs in yt-dlp's Windows ffmpeg zips end in. Fixed rather than
+/// the running platform's suffix so the matching can be tested anywhere.
+const WINDOWS_ZIP_SUFFIX: &str = ".exe";
 
 /// The release files to fetch on one platform.
 struct Assets {
@@ -37,10 +45,21 @@ struct Assets {
     arch: &'static str,
     /// A standalone yt-dlp executable.
     yt_dlp: &'static str,
-    /// A `.tar.xz` with `bin/ffmpeg` and `bin/ffprobe` inside.
-    ffmpeg: &'static str,
+    ffmpeg: FfmpegBuild,
     /// A `.zip` with the `bun` executable in a folder named like the zip.
     bun: &'static str,
+}
+
+/// Where a platform's ffmpeg and ffprobe come from.
+enum FfmpegBuild {
+    /// yt-dlp's builds as a `.tar.xz` with `bin/ffmpeg` and `bin/ffprobe`.
+    TarXz(&'static str),
+    /// yt-dlp's builds as a `.zip` with `bin/ffmpeg.exe` and `bin/ffprobe.exe`.
+    Zip(&'static str),
+    /// martin-riedl.de's builds: one `.zip` per program, each holding just
+    /// that program. The value is the platform's folder on the site, such as
+    /// `macos/arm64`.
+    MartinRiedl(&'static str),
 }
 
 const ASSETS: &[Assets] = &[
@@ -48,7 +67,7 @@ const ASSETS: &[Assets] = &[
         os: "linux",
         arch: "x86_64",
         yt_dlp: "yt-dlp_linux",
-        ffmpeg: "ffmpeg-master-latest-linux64-gpl.tar.xz",
+        ffmpeg: FfmpegBuild::TarXz("ffmpeg-master-latest-linux64-gpl.tar.xz"),
         // The default x86_64 build needs AVX2; baseline runs on any x86_64 CPU,
         // and solving YouTube's challenges is too little work to tell them apart.
         bun: "bun-linux-x64-baseline.zip",
@@ -57,8 +76,38 @@ const ASSETS: &[Assets] = &[
         os: "linux",
         arch: "aarch64",
         yt_dlp: "yt-dlp_linux_aarch64",
-        ffmpeg: "ffmpeg-master-latest-linuxarm64-gpl.tar.xz",
+        ffmpeg: FfmpegBuild::TarXz("ffmpeg-master-latest-linuxarm64-gpl.tar.xz"),
         bun: "bun-linux-aarch64.zip",
+    },
+    // The same universal yt-dlp binary runs on both Macs.
+    Assets {
+        os: "macos",
+        arch: "aarch64",
+        yt_dlp: "yt-dlp_macos",
+        ffmpeg: FfmpegBuild::MartinRiedl("macos/arm64"),
+        bun: "bun-darwin-aarch64.zip",
+    },
+    Assets {
+        os: "macos",
+        arch: "x86_64",
+        yt_dlp: "yt-dlp_macos",
+        ffmpeg: FfmpegBuild::MartinRiedl("macos/amd64"),
+        // Baseline for the same reason as on Linux.
+        bun: "bun-darwin-x64-baseline.zip",
+    },
+    Assets {
+        os: "windows",
+        arch: "x86_64",
+        yt_dlp: "yt-dlp.exe",
+        ffmpeg: FfmpegBuild::Zip("ffmpeg-master-latest-win64-gpl.zip"),
+        bun: "bun-windows-x64-baseline.zip",
+    },
+    Assets {
+        os: "windows",
+        arch: "aarch64",
+        yt_dlp: "yt-dlp_arm64.exe",
+        ffmpeg: FfmpegBuild::Zip("ffmpeg-master-latest-winarm64-gpl.zip"),
+        bun: "bun-windows-aarch64.zip",
     },
 ];
 
@@ -75,17 +124,37 @@ fn dir() -> Result<PathBuf> {
     Ok(crate::app_dir()?.join("tools"))
 }
 
-/// The first of `names` found in a `PATH` directory.
+/// `name` as a file name on this platform.
+fn exe(name: &str) -> String {
+    exe_name(name, std::env::consts::EXE_SUFFIX)
+}
+
+/// `name` with `suffix` appended, unless it already has an extension.
+fn exe_name(name: &str, suffix: &str) -> String {
+    if Path::new(name).extension().is_some() {
+        name.to_owned()
+    } else {
+        format!("{name}{suffix}")
+    }
+}
+
+/// The first of `names` found in a `PATH` directory. Windows only runs files
+/// ending in `.exe`, so a name without an extension is tried with one too.
 pub fn on_path(names: &[&str]) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .flat_map(|dir| {
+            names
+                .iter()
+                .flat_map(|name| [exe(name), (*name).to_owned()])
+                .map(move |file| dir.join(file))
+        })
         .find(|candidate| candidate.is_file())
 }
 
 /// Our own copy of `name` if we have one, or else the bare name, for `PATH`.
 fn program(name: &str) -> Result<PathBuf> {
-    let own = dir()?.join(name);
+    let own = dir()?.join(exe(name));
     Ok(if own.is_file() { own } else { name.into() })
 }
 
@@ -93,12 +162,12 @@ fn program(name: &str) -> Result<PathBuf> {
 pub fn yt_dlp() -> Result<Command> {
     let dir = dir()?;
     let mut cmd = Command::new(program("yt-dlp")?);
-    if dir.join("ffmpeg").is_file() && dir.join("ffprobe").is_file() {
+    if dir.join(exe("ffmpeg")).is_file() && dir.join(exe("ffprobe")).is_file() {
         cmd.arg("--ffmpeg-location").arg(&dir);
     }
     // yt-dlp only turns on deno by itself; bun has to be asked for, even
     // from `PATH`.
-    let bun = dir.join("bun");
+    let bun = dir.join(exe("bun"));
     if bun.is_file() {
         cmd.arg("--js-runtimes")
             .arg([OsStr::new("bun:"), bun.as_os_str()].join(OsStr::new("")));
@@ -115,8 +184,18 @@ pub fn ffmpeg() -> Result<Command> {
 /// An ffmpeg command at low CPU priority, for long work in the background
 /// (making playback copies) that mustn't make the computer sluggish. `nice`
 /// comes with every Linux and macOS; without it, ffmpeg runs as usual.
+/// Windows has no `nice`, so the process starts in the below-normal priority
+/// class instead.
 pub fn ffmpeg_in_background() -> Result<Command> {
     let ffmpeg = program("ffmpeg")?;
+    #[cfg(windows)]
+    {
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        let mut cmd = Command::new(ffmpeg);
+        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+        Ok(cmd)
+    }
+    #[cfg(not(windows))]
     Ok(match on_path(&["nice"]) {
         Some(nice) => {
             let mut cmd = Command::new(nice);
@@ -145,7 +224,7 @@ fn have_all(names: &[&str]) -> Result<bool> {
     let dir = dir()?;
     Ok(names
         .iter()
-        .all(|name| dir.join(name).is_file() || on_path(&[name]).is_some()))
+        .all(|name| dir.join(exe(name)).is_file() || on_path(&[name]).is_some()))
 }
 
 /// Fetch yt-dlp if we don't have our own copy yet. Syncing YouTube needs it.
@@ -154,7 +233,7 @@ pub async fn ensure_yt_dlp() -> Result<()> {
         return Ok(());
     };
     let dir = dir()?;
-    if dir.join("yt-dlp").is_file() {
+    if dir.join(exe("yt-dlp")).is_file() {
         return Ok(());
     }
     eprintln!("tools: downloading yt-dlp");
@@ -168,7 +247,7 @@ pub async fn ensure_yt_dlp() -> Result<()> {
 pub async fn ensure_helpers() -> Result<()> {
     let dir = dir()?;
     // Older versions fetched deno; nothing runs it now.
-    let old_deno = dir.join("deno");
+    let old_deno = dir.join(exe("deno"));
     match std::fs::remove_file(&old_deno) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             return Err(e).with_context(|| format!("removing {}", old_deno.display()));
@@ -178,11 +257,11 @@ pub async fn ensure_helpers() -> Result<()> {
     let Some(assets) = assets() else {
         return Ok(());
     };
-    let have = |name: &str| dir.join(name).is_file() || on_path(&[name]).is_some();
+    let have = |name: &str| dir.join(exe(name)).is_file() || on_path(&[name]).is_some();
     if !(have("ffmpeg") && have("ffprobe")) {
         eprintln!("tools: downloading ffmpeg (about 150 MB)");
         let dir = dir.clone();
-        blocking(move || fetch_ffmpeg(&dir, assets.ffmpeg)).await?;
+        blocking(move || fetch_ffmpeg(&dir, &assets.ffmpeg)).await?;
         eprintln!("tools: ffmpeg ready");
     }
     if !have("bun") {
@@ -197,12 +276,15 @@ pub async fn ensure_helpers() -> Result<()> {
 /// Update our own yt-dlp to its latest release. A yt-dlp from `PATH` is left
 /// to whoever installed it.
 pub async fn update_yt_dlp() -> Result<()> {
-    let own = dir()?.join("yt-dlp");
+    let own = dir()?.join(exe("yt-dlp"));
     if !own.is_file() {
         return Ok(());
     }
-    // Replacing the file is a rename, so a yt-dlp already running (a download
-    // in progress) keeps its old copy and finishes normally.
+    // yt-dlp swaps itself by renaming files, not by overwriting the running
+    // one: on Linux and macOS a yt-dlp already running (a download in
+    // progress) keeps its old copy, and on Windows, which can't overwrite a
+    // running .exe, it moves the running exe aside first. Either way
+    // `--update` is safe while downloads run.
     let out = Command::new(&own)
         .arg("--update")
         .stdin(Stdio::null())
@@ -240,13 +322,25 @@ fn fetch_yt_dlp(dir: &Path, asset: &str) -> Result<()> {
         asset,
         out.as_file_mut(),
     )?;
-    install(out, &dir.join("yt-dlp"))
+    install(out, &dir.join(exe("yt-dlp")))
 }
 
-fn fetch_ffmpeg(dir: &Path, asset: &str) -> Result<()> {
+fn fetch_ffmpeg(dir: &Path, build: &FfmpegBuild) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    match build {
+        FfmpegBuild::TarXz(asset) => fetch_ffmpeg_tar(dir, asset),
+        FfmpegBuild::Zip(asset) => fetch_ffmpeg_zip(dir, asset),
+        FfmpegBuild::MartinRiedl(platform) => {
+            fetch_martin_riedl(dir, platform, "ffprobe")?;
+            fetch_martin_riedl(dir, platform, "ffmpeg")
+        }
+    }
+}
+
+/// Download one of yt-dlp's ffmpeg builds into an unnamed temporary file, so
+/// it's gone however this ends.
+fn download_ffmpeg_build(dir: &Path, asset: &str) -> Result<File> {
     let sums = fetch_text(&format!("{FFMPEG_RELEASE}/checksums.sha256"))?;
-    // Unnamed, so it's gone however this ends.
     let mut archive = tempfile::tempfile_in(dir)?;
     download_verified(
         &format!("{FFMPEG_RELEASE}/{asset}"),
@@ -254,6 +348,11 @@ fn fetch_ffmpeg(dir: &Path, asset: &str) -> Result<()> {
         asset,
         &mut archive,
     )?;
+    Ok(archive)
+}
+
+fn fetch_ffmpeg_tar(dir: &Path, asset: &str) -> Result<()> {
+    let mut archive = download_ffmpeg_build(dir, asset)?;
     archive.rewind()?;
     let xz = liblzma::read::XzDecoder::new(BufReader::new(archive));
     let mut tar = tar::Archive::new(xz);
@@ -261,24 +360,67 @@ fn fetch_ffmpeg(dir: &Path, asset: &str) -> Result<()> {
     for entry in tar.entries().context("reading the ffmpeg archive")? {
         let mut entry = entry.context("reading the ffmpeg archive")?;
         let path = entry.path()?.into_owned();
-        let in_bin = path
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|d| d == "bin");
-        let slot = match path.file_name().and_then(OsStr::to_str) {
-            Some("ffmpeg") if in_bin => &mut ffmpeg,
-            Some("ffprobe") if in_bin => &mut ffprobe,
-            _ => continue,
+        let slot = match ffmpeg_tool(&path, "") {
+            Some(FfmpegTool::Ffmpeg) => &mut ffmpeg,
+            Some(FfmpegTool::Ffprobe) => &mut ffprobe,
+            None => continue,
         };
         let mut out = NamedTempFile::new_in(dir)?;
         std::io::copy(&mut entry, &mut out).context("unpacking ffmpeg")?;
         *slot = Some(out);
     }
+    install_ffmpeg(dir, ffmpeg, ffprobe, asset)
+}
+
+fn fetch_ffmpeg_zip(dir: &Path, asset: &str) -> Result<()> {
+    let archive = download_ffmpeg_build(dir, asset)?;
+    let mut zip = zip::ZipArchive::new(archive).context("reading the ffmpeg archive")?;
+    let (mut ffmpeg, mut ffprobe) = (None, None);
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).context("reading the ffmpeg archive")?;
+        let name = entry
+            .name()
+            .context("reading the ffmpeg archive")?
+            .into_owned();
+        let slot = match ffmpeg_tool(Path::new(&name), WINDOWS_ZIP_SUFFIX) {
+            Some(FfmpegTool::Ffmpeg) => &mut ffmpeg,
+            Some(FfmpegTool::Ffprobe) => &mut ffprobe,
+            None => continue,
+        };
+        let mut out = NamedTempFile::new_in(dir)?;
+        std::io::copy(&mut entry, &mut out).context("unpacking ffmpeg")?;
+        *slot = Some(out);
+    }
+    install_ffmpeg(dir, ffmpeg, ffprobe, asset)
+}
+
+fn install_ffmpeg(
+    dir: &Path,
+    ffmpeg: Option<NamedTempFile>,
+    ffprobe: Option<NamedTempFile>,
+    asset: &str,
+) -> Result<()> {
     let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg, ffprobe) else {
         bail!("{asset} has no bin/ffmpeg and bin/ffprobe");
     };
-    install(ffprobe, &dir.join("ffprobe"))?;
-    install(ffmpeg, &dir.join("ffmpeg"))
+    install(ffprobe, &dir.join(exe("ffprobe")))?;
+    install(ffmpeg, &dir.join(exe("ffmpeg")))
+}
+
+/// Fetch `tool` (`ffmpeg` or `ffprobe`) from martin-riedl.de. Its `latest`
+/// address redirects to a build's folder, and only the build's own address has
+/// a `.sha256` beside it, so follow the redirect first and take the zip and
+/// its checksum from that one folder, which keeps them matching even if a
+/// new build lands in between.
+fn fetch_martin_riedl(dir: &Path, platform: &str, tool: &str) -> Result<()> {
+    let latest = format!("{MARTIN_RIEDL}/redirect/latest/{platform}/release/{tool}.zip");
+    let url = resolve_redirect(&latest)?;
+    let name = format!("{tool}.zip");
+    let sums = fetch_text(&format!("{url}.sha256"))?;
+    let mut archive = tempfile::tempfile_in(dir)?;
+    download_verified(&url, &sums, &name, &mut archive)?;
+    let out = unpack_zip_entry(archive, tool, dir, tool)?;
+    install(out, &dir.join(exe(tool)))
 }
 
 fn fetch_bun(dir: &Path, asset: &str) -> Result<()> {
@@ -291,20 +433,57 @@ fn fetch_bun(dir: &Path, asset: &str) -> Result<()> {
         asset,
         &mut archive,
     )?;
-    let inside = bun_in_zip(asset);
-    let mut zip = zip::ZipArchive::new(archive).context("reading the bun archive")?;
+    let out = unpack_zip_entry(
+        archive,
+        &bun_in_zip(asset, std::env::consts::EXE_SUFFIX),
+        dir,
+        "bun",
+    )?;
+    install(out, &dir.join(exe("bun")))
+}
+
+/// Copy the entry `inside` a zip into a temporary file in `dir`.
+fn unpack_zip_entry(archive: File, inside: &str, dir: &Path, what: &str) -> Result<NamedTempFile> {
+    let mut zip =
+        zip::ZipArchive::new(archive).with_context(|| format!("reading the {what} archive"))?;
     let mut entry = zip
-        .by_name(&inside)
-        .with_context(|| format!("the bun archive has no {inside}"))?;
+        .by_name(inside)
+        .with_context(|| format!("the {what} archive has no {inside}"))?;
     let mut out = NamedTempFile::new_in(dir)?;
-    std::io::copy(&mut entry, &mut out).context("unpacking bun")?;
-    install(out, &dir.join("bun"))
+    std::io::copy(&mut entry, &mut out).with_context(|| format!("unpacking {what}"))?;
+    Ok(out)
 }
 
 /// Where the executable sits in bun's zip: `bun-linux-x64.zip` holds
-/// `bun-linux-x64/bun`.
-fn bun_in_zip(asset: &str) -> String {
-    format!("{}/bun", asset.strip_suffix(".zip").unwrap_or(asset))
+/// `bun-linux-x64/bun`, and the Windows zips `bun-windows-x64/bun.exe`.
+fn bun_in_zip(asset: &str, exe_suffix: &str) -> String {
+    format!(
+        "{}/bun{exe_suffix}",
+        asset.strip_suffix(".zip").unwrap_or(asset)
+    )
+}
+
+enum FfmpegTool {
+    Ffmpeg,
+    Ffprobe,
+}
+
+/// Which program an archive entry is, if it's `bin/ffmpeg` or `bin/ffprobe`
+/// (with `exe_suffix` after the name). The builds keep them in a `bin` folder
+/// next to docs and other files we don't want.
+fn ffmpeg_tool(path: &Path, exe_suffix: &str) -> Option<FfmpegTool> {
+    let in_bin = path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|d| d == "bin");
+    if !in_bin {
+        return None;
+    }
+    match path.file_name()?.to_str()?.strip_suffix(exe_suffix)? {
+        "ffmpeg" => Some(FfmpegTool::Ffmpeg),
+        "ffprobe" => Some(FfmpegTool::Ffprobe),
+        _ => None,
+    }
 }
 
 /// Make `file` executable and move it to `dest` in one rename, so nothing
@@ -328,6 +507,53 @@ fn agent() -> ureq::Agent {
         .timeout_recv_body(Some(Duration::from_mins(30)))
         .build()
         .into()
+}
+
+/// Where `url` ends up after its redirects.
+fn resolve_redirect(url: &str) -> Result<String> {
+    let response = agent()
+        .get(url)
+        .call()
+        .with_context(|| format!("fetching {url}"))?;
+    // The body is never read; dropping the response closes it.
+    Ok(response.get_uri().to_string())
+}
+
+/// What each of our tools prints with its version flag, one line per tool
+/// with the path that ran, for checking that a fetched set works.
+pub async fn versions() -> Result<String> {
+    let mut lines = String::new();
+    for (name, flag) in [
+        ("yt-dlp", "--version"),
+        ("ffmpeg", "-version"),
+        ("ffprobe", "-version"),
+        ("bun", "--version"),
+    ] {
+        let program = program(name)?;
+        let path = if program.is_file() {
+            program.clone()
+        } else {
+            on_path(&[name]).unwrap_or_else(|| program.clone())
+        };
+        let out = Command::new(&program)
+            .arg(flag)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .with_context(|| format!("running {} {flag}", path.display()))?;
+        if !out.status.success() {
+            bail!(
+                "{} {flag} failed: {}",
+                path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let first = stdout.lines().next().unwrap_or_default().trim();
+        writeln!(lines, "{name}: {first} ({})", path.display())?;
+    }
+    Ok(lines)
 }
 
 fn fetch_text(url: &str) -> Result<String> {
@@ -394,17 +620,79 @@ mod tests {
     #[test]
     fn finds_bun_inside_its_zip() {
         assert_eq!(
-            bun_in_zip("bun-linux-x64-baseline.zip"),
+            bun_in_zip("bun-linux-x64-baseline.zip", ""),
             "bun-linux-x64-baseline/bun"
         );
-        assert_eq!(bun_in_zip("bun-linux-aarch64.zip"), "bun-linux-aarch64/bun");
+        assert_eq!(
+            bun_in_zip("bun-darwin-aarch64.zip", ""),
+            "bun-darwin-aarch64/bun"
+        );
+        assert_eq!(
+            bun_in_zip("bun-windows-x64-baseline.zip", ".exe"),
+            "bun-windows-x64-baseline/bun.exe"
+        );
     }
 
     #[test]
-    fn has_assets_for_linux_only() {
-        assert!(assets_for("linux", "x86_64").is_some());
-        assert!(assets_for("linux", "aarch64").is_some());
-        assert!(assets_for("macos", "aarch64").is_none());
-        assert!(assets_for("windows", "x86_64").is_none());
+    fn has_assets_for_every_supported_platform() {
+        for (os, arch) in [
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+            ("windows", "x86_64"),
+            ("windows", "aarch64"),
+        ] {
+            assert!(assets_for(os, arch).is_some(), "{os} {arch}");
+        }
+        assert!(assets_for("freebsd", "x86_64").is_none());
+        assert!(assets_for("linux", "riscv64").is_none());
+    }
+
+    #[test]
+    fn picks_ffmpeg_out_of_the_windows_zip() {
+        let tool = |path: &str| ffmpeg_tool(Path::new(path), WINDOWS_ZIP_SUFFIX);
+        let dir = "ffmpeg-master-latest-win64-gpl";
+        assert!(matches!(
+            tool(&format!("{dir}/bin/ffmpeg.exe")),
+            Some(FfmpegTool::Ffmpeg)
+        ));
+        assert!(matches!(
+            tool(&format!("{dir}/bin/ffprobe.exe")),
+            Some(FfmpegTool::Ffprobe)
+        ));
+        assert!(tool(&format!("{dir}/bin/ffplay.exe")).is_none());
+        assert!(tool(&format!("{dir}/bin/")).is_none());
+        assert!(tool(&format!("{dir}/ffmpeg.exe")).is_none());
+        assert!(tool(&format!("{dir}/doc/ffmpeg.exe")).is_none());
+        assert!(tool(&format!("{dir}/bin/ffmpeg")).is_none());
+    }
+
+    #[test]
+    fn picks_ffmpeg_out_of_the_tarball() {
+        let tool = |path: &str| ffmpeg_tool(Path::new(path), "");
+        let dir = "ffmpeg-master-latest-linux64-gpl";
+        assert!(matches!(
+            tool(&format!("{dir}/bin/ffmpeg")),
+            Some(FfmpegTool::Ffmpeg)
+        ));
+        assert!(matches!(
+            tool(&format!("{dir}/bin/ffprobe")),
+            Some(FfmpegTool::Ffprobe)
+        ));
+        assert!(tool(&format!("{dir}/bin/ffplay")).is_none());
+        assert!(tool(&format!("{dir}/LICENSE.txt")).is_none());
+    }
+
+    #[test]
+    fn names_executables_by_platform() {
+        assert_eq!(exe_name("yt-dlp", ".exe"), "yt-dlp.exe");
+        assert_eq!(exe_name("yt-dlp", ""), "yt-dlp");
+        assert_eq!(exe_name("bun.exe", ".exe"), "bun.exe");
+        assert_eq!(exe_name("tool.sh", ".exe"), "tool.sh");
+        assert_eq!(
+            exe("ffmpeg"),
+            format!("ffmpeg{}", std::env::consts::EXE_SUFFIX)
+        );
     }
 }

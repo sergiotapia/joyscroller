@@ -1,0 +1,155 @@
+# Builds every download Joyscroller ships and smoke-tests each one on a real
+# machine of its kind (packaging/smoke.sh), the way obs-rust's releases do:
+#
+#   Linux    joyscroller-<label>-linux-x86_64.tar.gz, -linux-aarch64.tar.gz
+#   macOS    joyscroller-<label>-macos-arm64.dmg, -macos-x86_64.dmg
+#            (Joyscroller.app, unsigned apart from the ad-hoc signature
+#            Apple Silicon needs; the Intel build is cross-compiled)
+#
+# On a pull request, <label> is the version plus the PR and commit, and the
+# files are the run's artifacts, to download and try. The release workflow
+# calls this with the version as <label> and publishes the files.
+# Ubuntu 22.04 runners keep the Linux glibc requirement at 2.35, old enough
+# for any current distro.
+
+name: Package
+
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      label:
+        description: What the files are named after (the version, for a release)
+        type: string
+        required: true
+
+concurrency:
+  group: package-${{ github.ref }}-${{ inputs.label }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      label: ${{ steps.v.outputs.label }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        env:
+          LABEL: ${{ inputs.label }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "label=${LABEL:-$version-pr$PR-${SHA:0:7}}" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      NAME: joyscroller-${{ needs.version.outputs.label }}-linux-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir "$NAME"
+          cp target/release/joyscroller README.md LICENSE "$NAME/"
+          tar -czf "$NAME.tar.gz" "$NAME"
+      - name: Smoke test
+        run: |
+          mkdir smoke && tar -xzf "$NAME.tar.gz" -C smoke
+          packaging/smoke.sh "smoke/$NAME/joyscroller" "${{ needs.version.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.tar.gz
+
+  macos:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    runs-on: macos-26
+    env:
+      NAME: joyscroller-${{ needs.version.outputs.label }}-macos-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build the app and its DMG
+        run: |
+          packaging/macos/make-app.sh "target/${{ matrix.target }}/release/joyscroller" \
+            "${{ needs.version.outputs.version }}" "${{ needs.version.outputs.label }}" \
+            "${{ matrix.arch }}" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}.dmg
+
+  # Each DMG on a Mac of its own kind; the Intel app can't run on Apple
+  # Silicon runners without Rosetta, so it gets an Intel runner.
+  macos-smoke:
+    needs: [version, macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-26
+          - arch: x86_64
+            runner: macos-26-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      NAME: joyscroller-${{ needs.version.outputs.label }}-macos-${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+      - name: Install from the DMG, as a user would
+        run: |
+          mnt=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$NAME.dmg"
+          [ -L "$mnt/Applications" ]
+          ditto "$mnt/Joyscroller.app" /Applications/Joyscroller.app
+          hdiutil detach "$mnt"
+      - name: Check the bundle
+        run: |
+          app=/Applications/Joyscroller.app
+          lipo "$app/Contents/MacOS/joyscroller" -verify_arch "${{ matrix.arch }}"
+          codesign --verify --strict "$app"
+          codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION" ]
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$app/Contents/Info.plist")" = true ]
+          [ -f "$app/Contents/Resources/AppIcon.icns" ]
+      - name: Check the documented quarantine removal works
+        run: |
+          app=/Applications/Joyscroller.app
+          printf -v flag '0083;%x;Safari;%s' "$(date +%s)" "$(uuidgen)"
+          xattr -w com.apple.quarantine "$flag" "$app"
+          xattr -dr com.apple.quarantine "$app"
+          ! xattr -p com.apple.quarantine "$app" 2> /dev/null
+      - name: Smoke test
+        run: packaging/smoke.sh /Applications/Joyscroller.app/Contents/MacOS/joyscroller "$VERSION"

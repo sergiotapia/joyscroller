@@ -1,0 +1,52 @@
+# Checks every push to master and every pull request on Linux, macOS and
+# Windows: clippy and the tests on each, and the checks that don't depend on
+# the OS (formatting, unused dependencies, cargo-deny, antislop) once, on
+# Linux. `just precommit` runs the same steps locally. The release workflow
+# runs it too, so a version only ships if it passes.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      # Installs the release rust-toolchain.toml pins.
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete,cargo-deny
+      - run: cargo install antislop --locked
+      - run: cargo fmt --all --check
+      - run: cargo machete
+      - run: cargo deny check
+      - run: antislop src
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo nextest run --all-features --locked

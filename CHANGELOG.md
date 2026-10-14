@@ -4,6 +4,16 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- Joyscroller runs on macOS. Download the `.dmg` for your Mac's chip, drag Joyscroller to Applications, and it opens in your browser. It reads your logins from Brave like it does on Linux, after asking once for its key in the Keychain. Videos are saved in `~/Movies/Joyscroller`. ([#1](https://github.com/sergiotapia/joyscroller/issues/1))
+- A red **Turn off** button at the end of the taskbar stops Joyscroller, along with any download in progress, after asking you to confirm.
+- Starting Joyscroller while it's already running opens the running copy in your browser, instead of stopping with an error about its address being in use.
+
+### Fixed
+
+- Syncing with Microsoft Edge on Linux now reads all of your logins. Joyscroller looked for Edge's key in the keyring under the wrong name, so it skipped most of Edge's cookies.
+
 ## [0.4.0] - 2026-10-14
 
 ### Added

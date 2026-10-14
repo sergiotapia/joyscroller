@@ -1,16 +1,23 @@
 //! Reads (and decrypts) cookies straight out of a Chromium-family browser's
 //! on-disk cookie store, so joyscroller can act as the logged-in user.
 //!
-//! Linux only for now. Chromium encrypts cookie values with AES-128-CBC using a
-//! key derived from a password that lives in the desktop keyring
-//! ("<Browser> Safe Storage" in gnome-keyring / KWallet).
+//! Linux and macOS for now. Chromium encrypts cookie values with AES-128-CBC
+//! using a key derived (PBKDF2-SHA1, salt "saltysalt") from a password:
+//! - Linux: v10 values use the fixed password "peanuts", v11 ones a password
+//!   from the desktop keyring (Secret Service: gnome-keyring or KWallet).
+//! - macOS: every value is v10, with the password from the login Keychain's
+//!   "<Browser> Safe Storage" item and 1003 PBKDF2 iterations. Reading it makes
+//!   macOS ask the user to allow Joyscroller, so it's read once per run.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(target_os = "linux")]
+use anyhow::bail;
+use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
 use sha2::{Digest, Sha256};
 
@@ -26,6 +33,7 @@ pub enum Browser {
 }
 
 impl Browser {
+    #[cfg(not(target_os = "macos"))]
     fn config_dir(self) -> Result<PathBuf> {
         let base = dirs::config_dir().context("no XDG config dir")?;
         Ok(base.join(match self {
@@ -37,7 +45,21 @@ impl Browser {
         }))
     }
 
+    #[cfg(target_os = "macos")]
+    fn config_dir(self) -> Result<PathBuf> {
+        // ~/Library/Application Support
+        let base = dirs::config_dir().context("no Application Support folder")?;
+        Ok(base.join(match self {
+            Browser::Brave => "BraveSoftware/Brave-Browser",
+            Browser::Chrome => "Google/Chrome",
+            Browser::Chromium => "Chromium",
+            Browser::Vivaldi => "Vivaldi",
+            Browser::Edge => "Microsoft Edge",
+        }))
+    }
+
     /// The browser's program, found on `PATH` under its usual Linux names.
+    #[cfg(not(target_os = "macos"))]
     pub fn executable(self) -> Result<PathBuf> {
         let names: &[&str] = match self {
             Browser::Brave => &["brave", "brave-browser"],
@@ -49,14 +71,59 @@ impl Browser {
         crate::tools::on_path(names).ok_or_else(|| anyhow!("none of {names:?} is on PATH"))
     }
 
+    /// The browser's program inside its app bundle, in /Applications or the
+    /// user's own ~/Applications.
+    #[cfg(target_os = "macos")]
+    pub fn executable(self) -> Result<PathBuf> {
+        let app = self.mac_app_name();
+        let inside = format!("{app}.app/Contents/MacOS/{app}");
+        let folders = [
+            Some(PathBuf::from("/Applications")),
+            dirs::home_dir().map(|home| home.join("Applications")),
+        ];
+        folders
+            .into_iter()
+            .flatten()
+            .map(|folder| folder.join(&inside))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| anyhow!("{app}.app is in neither /Applications nor ~/Applications"))
+    }
+
+    /// The app's name on macOS, which is also its Keychain item's account.
+    #[cfg(target_os = "macos")]
+    fn mac_app_name(self) -> &'static str {
+        match self {
+            Browser::Brave => "Brave Browser",
+            Browser::Chrome => "Google Chrome",
+            Browser::Chromium => "Chromium",
+            Browser::Vivaldi => "Vivaldi",
+            Browser::Edge => "Microsoft Edge",
+        }
+    }
+
+    /// The Keychain item holding the cookie password, as (service, account).
+    /// Checked on a real Mac for Brave and Edge, and on CI's Macs for Chrome.
+    #[cfg(target_os = "macos")]
+    fn keychain_item(self) -> (&'static str, &'static str) {
+        match self {
+            Browser::Brave => ("Brave Safe Storage", "Brave"),
+            Browser::Chrome => ("Chrome Safe Storage", "Chrome"),
+            Browser::Chromium => ("Chromium Safe Storage", "Chromium"),
+            Browser::Vivaldi => ("Vivaldi Safe Storage", "Vivaldi"),
+            Browser::Edge => ("Microsoft Edge Safe Storage", "Microsoft Edge"),
+        }
+    }
+
     /// The `application` attribute Chromium stores its keyring secret under.
+    /// Edge's was found on CI's Linux runners (Edge 152-155).
+    #[cfg(target_os = "linux")]
     fn keyring_application(self) -> &'static str {
         match self {
             Browser::Brave => "brave",
             Browser::Chrome => "chrome",
-            Browser::Chromium => "chromium",
+            // Edge keeps Chromium's own name rather than its brand.
+            Browser::Chromium | Browser::Edge => "chromium",
             Browser::Vivaldi => "vivaldi",
-            Browser::Edge => "microsoft-edge",
         }
     }
 }
@@ -96,14 +163,7 @@ pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Resul
         })
         .map_or(0, |v| v.parse().unwrap_or(0));
 
-    let v10_key = derive_key(b"peanuts");
-    let v11_key = match keyring_password(browser).await {
-        Ok(pw) => Some(derive_key(&pw)),
-        Err(e) => {
-            eprintln!("warning: keyring lookup failed ({e:#}); v11 cookies will be skipped");
-            None
-        }
-    };
+    let Keys { v10, v11 } = keys(browser).await?;
 
     let mut stmt = conn.prepare(
         "SELECT host_key, path, is_secure, expires_utc, name, value, encrypted_value \
@@ -129,8 +189,8 @@ pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Resul
             value
         } else {
             let key = match &encrypted[..3] {
-                b"v10" => Some(&v10_key),
-                b"v11" => v11_key.as_ref(),
+                b"v10" => v10.as_ref(),
+                b"v11" => v11.as_ref(),
                 _ => None,
             };
             let Some(v) = key.and_then(|k| decrypt(k, &encrypted[3..], &host, db_version).ok())
@@ -155,8 +215,69 @@ pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Resul
     Ok(cookies)
 }
 
-fn derive_key(password: &[u8]) -> [u8; 16] {
-    pbkdf2::pbkdf2_hmac_array::<sha1::Sha1, 16>(password, b"saltysalt", 1)
+/// The keys for each encryption prefix; `None` where a value with that prefix
+/// can't be decrypted, and is skipped.
+struct Keys {
+    v10: Option<[u8; 16]>,
+    v11: Option<[u8; 16]>,
+}
+
+#[cfg(target_os = "linux")]
+async fn keys(browser: Browser) -> Result<Keys> {
+    let v11 = match keyring_password(browser).await {
+        Ok(pw) => Some(derive_key(&pw, 1)),
+        Err(e) => {
+            eprintln!("warning: keyring lookup failed ({e:#}); v11 cookies will be skipped");
+            None
+        }
+    };
+    Ok(Keys {
+        v10: Some(derive_key(b"peanuts", 1)),
+        v11,
+    })
+}
+
+#[cfg(target_os = "macos")]
+async fn keys(browser: Browser) -> Result<Keys> {
+    // Every sync and download reads cookies, and unless the user clicked
+    // Always Allow, every Keychain read shows a dialog. So keep the key for
+    // the rest of the run. The lock is held across the read so that two
+    // readers at once wait for one dialog rather than showing two.
+    static KEYS: tokio::sync::Mutex<Option<HashMap<&'static str, [u8; 16]>>> =
+        tokio::sync::Mutex::const_new(None);
+    let mut known = KEYS.lock().await;
+    let known = known.get_or_insert_with(HashMap::new);
+    let (service, account) = browser.keychain_item();
+    let key = if let Some(key) = known.get(service) {
+        *key
+    } else {
+        // Blocks until the user answers the dialog, so off the runtime.
+        let password = tokio::task::spawn_blocking(move || {
+            security_framework::passwords::get_generic_password(service, account)
+        })
+        .await?
+        .with_context(|| {
+            format!("reading '{service}' from the Keychain (was Joyscroller denied access?)")
+        })?;
+        let key = derive_key(&password, 1003);
+        known.insert(service, key);
+        key
+    };
+    Ok(Keys {
+        v10: Some(key),
+        v11: None,
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[expect(clippy::unused_async, reason = "matches the Linux and macOS versions")]
+async fn keys(_browser: Browser) -> Result<Keys> {
+    anyhow::bail!("reading browser logins isn't supported on this OS yet")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn derive_key(password: &[u8], iterations: u32) -> [u8; 16] {
+    pbkdf2::pbkdf2_hmac_array::<sha1::Sha1, 16>(password, b"saltysalt", iterations)
 }
 
 fn decrypt(key: &[u8; 16], ciphertext: &[u8], host: &str, db_version: i64) -> Result<String> {
@@ -176,6 +297,7 @@ fn decrypt(key: &[u8; 16], ciphertext: &[u8], host: &str, db_version: i64) -> Re
     Ok(String::from_utf8(plain.to_vec())?)
 }
 
+#[cfg(target_os = "linux")]
 async fn keyring_password(browser: Browser) -> Result<Vec<u8>> {
     use secret_service::{EncryptionType, SecretService};
 
@@ -242,14 +364,14 @@ mod tests {
 
     #[test]
     fn decrypts_pre_v24_value() {
-        let key = derive_key(b"peanuts");
+        let key = derive_key(b"peanuts", 1);
         let ct = encrypt(&key, b"hello");
         assert_eq!(decrypt(&key, &ct, ".youtube.com", 23).unwrap(), "hello");
     }
 
     #[test]
     fn strips_host_hash_from_v24_value() {
-        let key = derive_key(b"peanuts");
+        let key = derive_key(b"peanuts", 1);
         let mut plain = Sha256::digest(".youtube.com").to_vec();
         plain.extend_from_slice(b"hello");
         let ct = encrypt(&key, &plain);
@@ -258,8 +380,8 @@ mod tests {
 
     #[test]
     fn wrong_key_fails() {
-        let ct = encrypt(&derive_key(b"peanuts"), b"hello");
-        assert!(decrypt(&derive_key(b"walnuts"), &ct, ".youtube.com", 23).is_err());
+        let ct = encrypt(&derive_key(b"peanuts", 1), b"hello");
+        assert!(decrypt(&derive_key(b"walnuts", 1), &ct, ".youtube.com", 23).is_err());
     }
 
     #[test]
