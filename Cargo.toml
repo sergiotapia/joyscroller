@@ -19,7 +19,6 @@ liblzma = { version = "0.4.8", features = ["static"] }
 pbkdf2 = "0.13.0"
 regex = "1.13.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-secret-service = { version = "5.2.0", features = ["rt-tokio-crypto-rust"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
@@ -31,6 +30,13 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
 ureq = "3.4.2"
 zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# Where each OS keeps the browser's cookie password.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "5.2.0", features = ["rt-tokio-crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7.0", default-features = false }
 
 [profile.release]
 # Debug symbols triple the download size, and users never debug the app.

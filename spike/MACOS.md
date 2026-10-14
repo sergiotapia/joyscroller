@@ -71,22 +71,14 @@ yt-dlp, ffmpeg and bun, keeps its data in the right folders, opens its UI,
 hands a second launch over to the running copy, and turns off from the UI.
 The `Package` workflow's smoke test checks all of that on every push.
 
-Not done: **reading browser logins on macOS**, so a Mac build can't sync
-yet. That's yours, in `src/browser.rs`, which is Linux-only today:
-
-- where each browser keeps its profile on macOS (under
-  `~/Library/Application Support`, e.g. `BraveSoftware/Brave-Browser`,
-  `Google/Chrome`, `Microsoft Edge`),
-- getting the browser's key from the Keychain, and decrypting with it (the
-  findings comment on #13 has the scheme the probe confirmed),
-- finding the browser's executable for the headless TikTok and Instagram
-  listing (`Browser::executable`, which only looks on `PATH`), in
-  `/Applications/<Browser>.app/Contents/MacOS/`,
-- making `secret-service` a Linux-only dependency in `Cargo.toml`.
-
-Turn 1's probe results will tell you what the Keychain prompt looks like
-from your Mac. Push your changes to this branch; CI checks them on both
-chips.
+Also done: **reading browser logins on macOS**, in `src/browser.rs`.
+It finds the profile under `~/Library/Application Support`, reads the key
+from the browser's "Safe Storage" Keychain item through Security.framework
+(so the dialog names Joyscroller, not `security`) and keeps it for the rest of
+the run. It also finds the browser for the headless listing in
+`/Applications` or `~/Applications`. Checked on a real Mac (Apple Silicon,
+Brave): YouTube likes list. TikTok and Instagram still need checking with a
+profile signed in to them.
 
 ## Turn 2: the app end to end
 
