@@ -67,9 +67,10 @@ cookie is harmless, but you can clear it in each browser's settings.
 
 The Mac release is a `.dmg` per chip (`macos-arm64` for Apple Silicon,
 `macos-x86_64` for Intel) holding `Joyscroller.app`. Like
-[obs-rust's](https://github.com/obs-rust/obs-studio/releases), it's ad-hoc
-signed rather than signed with an Apple Developer ID, so macOS blocks it the
-first time. The app has no window and no Dock icon: it opens its UI in the
+[obs-rust's](https://github.com/obs-rust/obs-studio/releases), it's unsigned:
+no Apple Developer ID and no notarization, ever. Apple Silicon only runs code
+with some signature, so the build gives it the free ad-hoc one, which needs no
+account. macOS blocks it the first time. The app has no window and no Dock icon: it opens its UI in the
 browser. Downloads go to `~/Movies/Joyscroller`, and everything else to
 `~/Library/Application Support/Joyscroller`.
 
@@ -91,8 +92,8 @@ a user's would, which matters for step 1.
    browser's Safe Storage key. Click **Always Allow** this time, since it's the
    app. Quit from the UI and relaunch: there should be no second prompt. Then
    install a newer build over it and launch again, and note whether it prompts
-   again. If every update prompts, that's the case for signing with a
-   Developer ID.
+   again. An unsigned app probably prompts after every update. That's
+   expected; note it so the release notes can say so.
 4. **Tools.** Run `xattr -l ~/Library/Application\ Support/Joyscroller/tools/*`.
    The fetched yt-dlp, ffmpeg and bun shouldn't have `com.apple.quarantine`.
    Check the log for tool errors.
