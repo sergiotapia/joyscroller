@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- Every page now shows which version of Joyscroller is running, in the status bar at the bottom of the window, linking to that version's release notes. The version is also in the first line Joyscroller prints when it starts, and `joyscroller --version` prints it. ([#12](https://github.com/sergiotapia/joyscroller/issues/12))
+
 ## [0.3.0] - 2026-10-14
 
 ### Added

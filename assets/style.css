@@ -314,6 +314,7 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 }
 .statusbar > span { padding: 2px 8px; border: 1px solid; border-color: #a9a698 #fff #fff #a9a698; }
 .statusbar > span:first-child { flex: 1; }
+.statusbar a { color: inherit; }
 
 /* ---- Buttons, balloons, pager ------------------------------------------ */
 

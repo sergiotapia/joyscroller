@@ -39,6 +39,18 @@ pub const ADDR: &str = "127.0.0.1:4774";
 
 const PAGE_SIZE: usize = 50;
 
+/// The running version, in every page's status bar, linking to its release
+/// notes so a user can tell whether they already have a fix.
+const VERSION: &str = concat!(
+    "<a href=\"",
+    env!("CARGO_PKG_REPOSITORY"),
+    "/releases/tag/v",
+    env!("CARGO_PKG_VERSION"),
+    "\">v",
+    env!("CARGO_PKG_VERSION"),
+    "</a>"
+);
+
 /// The sidebar's platforms, as (stored name, display name).
 const PLATFORMS: [(&str, &str); 3] = [
     ("youtube", "YouTube"),
@@ -1234,7 +1246,7 @@ fn layout(frame: &Frame, main: &str) -> String {
          <div class=\"controls\" aria-hidden=\"true\"><span>_</span><span>□</span>\
          <a class=\"close\" href=\"/\" tabindex=\"-1\">✕</a></div></div>\n\
          <div class=\"window-body\">\n{main}</div>\n\
-         <div class=\"statusbar\"><span>{footer}</span><span>Local archive</span></div>\n\
+         <div class=\"statusbar\"><span>{footer}</span><span>Local archive</span><span>{VERSION}</span></div>\n\
          </main>\n\
          </div>\n\
          <footer class=\"taskbar\">\n\
@@ -2643,6 +2655,7 @@ mod tests {
             },
             "",
         );
+        assert!(page.contains(concat!("/releases/tag/v", env!("CARGO_PKG_VERSION"))));
         let css = |name| {
             let (.., body) = ASSETS.iter().find(|(file, ..)| *file == name).unwrap();
             std::str::from_utf8(body).unwrap()

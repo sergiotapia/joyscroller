@@ -22,7 +22,11 @@ use browser::Browser;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(name = "joyscroller", about = "Archive the videos you liked, forever.")]
+#[command(
+    name = "joyscroller",
+    version,
+    about = "Archive the videos you liked, forever."
+)]
 struct Cli {
     /// With no subcommand, start the app. The subcommands are developer tools.
     #[command(subcommand)]
@@ -332,7 +336,8 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
         }
     });
     eprintln!(
-        "joyscroller: open http://{}, syncing into {}, downloading into {} (Ctrl-C to stop)",
+        "joyscroller v{}: open http://{}, syncing into {}, downloading into {} (Ctrl-C to stop)",
+        env!("CARGO_PKG_VERSION"),
         web::ADDR,
         db_path.display(),
         media_root.display()
