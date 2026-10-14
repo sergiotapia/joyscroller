@@ -1,0 +1,62 @@
+# Spike for #1, #2 and #3: on real Linux, macOS and Windows machines, has
+# Chrome, Edge and Brave each store a cookie on their default profile, then
+# reports how it's encrypted, where the key lives, whether the database can be
+# read while the browser runs, and whether we can decrypt it. See
+# spike/cookie_probe.py.
+
+name: Cookie probe
+
+on:
+  pull_request:
+    paths: [".github/workflows/cookie-probe.yml", "spike/**"]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install cryptography
+
+      - name: Install Brave and the keyring tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+            https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" \
+            | sudo tee /etc/apt/sources.list.d/brave-browser-release.list
+          sudo apt-get update
+          sudo apt-get install -y brave-browser gnome-keyring libsecret-tools xvfb dbus-x11
+      - name: Install Brave (macOS)
+        if: runner.os == 'macOS'
+        run: brew install --cask brave-browser
+      - name: Install Brave (Windows)
+        if: runner.os == 'Windows'
+        run: choco install brave -y --no-progress
+
+      # Linux: a session bus with an unlocked gnome-keyring, as on a desktop,
+      # and a virtual display. XDG_CURRENT_DESKTOP makes Chromium pick the
+      # Secret Service rather than its fixed-key fallback.
+      - name: Probe (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -ec '
+            echo -n ci | gnome-keyring-daemon --unlock --components=secrets > /dev/null
+            XDG_CURRENT_DESKTOP=GNOME xvfb-run -a python spike/cookie_probe.py'
+      - name: Probe (macOS, Windows)
+        if: runner.os != 'Linux'
+        run: python spike/cookie_probe.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ matrix.os }}
+          path: report-*.json
