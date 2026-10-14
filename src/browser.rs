@@ -276,6 +276,7 @@ async fn keys(_browser: Browser) -> Result<Keys> {
     anyhow::bail!("reading browser logins isn't supported on this OS yet")
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn derive_key(password: &[u8], iterations: u32) -> [u8; 16] {
     pbkdf2::pbkdf2_hmac_array::<sha1::Sha1, 16>(password, b"saltysalt", iterations)
 }
