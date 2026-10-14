@@ -24,6 +24,12 @@ Run it before every commit. It's the Rust version of a `mix precommit` alias:
 
 You can run any step alone, e.g. `just lint`.
 
+## Other operating systems
+
+CI runs clippy and the tests on Linux, macOS and Windows for every pull request, and builds and smoke-tests the macOS and Windows downloads, so code behind `#[cfg(...)]` for another OS gets checked even if you only have Linux. Every build uses the Rust release in `rust-toolchain.toml`, so CI's lints match yours.
+
+To catch another OS's compile errors before pushing, you can type-check for it locally with [zig](https://ziglang.org) as the C compiler, since a few dependencies compile C. Add the target (`rustup target add x86_64-pc-windows-gnu` or `aarch64-apple-darwin`), point `CC_<target>` at a script running `zig cc -target x86_64-windows-gnu` (or `aarch64-macos`) that drops the `--target=` and `-arch` flags cc passes, and run `cargo clippy --target <target>`.
+
 ## Writing code
 
 - **Fix lints, don't silence them.** If a lint really is wrong for one spot, put `#[expect(clippy::name, reason = "...")]` on that item. Don't add a crate-wide `allow` without a good reason, written as a comment in `Cargo.toml`.

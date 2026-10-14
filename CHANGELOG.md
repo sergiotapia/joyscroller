@@ -4,6 +4,11 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- A red **Turn off** button at the end of the taskbar stops Joyscroller, along with any download in progress, after asking you to confirm.
+- Starting Joyscroller while it's already running opens the running copy in your browser, instead of stopping with an error about its address being in use.
+
 ### Fixed
 
 - Syncing with Microsoft Edge on Linux now reads all of your logins. Joyscroller looked for Edge's key in the keyring under the wrong name, so it skipped most of Edge's cookies.

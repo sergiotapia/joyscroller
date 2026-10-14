@@ -28,7 +28,7 @@ You need Linux and [Brave](https://brave.com), signed in to YouTube, TikTok and 
 
 3. Open **http://127.0.0.1:4774** and watch your likes roll in.
 
-Keep it running to stay up to date, and press Ctrl-C to stop it. Your library is saved right next to the app: `joyscroller.db` and a `downloads` folder. Move the folder and your library moves with it.
+Keep it running to stay up to date. To stop it, click **Turn off** at the end of its taskbar, or press Ctrl-C. Your library is saved right next to the app: `joyscroller.db` and a `downloads` folder. Move the folder and your library moves with it.
 
 Videos are saved as the platform serves them, at their best quality, and most come in formats only some browsers play. So Joyscroller also makes a `playback.mp4` beside each of those, in H.264 at the same resolution, which plays in any browser: on a phone, a tablet or a car. It works on one video at a time in the background, at low priority.
 
@@ -58,9 +58,9 @@ Then open **http://127.0.0.1:4774**. That runs against your real archive in `dat
 mkdir -p /tmp/joyscroller-dev && cp target/debug/joyscroller /tmp/joyscroller-dev/ && /tmp/joyscroller-dev/joyscroller
 ```
 
-The debugging subcommands (`likes`, `sync`, `download`, `cookies`) are listed in [AGENTS.md](AGENTS.md). They use the app's own yt-dlp and ffmpeg once it has fetched them, and otherwise whatever is on your `PATH`.
+The debugging subcommands (`likes`, `sync`, `download`, `cookies`, `tools`) are listed in [AGENTS.md](AGENTS.md). They use the app's own yt-dlp and ffmpeg once it has fetched them, and otherwise whatever is on your `PATH`.
 
-Pushing a version tag builds and publishes a release (see [.github/workflows/release.yml](.github/workflows/release.yml)). Run `just precommit` before every commit. [CONTRIBUTING.md](CONTRIBUTING.md) has the conventions, and [AGENTS.md](AGENTS.md) has the architecture and data model.
+CI checks every pull request on Linux, macOS and Windows and builds downloads for all three, smoke-testing each one. Pushing a version tag publishes them as a release (see [.github/workflows/release.yml](.github/workflows/release.yml)). Run `just precommit` before every commit. [CONTRIBUTING.md](CONTRIBUTING.md) has the conventions, and [AGENTS.md](AGENTS.md) has the architecture and data model.
 
 ## License
 
