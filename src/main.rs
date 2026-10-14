@@ -1,5 +1,6 @@
 mod browser;
 mod db;
+mod desktop;
 mod download;
 mod filename;
 mod headless;
@@ -144,8 +145,12 @@ const FAILURES_BEFORE_PAUSE: usize = 3;
 /// executable is in, where people will look for them (if they move the app,
 /// moving those along is up to them). A build running from this repo's own
 /// `target/` uses `data/` in the repo instead, so `cargo clean` can't delete
-/// the archive. A dev binary copied elsewhere counts as an install.
+/// the archive. A dev binary copied elsewhere counts as an install. A macOS
+/// app bundle can't hold them, so it uses Application Support (`desktop.rs`).
 fn app_dir() -> Result<PathBuf> {
+    if desktop::bundle().is_some() {
+        return desktop::bundled_data_dir();
+    }
     let exe = std::env::current_exe().context("finding the app's executable")?;
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     if exe.starts_with(repo.join("target")) {
@@ -161,13 +166,34 @@ fn default_db() -> Result<PathBuf> {
     Ok(app_dir()?.join("joyscroller.db"))
 }
 
+/// The downloads folder: beside the database, or `~/Movies/Joyscroller` for
+/// a macOS app bundle, where Finder users look for videos.
 fn default_media() -> Result<PathBuf> {
+    if desktop::bundle().is_some() {
+        return desktop::bundled_media_dir();
+    }
     Ok(app_dir()?.join("downloads"))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// How long quitting waits for work in blocking threads (a tool download)
+/// before exiting anyway.
+const QUIT_GRACE: Duration = Duration::from_secs(5);
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(code) = desktop::run_logged_if_bundled()? {
+        std::process::exit(code);
+    }
+    let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
+    let result = runtime.block_on(run(cli));
+    // Shutting the runtime down drops every task, which kills the yt-dlp and
+    // ffmpeg processes they started (`kill_on_drop`) rather than leaving them
+    // running after the app has quit.
+    runtime.shutdown_timeout(QUIT_GRACE);
+    result
+}
+
+async fn run(cli: Cli) -> Result<()> {
     let Some(command) = cli.command else {
         return run_app(Browser::Brave, "Default", &default_db()?).await;
     };
@@ -310,18 +336,25 @@ async fn print_instagram_saves(browser: Browser, profile: &str, limit: usize) ->
 /// `SYNC_EVERY`. The pipeline's lanes download every liked video in the
 /// background, and the UI can ask it for one right away.
 async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> {
+    let url = format!("http://{}", web::ADDR);
+    // Bind before anything else: a second copy of the app stops here instead
+    // of syncing alongside the first, and shows the first one's UI instead,
+    // which is what launching the app again means on a desktop.
+    let listener = match tokio::net::TcpListener::bind(web::ADDR).await {
+        Ok(listener) => listener,
+        Err(e) if desktop::already_running(web::ADDR).await => {
+            eprintln!("joyscroller is already running ({e}); opening {url}");
+            desktop::open_in_browser(&url);
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("listening on {}", web::ADDR));
+        }
+    };
     let mut conn = db::open(db_path)?;
-    // Bind before anything else: a second copy of the app fails here instead
-    // of syncing alongside the first.
-    let listener = tokio::net::TcpListener::bind(web::ADDR)
-        .await
-        .with_context(|| {
-            format!(
-                "listening on {} (is joyscroller already running?)",
-                web::ADDR
-            )
-        })?;
     let (status, status_rx) = tokio::sync::watch::channel(web::SyncStatus::default());
+    // Set by the UI's Turn off button.
+    let (quit, mut quitting) = tokio::sync::watch::channel(false);
     // Made up front, so the folder is there to find before anything downloads.
     let media_root = default_media()?;
     std::fs::create_dir_all(&media_root)
@@ -340,17 +373,19 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
     let web_conn = db::open(db_path)?;
     let web_media = media_root.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::serve(listener, web_conn, status_rx, pipeline, web_media).await {
+        if let Err(e) = web::serve(listener, web_conn, status_rx, pipeline, web_media, quit).await {
             eprintln!("web: stopped: {e:#}");
         }
     });
     eprintln!(
-        "joyscroller v{}: open http://{}, syncing into {}, downloading into {} (Ctrl-C to stop)",
+        "joyscroller v{}: open {url}, syncing into {}, downloading into {} (Ctrl-C to stop)",
         env!("CARGO_PKG_VERSION"),
-        web::ADDR,
         db_path.display(),
         media_root.display()
     );
+    if desktop::opens_ui_on_launch() {
+        desktop::open_in_browser(&url);
+    }
 
     // Only downloads need ffmpeg and bun, so fetching them (ffmpeg is large)
     // doesn't hold up the first sync.
@@ -366,42 +401,65 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
     // full interval after it rather than firing back-to-back.
     let mut ticks = tokio::time::interval(SYNC_EVERY);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        ticks.tick().await;
-        // Listing YouTube likes needs yt-dlp. If fetching it fails (offline),
-        // the YouTube sync fails too, and both are tried again next tick.
-        if let Err(e) = tools::ensure_yt_dlp().await {
-            eprintln!("tools: {e:#}");
+    // Turning off from the UI ends the loop at once, mid-sync too: dropping a
+    // sync stops its yt-dlp or headless browser, and the next launch syncs
+    // again from where the database left off.
+    let run = async {
+        loop {
+            ticks.tick().await;
+            sync_round(browser, profile, &mut conn, &status, &mut yt_dlp_updated).await;
         }
-        if yt_dlp_updated.is_none_or(|at| at.elapsed() >= UPDATE_YT_DLP_EVERY) {
-            match tools::update_yt_dlp().await {
-                Ok(()) => yt_dlp_updated = Some(tokio::time::Instant::now()),
-                Err(e) => eprintln!("tools: {e:#}"),
+    };
+    tokio::select! {
+        () = run => {}
+        _ = quitting.wait_for(|quit| *quit) => {}
+    }
+    eprintln!("joyscroller: turned off from the UI");
+    Ok(())
+}
+
+/// One of the app's sync rounds: make sure yt-dlp is here and current, then
+/// pull new likes on every platform.
+async fn sync_round(
+    browser: Browser,
+    profile: &str,
+    conn: &mut rusqlite::Connection,
+    status: &tokio::sync::watch::Sender<web::SyncStatus>,
+    yt_dlp_updated: &mut Option<tokio::time::Instant>,
+) {
+    // Listing YouTube likes needs yt-dlp. If fetching it fails (offline),
+    // the YouTube sync fails too, and both are tried again next tick.
+    if let Err(e) = tools::ensure_yt_dlp().await {
+        eprintln!("tools: {e:#}");
+    }
+    if yt_dlp_updated.is_none_or(|at| at.elapsed() >= UPDATE_YT_DLP_EVERY) {
+        match tools::update_yt_dlp().await {
+            Ok(()) => *yt_dlp_updated = Some(tokio::time::Instant::now()),
+            Err(e) => eprintln!("tools: {e:#}"),
+        }
+    }
+    // A failed sync (offline, logged out) is logged, not fatal: the next
+    // tick tries again, and one platform failing doesn't skip the others.
+    for platform in [Platform::Youtube, Platform::Tiktok, Platform::Instagram] {
+        let name = platform.name();
+        status.send_modify(|s| s.set(name, web::SyncState::Running));
+        let state = match sync(platform, browser, profile, conn, false).await {
+            Ok((listed, added)) => {
+                eprintln!("{name}: listed {listed}, added {added} new");
+                web::SyncState::Done {
+                    at: db::now(),
+                    added,
+                }
             }
-        }
-        // A failed sync (offline, logged out) is logged, not fatal: the next
-        // tick tries again, and one platform failing doesn't skip the others.
-        for platform in [Platform::Youtube, Platform::Tiktok, Platform::Instagram] {
-            let name = platform.name();
-            status.send_modify(|s| s.set(name, web::SyncState::Running));
-            let state = match sync(platform, browser, profile, &mut conn, false).await {
-                Ok((listed, added)) => {
-                    eprintln!("{name}: listed {listed}, added {added} new");
-                    web::SyncState::Done {
-                        at: db::now(),
-                        added,
-                    }
+            Err(e) => {
+                eprintln!("{name}: sync failed: {e:#}");
+                web::SyncState::Failed {
+                    at: db::now(),
+                    error: format!("{e:#}"),
                 }
-                Err(e) => {
-                    eprintln!("{name}: sync failed: {e:#}");
-                    web::SyncState::Failed {
-                        at: db::now(),
-                        error: format!("{e:#}"),
-                    }
-                }
-            };
-            status.send_modify(|s| s.set(name, state));
-        }
+            }
+        };
+        status.send_modify(|s| s.set(name, state));
     }
 }
 

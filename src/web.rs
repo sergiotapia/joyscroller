@@ -100,6 +100,8 @@ struct App {
     pipeline: Pipeline,
     /// Where downloads are saved; each one's folder is relative to it.
     media_root: PathBuf,
+    /// Set to true by the Turn off button; the app loop and the server stop.
+    quit: Arc<watch::Sender<bool>>,
 }
 
 impl App {
@@ -119,12 +121,15 @@ pub async fn serve(
     status: watch::Receiver<SyncStatus>,
     pipeline: Pipeline,
     media_root: PathBuf,
+    quit: watch::Sender<bool>,
 ) -> Result<()> {
+    let mut quitting = quit.subscribe();
     let app = App {
         db: Arc::new(Mutex::new(conn)),
         status,
         pipeline,
         media_root,
+        quit: Arc::new(quit),
     };
     let router = Router::new()
         .route("/", get(list_page))
@@ -144,10 +149,40 @@ pub async fn serve(
         .route("/downloading", get(downloading_page))
         .route("/events", get(events))
         .route("/assets/{name}", get(asset))
+        .route("/quit", post(turn_off))
         .with_state(app);
-    axum::serve(listener, router).await?;
+    // Finish the "turned off" page before the listener closes.
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            // A closed channel means the app is exiting anyway.
+            let _ = quitting.wait_for(|quit| *quit).await;
+        })
+        .await?;
     Ok(())
 }
+
+/// The taskbar's Turn off button: stops the app, including any download or
+/// sync in progress, and leaves the browser a page saying so (the stylesheet
+/// may already be gone, so it's styled inline).
+async fn turn_off(State(app): State<App>, headers: HeaderMap) -> Result<Response, Failure> {
+    if !from_this_ui(&headers) {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "refusing to turn off for another site".into(),
+        ));
+    }
+    app.quit.send_replace(true);
+    Ok(Html(TURNED_OFF_PAGE).into_response())
+}
+
+const TURNED_OFF_PAGE: &str = "<!doctype html>\n\
+<html lang=\"en\">\n\
+<head><meta charset=\"utf-8\"><title>Turned off – joyscroller</title></head>\n\
+<body style=\"margin:0;min-height:100vh;display:grid;place-items:center;\
+background:#004e98;color:#fff;font:18px Tahoma,Verdana,sans-serif;text-align:center\">\n\
+<p>Joyscroller is turned off.<br>Open it again to keep archiving your likes.<br>\
+You can close this tab.</p>\n\
+</body>\n</html>\n";
 
 /// The stylesheets, scripts, fonts and pictures, as (name, type, contents).
 /// They're built into the executable, so the app stays a single file.
@@ -1253,6 +1288,9 @@ fn layout(frame: &Frame, main: &str) -> String {
          <a class=\"start\" href=\"/\"><img src=\"/assets/splat.webp\" alt=\"\">start</a>\n\
          <span class=\"task\">{icon}<span>{title}</span></span>\n\
          <span class=\"tray\" id=\"tray-clock\"></span>\n\
+         <form class=\"turn-off\" method=\"post\" action=\"/quit\" \
+         onsubmit=\"return confirm('Turn off Joyscroller? Syncing and downloads stop until you open it again.')\">\
+         <button type=\"submit\" title=\"Turn off Joyscroller\">⏻ Turn off</button></form>\n\
          </footer>\n\
          <script>{SCRIPT}</script>\n\
          </body>\n\

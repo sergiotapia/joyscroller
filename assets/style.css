@@ -564,6 +564,22 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   border-left: 1px solid #092e8e;
   box-shadow: inset 1px 0 1px #18bbff;
 }
+/* XP's red Turn Off Computer button, at the end of the tray. */
+.turn-off { height: 100%; margin: 0; }
+.turn-off button {
+  height: 100%;
+  padding: 0 12px;
+  border: 0;
+  border-left: 1px solid #092e8e;
+  background: linear-gradient(#e7845f 0%, #d9572f 15%, #c63c18 60%, #a92e0f 100%);
+  box-shadow: inset 1px 0 1px #f3a585;
+  color: #fff;
+  font: 700 12px var(--font-ui);
+  text-shadow: 1px 1px 1px rgba(0, 0, 0, .5);
+  cursor: pointer;
+}
+.turn-off button:hover { filter: brightness(1.12); }
+.turn-off button:active { box-shadow: inset 1px 1px 3px rgba(0, 0, 0, .5); }
 
 /* ---- The search box ------------------------------------------------------ */
 
