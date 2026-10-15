@@ -36,6 +36,7 @@ zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2
 secret-service = { version = "5.2.0", features = ["rt-tokio-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10.1"
 security-framework = { version = "3.7.0", default-features = false }
 
 [profile.release]

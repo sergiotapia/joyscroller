@@ -36,9 +36,10 @@ pub struct Headless {
 }
 
 impl Headless {
-    /// Start `browser` headless with `cookies` loaded and a blank tab open.
+    /// Start `browser` headless with `cookies` loaded and a blank tab open
+    /// (another browser, for one that can't run headless).
     pub async fn launch(browser: Browser, cookies: &[Cookie]) -> Result<Self> {
-        let exe = browser.executable()?;
+        let exe = browser.headless_executable()?;
         let profile = tempfile::Builder::new()
             .prefix("joyscroller-browser-")
             .tempdir()?;

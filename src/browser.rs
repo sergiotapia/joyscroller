@@ -10,7 +10,8 @@
 //!   macOS ask the user to allow Joyscroller, so it's read once per run.
 //!
 //! `sniff` picks which browser to read from: the one logged in to the most of
-//! YouTube, TikTok and Instagram.
+//! YouTube, TikTok and Instagram. TikTok and Instagram also run a browser
+//! headless (`headless.rs`), the same one unless it can't (Arc).
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
@@ -18,7 +19,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use anyhow::bail;
 use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
@@ -33,19 +34,70 @@ pub enum Browser {
     Chromium,
     Vivaldi,
     Edge,
+    Opera,
+    /// Opera's gaming edition, made for macOS and Windows only.
+    OperaGx,
+    /// Made for macOS and Windows only.
+    Arc,
 }
 
 impl Browser {
     /// Every browser Joyscroller can read logins from, the most widely used
     /// first: Chrome by far, then Edge (on every Windows PC and many Macs),
-    /// Brave, Chromium (the default on many Linux distros) and Vivaldi.
-    const MOST_USED_FIRST: [Browser; 5] = [
+    /// Opera, Brave, Opera GX, Arc, Chromium (the default on many Linux
+    /// distros) and Vivaldi.
+    const MOST_USED_FIRST: [Browser; 8] = [
         Browser::Chrome,
         Browser::Edge,
+        Browser::Opera,
         Browser::Brave,
+        Browser::OperaGx,
+        Browser::Arc,
         Browser::Chromium,
         Browser::Vivaldi,
     ];
+
+    /// The browser's name, as people know it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Browser::Brave => "Brave",
+            Browser::Chrome => "Chrome",
+            Browser::Chromium => "Chromium",
+            Browser::Vivaldi => "Vivaldi",
+            Browser::Edge => "Edge",
+            Browser::Opera => "Opera",
+            Browser::OperaGx => "Opera GX",
+            Browser::Arc => "Arc",
+        }
+    }
+
+    /// Whether the browser can run headless for TikTok and Instagram. Arc
+    /// can't: it only takes a DevTools connection when no other copy of it is
+    /// running, and crashes when asked to open a tab (`Target.createTarget`).
+    fn runs_headless(self) -> bool {
+        !matches!(self, Browser::Arc)
+    }
+
+    /// The program to run headless with this browser's logins: its own, or
+    /// for a browser that can't run headless, the most widely used installed
+    /// one that can. The logins are copied into a throwaway profile either
+    /// way, so any of them will do.
+    pub fn headless_executable(self) -> Result<PathBuf> {
+        if self.runs_headless() {
+            return self.executable();
+        }
+        Browser::MOST_USED_FIRST
+            .into_iter()
+            .filter(|browser| browser.runs_headless())
+            .find_map(|browser| browser.executable().ok())
+            .ok_or_else(|| {
+                anyhow!(
+                    "{} can't run in the background, which TikTok and Instagram need; \
+                     install Chrome too",
+                    self.name()
+                )
+            })
+    }
 
     #[cfg(not(target_os = "macos"))]
     fn config_dir(self) -> Result<PathBuf> {
@@ -56,6 +108,8 @@ impl Browser {
             Browser::Chromium => "chromium",
             Browser::Vivaldi => "vivaldi",
             Browser::Edge => "microsoft-edge",
+            Browser::Opera => "opera",
+            Browser::OperaGx | Browser::Arc => return not_made_for_this_os(self),
         }))
     }
 
@@ -69,6 +123,9 @@ impl Browser {
             Browser::Chromium => "Chromium",
             Browser::Vivaldi => "Vivaldi",
             Browser::Edge => "Microsoft Edge",
+            Browser::Opera => "com.operasoftware.Opera",
+            Browser::OperaGx => "com.operasoftware.OperaGX",
+            Browser::Arc => "Arc/User Data",
         }))
     }
 
@@ -81,16 +138,20 @@ impl Browser {
             Browser::Chromium => &["chromium", "chromium-browser"],
             Browser::Vivaldi => &["vivaldi-stable", "vivaldi"],
             Browser::Edge => &["microsoft-edge-stable", "microsoft-edge"],
+            Browser::Opera => &["opera"],
+            Browser::OperaGx | Browser::Arc => return not_made_for_this_os(self),
         };
         crate::tools::on_path(names).ok_or_else(|| anyhow!("none of {names:?} is on PATH"))
     }
 
     /// The browser's program inside its app bundle, in /Applications or the
-    /// user's own ~/Applications.
+    /// user's own ~/Applications. The bundle names its program, which isn't
+    /// always named after the app.
     #[cfg(target_os = "macos")]
     pub fn executable(self) -> Result<PathBuf> {
-        let app = self.mac_app_name();
-        let inside = format!("{app}.app/Contents/MacOS/{app}");
+        use core_foundation::{bundle::CFBundle, url::CFURL};
+
+        let app = format!("{}.app", self.mac_app_name());
         let folders = [
             Some(PathBuf::from("/Applications")),
             dirs::home_dir().map(|home| home.join("Applications")),
@@ -98,9 +159,15 @@ impl Browser {
         folders
             .into_iter()
             .flatten()
-            .map(|folder| folder.join(&inside))
-            .find(|candidate| candidate.is_file())
-            .ok_or_else(|| anyhow!("{app}.app is in neither /Applications nor ~/Applications"))
+            .map(|folder| folder.join(&app))
+            .filter(|bundle| bundle.is_dir())
+            .find_map(|bundle| {
+                CFBundle::new(CFURL::from_path(bundle, true)?)?
+                    .executable_url()?
+                    .to_path()
+            })
+            .filter(|program| program.is_file())
+            .ok_or_else(|| anyhow!("{app} is in neither /Applications nor ~/Applications"))
     }
 
     /// The app's name on macOS, which is also its Keychain item's account.
@@ -112,11 +179,17 @@ impl Browser {
             Browser::Chromium => "Chromium",
             Browser::Vivaldi => "Vivaldi",
             Browser::Edge => "Microsoft Edge",
+            Browser::Opera => "Opera",
+            Browser::OperaGx => "Opera GX",
+            Browser::Arc => "Arc",
         }
     }
 
     /// The Keychain item holding the cookie password, as (service, account).
     /// Checked on a real Mac for Brave and Edge, and on CI's Macs for Chrome.
+    /// Opera's is yt-dlp's. Arc's and Opera GX's services are from users'
+    /// reports, and their accounts are guesses, so `keychain_password` falls
+    /// back to finding the item by service alone.
     #[cfg(target_os = "macos")]
     fn keychain_item(self) -> (&'static str, &'static str) {
         match self {
@@ -125,6 +198,9 @@ impl Browser {
             Browser::Chromium => ("Chromium Safe Storage", "Chromium"),
             Browser::Vivaldi => ("Vivaldi Safe Storage", "Vivaldi"),
             Browser::Edge => ("Microsoft Edge Safe Storage", "Microsoft Edge"),
+            // Opera GX shares Opera's item.
+            Browser::Opera | Browser::OperaGx => ("Opera Safe Storage", "Opera"),
+            Browser::Arc => ("Arc Safe Storage", "Arc"),
         }
     }
 
@@ -135,11 +211,22 @@ impl Browser {
         match self {
             Browser::Brave => "brave",
             Browser::Chrome => "chrome",
-            // Edge keeps Chromium's own name rather than its brand.
-            Browser::Chromium | Browser::Edge => "chromium",
+            // Edge and Opera (per yt-dlp) keep Chromium's own name rather
+            // than their brand. Opera GX and Arc never get here, having no
+            // Linux config folder.
+            Browser::Chromium
+            | Browser::Edge
+            | Browser::Opera
+            | Browser::OperaGx
+            | Browser::Arc => "chromium",
             Browser::Vivaldi => "vivaldi",
         }
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn not_made_for_this_os<T>(browser: Browser) -> Result<T> {
+    Err(anyhow!("{} isn't made for this OS", browser.name()))
 }
 
 #[derive(Debug, Clone)]
@@ -218,14 +305,24 @@ pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Resul
 
 /// The profile's cookie database, which moved into `Network/` in Chromium 96.
 fn cookie_db(browser: Browser, profile: &str) -> Result<PathBuf> {
-    let profile_dir = browser.config_dir()?.join(profile);
-    [
+    let config_dir = browser.config_dir()?;
+    let profile_dir = config_dir.join(profile);
+    let mut candidates = vec![
         profile_dir.join("Network/Cookies"),
         profile_dir.join("Cookies"),
-    ]
-    .into_iter()
-    .find(|p| p.exists())
-    .ok_or_else(|| anyhow!("no cookie database under {}", profile_dir.display()))
+    ];
+    // Opera used to keep its only profile in the top folder rather than in
+    // `Default/`, and profiles from then are still there.
+    if matches!(browser, Browser::Opera | Browser::OperaGx) {
+        candidates.extend([
+            config_dir.join("Network/Cookies"),
+            config_dir.join("Cookies"),
+        ]);
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| anyhow!("no cookie database under {}", profile_dir.display()))
 }
 
 /// Opens a copy of the cookie database at `db_path`, since the browser holds
@@ -258,36 +355,38 @@ const LOGINS: [(&str, &str, &[&str]); 3] = [
 /// browser to be found, it's Chrome, whose errors at least say what's missing.
 pub fn sniff(profile: &str) -> Browser {
     let found = Browser::MOST_USED_FIRST.into_iter().filter_map(|browser| {
-        // No program means no headless browser for TikTok and Instagram, and
-        // no cookie database means the browser has never been opened.
+        // No program means it isn't installed (what's left of one that was is
+        // stale), and no cookie database means it has never been opened.
         browser.executable().ok()?;
         let db = cookie_db(browser, profile).ok()?;
         match open_copy(&db).and_then(|(_copy, conn)| logged_in_sites(&conn)) {
             Ok(sites) => Some((browser, sites)),
             Err(e) => {
-                eprintln!("warning: couldn't read {browser:?}'s logins: {e:#}");
+                eprintln!("warning: couldn't read {}'s logins: {e:#}", browser.name());
                 None
             }
         }
     });
     let Some((browser, sites)) = most_logged_in(found) else {
+        let names: Vec<&str> = Browser::MOST_USED_FIRST.iter().map(|b| b.name()).collect();
         eprintln!(
-            "warning: found no Chrome, Edge, Brave, Chromium or Vivaldi with a {profile} \
-             profile; install one, log in to YouTube, TikTok or Instagram in it, and \
-             restart Joyscroller"
+            "warning: found none of {} with a {profile} profile; install one, log in to \
+             YouTube, TikTok or Instagram in it, and restart Joyscroller",
+            names.join(", ")
         );
         return Browser::Chrome;
     };
+    let name = browser.name();
     if sites.is_empty() {
         eprintln!(
-            "warning: using {browser:?}, which isn't logged in to YouTube, TikTok or \
-             Instagram; log in to them in your browser and restart Joyscroller"
+            "warning: using {name}, which isn't logged in to YouTube, TikTok or Instagram; \
+             log in to them in your browser and restart Joyscroller"
         );
     } else {
-        eprintln!(
-            "browser: using {browser:?}, logged in to {}",
-            sites.join(", ")
-        );
+        eprintln!("browser: using {name}, logged in to {}", sites.join(", "));
+    }
+    if let Err(e) = browser.headless_executable() {
+        eprintln!("warning: {e:#}");
     }
     browser
 }
@@ -361,13 +460,11 @@ async fn keys(browser: Browser) -> Result<Keys> {
         *key
     } else {
         // Blocks until the user answers the dialog, so off the runtime.
-        let password = tokio::task::spawn_blocking(move || {
-            security_framework::passwords::get_generic_password(service, account)
-        })
-        .await?
-        .with_context(|| {
-            format!("reading '{service}' from the Keychain (was Joyscroller denied access?)")
-        })?;
+        let password = tokio::task::spawn_blocking(move || keychain_password(service, account))
+            .await?
+            .with_context(|| {
+                format!("reading '{service}' from the Keychain (was Joyscroller denied access?)")
+            })?;
         let key = derive_key(&password, 1003);
         known.insert(service, key);
         key
@@ -376,6 +473,32 @@ async fn keys(browser: Browser) -> Result<Keys> {
         v10: Some(key),
         v11: None,
     })
+}
+
+/// The password in the Keychain's generic password item for `service` and
+/// `account`, or failing that, the first one for `service`, since some
+/// browsers' accounts are only guesses (`Browser::keychain_item`).
+#[cfg(target_os = "macos")]
+fn keychain_password(service: &str, account: &str) -> Result<Vec<u8>> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+
+    /// `errSecItemNotFound`.
+    const NOT_FOUND: i32 = -25300;
+    match security_framework::passwords::get_generic_password(service, account) {
+        Err(e) if e.code() == NOT_FOUND => {
+            let found = ItemSearchOptions::new()
+                .class(ItemClass::generic_password())
+                .service(service)
+                .load_data(true)
+                .limit(1)
+                .search()?;
+            match found.into_iter().next() {
+                Some(SearchResult::Data(password)) => Ok(password),
+                _ => bail!("no '{service}' item in the Keychain"),
+            }
+        }
+        found => Ok(found?),
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -561,6 +684,14 @@ mod tests {
             ("www.instagram.com", "sessionid", LATER),
         ]);
         assert_eq!(logged_in_sites(&conn).unwrap(), ["Instagram"]);
+    }
+
+    #[test]
+    fn sniffs_every_browser() {
+        assert_eq!(
+            Browser::MOST_USED_FIRST.len(),
+            Browser::value_variants().len()
+        );
     }
 
     #[test]
