@@ -9,6 +9,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 - Joyscroller now also keeps the posts you like on Instagram, not only the ones you save.
 - Instagram photos and carousels you save or like are kept too, not just videos: every picture at the size it was posted, and the song that plays over it. They play as a slideshow with their music, like TikTok's photo posts, and a carousel's videos play as you reach them. Photos you saved before this version are picked up on the first sync after you update. ([#14](https://github.com/sergiotapia/joyscroller/issues/14))
 
+### Changed
+
+- YouTube, TikTok and Instagram sync at the same time instead of one after another, so a long first sync of one doesn't hold up the others.
+
 ## [0.7.0] - 2026-10-15
 
 ### Added

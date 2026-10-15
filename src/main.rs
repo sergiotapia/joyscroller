@@ -429,20 +429,39 @@ async fn run_app(profile: &str, db_path: &Path) -> Result<()> {
             tokio::time::sleep(SYNC_EVERY).await;
         }
     });
-    let mut yt_dlp_updated: Option<tokio::time::Instant> = None;
-
-    // The first tick fires immediately. If a sync overruns the interval, wait a
-    // full interval after it rather than firing back-to-back.
-    let mut ticks = tokio::time::interval(SYNC_EVERY);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Turning off from the UI ends the loop at once, mid-sync too: dropping a
-    // sync stops its yt-dlp or headless browser, and the next launch syncs
+    // Each platform syncs on its own schedule, with its own connection (WAL
+    // lets them write in turn), so a slow one, such as a first full read of
+    // a long list, doesn't hold up the others.
+    let mut tiktok_conn = db::open(db_path)?;
+    let mut instagram_conn = db::open(db_path)?;
+    // Turning off from the UI ends the loops at once, mid-sync too: dropping
+    // a sync stops its yt-dlp or headless browser, and the next launch syncs
     // again from where the database left off.
     let run = async {
-        loop {
-            ticks.tick().await;
-            sync_round(browser, profile, &mut conn, &status, &mut yt_dlp_updated).await;
-        }
+        // Boxed: each sync's future holds a whole listing's state, and three
+        // side by side would make this function's future very large.
+        let youtube = Box::pin(sync_loop(
+            Platform::Youtube,
+            browser,
+            profile,
+            &mut conn,
+            &status,
+        ));
+        let tiktok = Box::pin(sync_loop(
+            Platform::Tiktok,
+            browser,
+            profile,
+            &mut tiktok_conn,
+            &status,
+        ));
+        let instagram = Box::pin(sync_loop(
+            Platform::Instagram,
+            browser,
+            profile,
+            &mut instagram_conn,
+            &status,
+        ));
+        tokio::join!(youtube, tiktok, instagram);
     };
     tokio::select! {
         () = run => {}
@@ -452,49 +471,71 @@ async fn run_app(profile: &str, db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// One of the app's sync rounds: make sure yt-dlp is here and current, then
-/// pull new likes on every platform.
-async fn sync_round(
+/// One platform's syncs: one right away, then every `SYNC_EVERY`. If a sync
+/// overruns the interval, the next waits a full interval after it rather
+/// than firing straight away.
+async fn sync_loop(
+    platform: Platform,
     browser: Browser,
     profile: &str,
     conn: &mut rusqlite::Connection,
     status: &tokio::sync::watch::Sender<web::SyncStatus>,
-    yt_dlp_updated: &mut Option<tokio::time::Instant>,
 ) {
-    // Listing YouTube likes needs yt-dlp. If fetching it fails (offline),
-    // the YouTube sync fails too, and both are tried again next tick.
+    let mut ticks = tokio::time::interval(SYNC_EVERY);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut yt_dlp_updated: Option<tokio::time::Instant> = None;
+    loop {
+        ticks.tick().await;
+        if matches!(platform, Platform::Youtube) {
+            prepare_yt_dlp(&mut yt_dlp_updated).await;
+        }
+        sync_and_report(platform, browser, profile, conn, status).await;
+    }
+}
+
+/// Make sure yt-dlp is here, and current once a day. Listing YouTube likes
+/// needs it. If fetching it fails (offline), the YouTube sync fails too, and
+/// both are tried again next time.
+async fn prepare_yt_dlp(updated: &mut Option<tokio::time::Instant>) {
     if let Err(e) = tools::ensure_yt_dlp().await {
         eprintln!("tools: {e:#}");
     }
-    if yt_dlp_updated.is_none_or(|at| at.elapsed() >= UPDATE_YT_DLP_EVERY) {
+    if updated.is_none_or(|at| at.elapsed() >= UPDATE_YT_DLP_EVERY) {
         match tools::update_yt_dlp().await {
-            Ok(()) => *yt_dlp_updated = Some(tokio::time::Instant::now()),
+            Ok(()) => *updated = Some(tokio::time::Instant::now()),
             Err(e) => eprintln!("tools: {e:#}"),
         }
     }
-    // A failed sync (offline, logged out) is logged, not fatal: the next
-    // tick tries again, and one platform failing doesn't skip the others.
-    for platform in [Platform::Youtube, Platform::Tiktok, Platform::Instagram] {
-        let name = platform.name();
-        status.send_modify(|s| s.set(name, web::SyncState::Running));
-        let state = match sync(platform, browser, profile, conn, false).await {
-            Ok((listed, added)) => {
-                eprintln!("{name}: listed {listed}, added {added} new");
-                web::SyncState::Done {
-                    at: db::now(),
-                    added,
-                }
+}
+
+/// Pull new likes on `platform`, telling the UI as it goes. A failed sync
+/// (offline, logged out) is logged, not fatal: the next one tries again.
+async fn sync_and_report(
+    platform: Platform,
+    browser: Browser,
+    profile: &str,
+    conn: &mut rusqlite::Connection,
+    status: &tokio::sync::watch::Sender<web::SyncStatus>,
+) {
+    let name = platform.name();
+    status.send_modify(|s| s.set(name, web::SyncState::Running));
+    let state = match sync(platform, browser, profile, conn, false).await {
+        Ok((listed, added)) => {
+            eprintln!("{name}: listed {listed}, added {added} new");
+            web::SyncState::Done {
+                at: db::now(),
+                added,
             }
-            Err(e) => {
-                eprintln!("{name}: sync failed: {e:#}");
-                web::SyncState::Failed {
-                    at: db::now(),
-                    error: format!("{e:#}"),
-                }
+        }
+        Err(e) => {
+            eprintln!("{name}: sync failed: {e:#}");
+            web::SyncState::Failed {
+                at: db::now(),
+                error: format!("{e:#}"),
             }
-        };
-        status.send_modify(|s| s.set(name, state));
-    }
+        }
+    };
+    status.send_modify(|s| s.set(name, state));
 }
 
 /// Download up to `limit` queued videos. Returns how many were attempted.
