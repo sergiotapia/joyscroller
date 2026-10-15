@@ -38,10 +38,14 @@ video-player, audio-player, media-controls { display: contents; }
 
 /* ---- The screen --------------------------------------------------------- */
 
+/* The screen fills the casing's hole, which runs the casing's whole width:
+   a video narrower than the casing (a portrait one, under its min-width)
+   sits in the middle with dark bars beside it, not the page behind. */
 .player-screen {
   position: relative;
   display: grid;
   place-items: center;
+  justify-self: stretch;
   max-width: 100%;
   overflow: hidden;
   border-radius: 14px;

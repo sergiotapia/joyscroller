@@ -14,6 +14,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 - YouTube, TikTok and Instagram sync at the same time instead of one after another, so a long first sync of one doesn't hold up the others.
 - Your TikTok and Instagram likes show up in the library as each page of them is read, instead of only once a sync has read them all. A sync that's stopped partway, by turning Joyscroller off or a lost connection, carries on where it left off the next time.
 
+### Fixed
+
+- A tall video, like most of TikTok's, no longer shows a white gap between it and the player's purple frame; the screen stays dark on either side of it.
+
 ## [0.7.0] - 2026-10-15
 
 ### Added
