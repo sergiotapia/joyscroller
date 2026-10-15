@@ -4,10 +4,15 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-15
+
+### Added
+
+- Joyscroller now also reads your logins from Firefox and Opera, and on a Mac from Opera GX and Arc. Firefox and Arc can't open TikTok and Instagram unseen in the background, so with them Joyscroller uses another browser you have installed, or the first time downloads its own hidden copy of Chrome (about 125 MB).
+
 ### Changed
 
 - Joyscroller no longer needs Brave. Each time it starts, it looks for every browser it supports and reads your logins from the one logged in to the most of YouTube, TikTok and Instagram. To switch browsers, log in with the new one and restart Joyscroller.
-- Joyscroller now also reads your logins from Firefox and Opera, and on a Mac from Opera GX and Arc. Firefox and Arc can't open TikTok and Instagram unseen in the background, so with them Joyscroller uses another browser you have installed, or the first time downloads its own hidden copy of Chrome (about 125 MB).
 
 ## [0.5.0] - 2026-10-14
 
@@ -71,7 +76,8 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/sergiotapia/joyscroller/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/sergiotapia/joyscroller/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sergiotapia/joyscroller/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sergiotapia/joyscroller/compare/v0.2.0...v0.3.0
