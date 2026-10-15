@@ -317,7 +317,11 @@ async fn print_youtube_likes(browser: Browser, profile: &str, limit: usize) -> R
 async fn print_tiktok_likes(browser: Browser, profile: &str, limit: usize) -> Result<()> {
     let cookies = browser::cookies_for(browser, profile, "tiktok.com").await?;
     eprintln!("extracted {} tiktok.com cookies", cookies.len());
-    let videos = tiktok::liked_videos(browser, &cookies, limit, |_| true).await?;
+    let mut videos = Vec::new();
+    tiktok::liked_videos(browser, &cookies, None, |page, _| {
+        Ok(collect_up_to(&mut videos, page, limit))
+    })
+    .await?;
     eprintln!("\n{} liked videos:\n", videos.len());
     for (i, v) in videos.iter().enumerate() {
         let dur = v
@@ -337,13 +341,29 @@ async fn print_tiktok_likes(browser: Browser, profile: &str, limit: usize) -> Re
 async fn print_instagram_lists(browser: Browser, profile: &str, limit: usize) -> Result<()> {
     let cookies = browser::cookies_for(browser, profile, "instagram.com").await?;
     eprintln!("extracted {} instagram.com cookies", cookies.len());
-    let mut saved = Vec::new();
-    instagram::saved_posts(browser, &cookies, limit, |_| true, &mut saved).await?;
-    print_instagram_posts("saved", &saved);
-    let mut liked = Vec::new();
-    instagram::liked_posts(&cookies, limit, |_| true, &mut liked).await?;
-    print_instagram_posts("liked", &liked);
+    for (name, list) in [
+        ("saved", instagram::List::Saved),
+        ("liked", instagram::List::Liked),
+    ] {
+        let mut posts = Vec::new();
+        instagram::posts(list, browser, &cookies, None, |page, _| {
+            Ok(collect_up_to(&mut posts, page, limit))
+        })
+        .await?;
+        print_instagram_posts(name, &posts);
+    }
     Ok(())
+}
+
+/// Add a listed page to `items`, up to `limit` of them (0 for no limit).
+/// Returns whether to list more.
+fn collect_up_to<T>(items: &mut Vec<T>, page: Vec<T>, limit: usize) -> bool {
+    items.extend(page);
+    if limit > 0 && items.len() >= limit {
+        items.truncate(limit);
+        return false;
+    }
+    true
 }
 
 fn print_instagram_posts(list: &str, posts: &[instagram::Post]) {
@@ -632,12 +652,12 @@ async fn sync_youtube(
 
     let urls: Vec<String> = videos.iter().map(youtube::Video::url).collect();
     let raws: Vec<String> = videos.iter().map(|v| v.raw.to_string()).collect();
-    // yt-dlp lists newest first; insert oldest first so rowid follows like order.
+    // Stored as listed, newest first, all at once: yt-dlp can't carry on
+    // from where a listing was cut short, and YouTube's is quick to read again.
     let rows: Vec<db::NewVideo> = videos
         .iter()
         .zip(&urls)
         .zip(&raws)
-        .rev()
         .map(|((v, url), raw)| db::NewVideo {
             video_id: &v.id,
             url,
@@ -657,7 +677,29 @@ async fn sync_youtube(
     Ok((videos.len(), added))
 }
 
-/// Pull new TikTok likes into the database. Returns (listed, added).
+/// The lists read page by page through a listing (`db/listings.rs`), as
+/// `listings` and `full_syncs_due` name them.
+const TIKTOK_LIKED: &str = "tiktok liked";
+const INSTAGRAM_SAVED: &str = "instagram saved";
+const INSTAGRAM_LIKED: &str = "instagram liked";
+
+/// The part of a listed page to store: up to and including the item where
+/// `keep_going` says to stop. Also returns whether to go on.
+fn until_stop<T>(items: Vec<T>, mut keep_going: impl FnMut(&T) -> bool) -> (Vec<T>, bool) {
+    let mut kept = Vec::with_capacity(items.len());
+    for item in items {
+        let go_on = keep_going(&item);
+        kept.push(item);
+        if !go_on {
+            return (kept, false);
+        }
+    }
+    (kept, true)
+}
+
+/// Pull new TikTok likes into the database. Returns (listed, added). Each
+/// page is stored as it comes, and a listing cut short carries on where it
+/// got to on the next sync.
 async fn sync_tiktok(
     browser: Browser,
     profile: &str,
@@ -668,18 +710,39 @@ async fn sync_tiktok(
 
     // Re-read cookies on every sync: the browser rotates them while it runs.
     let cookies = browser::cookies_for(browser, profile, "tiktok.com").await?;
+    let mut listing = db::open_listing(conn, TIKTOK_LIKED, full)?;
     let known = db::video_ids(conn, "tiktok")?;
-    let mut keep_going = until_known(&known, full);
-    let videos = tiktok::liked_videos(browser, &cookies, 0, |v| keep_going(&v.id)).await?;
+    let mut keep_going = until_known(&known, listing.full);
+    let (mut listed, mut added) = (0, 0);
+    let cursor = listing.cursor.clone();
+    let read = tiktok::liked_videos(browser, &cookies, cursor.as_deref(), |videos, next| {
+        let (videos, go_on) = until_stop(videos, |v| keep_going(&v.id));
+        listed += videos.len();
+        added += store_tiktok_page(conn, &mut listing, &videos, next)?;
+        Ok(go_on)
+    })
+    .await;
+    if read.is_ok() {
+        db::finish_listing(conn, &listing)?;
+    }
+    db::finish_sync(conn, sync_id, added)?;
+    read?;
+    Ok((listed, added))
+}
 
+/// Store a page of TikTok likes through `listing`. Returns how many were new.
+fn store_tiktok_page(
+    conn: &mut rusqlite::Connection,
+    listing: &mut db::Listing,
+    videos: &[tiktok::Video],
+    next: Option<&str>,
+) -> Result<usize> {
     let urls: Vec<String> = videos.iter().map(tiktok::Video::url).collect();
     let raws: Vec<String> = videos.iter().map(|v| v.raw.to_string()).collect();
-    // Listed newest like first; insert oldest first so rowid follows like order.
     let rows: Vec<db::NewVideo> = videos
         .iter()
         .zip(&urls)
         .zip(&raws)
-        .rev()
         .map(|((v, url), raw)| db::NewVideo {
             video_id: &v.id,
             url,
@@ -696,18 +759,16 @@ async fn sync_tiktok(
             posted_at: v.posted_at,
         })
         .collect();
-    let added = db::insert_new(conn, "tiktok", &rows)?;
-    db::finish_sync(conn, sync_id, added)?;
-    Ok((videos.len(), added))
+    db::store_page(conn, "tiktok", listing, &rows, next)
 }
 
 /// Pull newly saved and liked Instagram posts into the database. Returns
 /// (listed, added). Instagram has two ways of keeping a post, saving it and
 /// liking it, and the archive holds both, as one row per post.
 ///
-/// The two lists are read one after the other, and each is stored as soon as
-/// it's read, so one failing (the liked list is read from the phone app's
-/// API, which Instagram could close to us) doesn't lose the other.
+/// The two lists are read one after the other, each stored page by page,
+/// so one failing (the liked list is read from the phone app's API, which
+/// Instagram could close to us) doesn't hold up the other.
 async fn sync_instagram(
     browser: Browser,
     profile: &str,
@@ -718,26 +779,28 @@ async fn sync_instagram(
     let cookies = browser::cookies_for(browser, profile, "instagram.com").await?;
     instagram::check_logged_in(&cookies)?;
     let sync_id = db::start_sync(conn, "instagram")?;
-
-    let saved_due = db::full_sync_due(conn, INSTAGRAM_SAVED)?;
-    let known = db::video_ids(conn, "instagram")?;
-    let mut keep_going = until_known(&known, full || saved_due);
-    let mut saved = Vec::new();
-    let saved_read =
-        instagram::saved_posts(browser, &cookies, 0, |p| keep_going(&p.code), &mut saved).await;
-    let mut added =
-        store_instagram_read(conn, INSTAGRAM_SAVED, &saved, &saved_read, full, saved_due)?;
-
-    let liked_due = db::full_sync_due(conn, INSTAGRAM_LIKED)?;
-    let known = db::video_ids(conn, "instagram")?;
-    let mut keep_going = until_known(&known, full || liked_due);
-    let mut liked = Vec::new();
-    let liked_read = instagram::liked_posts(&cookies, 0, |p| keep_going(&p.code), &mut liked).await;
-    added += store_instagram_read(conn, INSTAGRAM_LIKED, &liked, &liked_read, full, liked_due)?;
-
+    let (mut listed, mut added) = (0, 0);
+    let saved = sync_instagram_list(
+        instagram::List::Saved,
+        browser,
+        &cookies,
+        conn,
+        full,
+        (&mut listed, &mut added),
+    )
+    .await;
+    let liked = sync_instagram_list(
+        instagram::List::Liked,
+        browser,
+        &cookies,
+        conn,
+        full,
+        (&mut listed, &mut added),
+    )
+    .await;
     db::finish_sync(conn, sync_id, added)?;
-    match (saved_read, liked_read) {
-        (Ok(()), Ok(())) => Ok((saved.len() + liked.len(), added)),
+    match (saved, liked) {
+        (Ok(()), Ok(())) => Ok((listed, added)),
         (Err(e), Ok(())) => Err(e.context("reading the saved list")),
         (Ok(()), Err(e)) => Err(e.context("reading the liked list")),
         (Err(saved), Err(liked)) => Err(saved.context(format!(
@@ -746,48 +809,54 @@ async fn sync_instagram(
     }
 }
 
-/// Instagram's lists, as `full_syncs_due` names them.
-const INSTAGRAM_SAVED: &str = "instagram saved";
-const INSTAGRAM_LIKED: &str = "instagram liked";
-
-/// Store what a read of one of Instagram's lists found, `read` saying how it
-/// ended. Returns how many posts were new. `due` says the read was the full
-/// one `full_syncs_due` asked for, which a read that went all the way
-/// through settles.
-///
-/// A full read (`full` or `due`) that failed partway keeps what it found,
-/// since the next one starts over from the top and reads past it. An
-/// incremental one doesn't: storing only its newest posts would have the
-/// next read stop at them, above the older new ones this one never reached.
-fn store_instagram_read(
+/// Read one of Instagram's lists into the database, page by page, adding to
+/// `counts` (listed, added) as it goes. A list in `full_syncs_due` is read
+/// in full, and taken off once a read gets to its end.
+async fn sync_instagram_list(
+    list: instagram::List,
+    browser: Browser,
+    cookies: &[browser::Cookie],
     conn: &mut rusqlite::Connection,
-    list: &str,
-    posts: &[instagram::Post],
-    read: &Result<()>,
     full: bool,
-    due: bool,
-) -> Result<usize> {
-    if read.is_err() && !(full || due) {
-        return Ok(0);
+    counts: (&mut usize, &mut usize),
+) -> Result<()> {
+    let name = match list {
+        instagram::List::Saved => INSTAGRAM_SAVED,
+        instagram::List::Liked => INSTAGRAM_LIKED,
+    };
+    let due = db::full_sync_due(conn, name)?;
+    let mut listing = db::open_listing(conn, name, full || due)?;
+    let known = db::video_ids(conn, "instagram")?;
+    let mut keep_going = until_known(&known, listing.full);
+    let (listed, added) = counts;
+    let cursor = listing.cursor.clone();
+    instagram::posts(list, browser, cookies, cursor.as_deref(), |posts, next| {
+        let (posts, go_on) = until_stop(posts, |p| keep_going(&p.code));
+        *listed += posts.len();
+        *added += store_instagram_page(conn, &mut listing, &posts, next)?;
+        Ok(go_on)
+    })
+    .await?;
+    db::finish_listing(conn, &listing)?;
+    if due {
+        db::full_sync_done(conn, name)?;
     }
-    let added = store_instagram(conn, posts)?;
-    if read.is_ok() && due {
-        db::full_sync_done(conn, list)?;
-    }
-    Ok(added)
+    Ok(())
 }
 
-/// Store a list of Instagram posts, as listed (newest first). Returns how
-/// many were new.
-fn store_instagram(conn: &mut rusqlite::Connection, posts: &[instagram::Post]) -> Result<usize> {
+/// Store a page of Instagram posts through `listing`. Returns how many were new.
+fn store_instagram_page(
+    conn: &mut rusqlite::Connection,
+    listing: &mut db::Listing,
+    posts: &[instagram::Post],
+    next: Option<&str>,
+) -> Result<usize> {
     let urls: Vec<String> = posts.iter().map(instagram::Post::url).collect();
     let raws: Vec<String> = posts.iter().map(|p| p.raw.to_string()).collect();
-    // Listed newest first; insert oldest first so rowid follows save order.
     let rows: Vec<db::NewVideo> = posts
         .iter()
         .zip(&urls)
         .zip(&raws)
-        .rev()
         .map(|((p, url), raw)| db::NewVideo {
             video_id: &p.code,
             url,
@@ -803,7 +872,7 @@ fn store_instagram(conn: &mut rusqlite::Connection, posts: &[instagram::Post]) -
             posted_at: p.posted_at,
         })
         .collect();
-    db::insert_new(conn, "instagram", &rows)
+    db::store_page(conn, "instagram", listing, &rows, next)
 }
 
 #[cfg(test)]
@@ -821,6 +890,23 @@ mod tests {
         let results: Vec<bool> = known.iter().map(|id| keep_going(id)).collect();
         assert!(results[..STOP_AFTER_KNOWN - 1].iter().all(|&go| go));
         assert!(!results[STOP_AFTER_KNOWN - 1]);
+    }
+
+    #[test]
+    fn a_page_is_kept_up_to_where_the_listing_stops() {
+        let (kept, go_on) = until_stop(vec![1, 2, 3, 4], |&n| n != 2);
+        assert_eq!((kept, go_on), (vec![1, 2], false));
+        let (kept, go_on) = until_stop(vec![1, 3], |&n| n != 2);
+        assert_eq!((kept, go_on), (vec![1, 3], true));
+    }
+
+    #[test]
+    fn collects_up_to_the_limit() {
+        let mut items = Vec::new();
+        assert!(collect_up_to(&mut items, vec![1, 2], 3));
+        assert!(!collect_up_to(&mut items, vec![3, 4], 3));
+        assert_eq!(items, [1, 2, 3]);
+        assert!(collect_up_to(&mut items, vec![5], 0));
     }
 
     #[test]

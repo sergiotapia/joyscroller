@@ -1,5 +1,5 @@
-//! Liked videos: storing what a sync finds (insert-only, oldest first, so
-//! rowid order is like order), and reading them back for the UI.
+//! Liked videos: storing what a sync finds (insert-only, each with its place
+//! in like order, `like_order`), and reading them back for the UI.
 
 use std::collections::HashSet;
 
@@ -32,23 +32,37 @@ pub fn video_ids(conn: &Connection, platform: &str) -> Result<HashSet<String>> {
     Ok(ids)
 }
 
-/// Insert the videos we haven't seen before; for existing rows only
-/// `available` is refreshed. Pass them oldest-first so rowid order matches
-/// like order.
+/// Insert the videos we haven't seen before, a whole listing at once, as
+/// listed: newest first. They take a band of like order of their own (see
+/// `listings.rs`). For existing rows only `available` is refreshed.
 /// Returns how many were new.
 pub fn insert_new(conn: &mut Connection, platform: &str, videos: &[NewVideo]) -> Result<usize> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let top = super::listings::new_top(&tx)?;
+    let added = insert_rows(&tx, platform, videos, top)?;
+    tx.commit()?;
+    Ok(added)
+}
+
+/// Insert `videos` (newest first) in `tx`, the first at `like_order`
+/// `first` and each after it one lower. Returns how many were new.
+pub(super) fn insert_rows(
+    tx: &rusqlite::Transaction,
+    platform: &str,
+    videos: &[NewVideo],
+    first: i64,
+) -> Result<usize> {
     let added_at = now();
-    let tx = conn.transaction()?;
     let mut added = 0;
     {
         let mut insert = tx.prepare(
             "INSERT OR IGNORE INTO videos \
-             (platform, video_id, url, title, author_id, author_name, duration_seconds, available, listing_json, added_at, kind, posted_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             (platform, video_id, url, title, author_id, author_name, duration_seconds, available, listing_json, added_at, kind, posted_at, like_order) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?;
         let mut set_available =
             tx.prepare("UPDATE videos SET available = ?1 WHERE platform = ?2 AND video_id = ?3")?;
-        for v in videos {
+        for (v, like_order) in videos.iter().zip((0..).map(|n: i64| first - n)) {
             let inserted = insert.execute(params![
                 platform,
                 v.video_id,
@@ -62,6 +76,7 @@ pub fn insert_new(conn: &mut Connection, platform: &str, videos: &[NewVideo]) ->
                 added_at,
                 v.kind,
                 v.posted_at,
+                like_order,
             ])?;
             if inserted == 0 {
                 set_available.execute(params![v.available, platform, v.video_id])?;
@@ -69,16 +84,16 @@ pub fn insert_new(conn: &mut Connection, platform: &str, videos: &[NewVideo]) ->
             added += inserted;
         }
     }
-    tx.commit()?;
     Ok(added)
 }
 
 /// A stored video, as the web UI shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredVideo {
-    /// Insertion order, which is like order. The UI sorts by it and streams
-    /// rows past the last one a page has seen.
+    /// Insertion order. The UI streams rows past the last one a page has seen.
     pub rowid: i64,
+    /// Its place in like order: higher is more recently liked.
+    pub like_order: i64,
     pub platform: String,
     pub video_id: String,
     pub url: String,
@@ -101,7 +116,8 @@ pub(super) const VIDEO_COLUMNS: &str = "v.rowid, v.platform, v.video_id, v.url, 
      v.author_name, v.duration_seconds, v.available, v.kind, v.posted_at, v.added_at, \
      COALESCE(\
        (SELECT MIN(value) FROM json_each(d.files_json) WHERE value LIKE 'thumbnail.%'), \
-       (SELECT MIN(value) FROM json_each(d.files_json) WHERE value LIKE 'image-%'))";
+       (SELECT MIN(value) FROM json_each(d.files_json) WHERE value LIKE 'image-%')), \
+     v.like_order";
 
 /// The videos, each with its download if that has finished.
 pub(super) const VIDEO_TABLES: &str = "videos v LEFT JOIN downloads d ON d.platform = v.platform \
@@ -122,6 +138,7 @@ pub(super) fn video_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredVideo>
         posted_at: r.get(10)?,
         added_at: r.get(11)?,
         thumbnail: r.get(12)?,
+        like_order: r.get(13)?,
     })
 }
 
@@ -170,7 +187,7 @@ pub fn video(
                  WHERE v.platform = ?1 AND v.video_id = ?2"
             ),
             [platform, video_id],
-            |r| Ok((video_from_row(r)?, r.get(13)?)),
+            |r| Ok((video_from_row(r)?, r.get(14)?)),
         )
         .optional()?;
     Ok(found)
@@ -265,9 +282,9 @@ mod tests {
             &mut conn,
             "tiktok",
             &[
-                new_video("v", true),
-                new_video("p", true),
                 new_video("f", true),
+                new_video("p", true),
+                new_video("v", true),
             ],
         )
         .unwrap();

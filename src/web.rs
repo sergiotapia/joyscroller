@@ -1403,8 +1403,14 @@ function connect() {
     const row = template.content.firstElementChild;
     if (!rows || (page.platform && row.dataset.platform !== page.platform)) return;
     if (page.live === "1") {
+      // In like order, newest first. A sync stores a listing page by page,
+      // newest first, so a row can belong below others that came before it.
+      const order = Number(row.dataset.order);
+      const below = [...rows.rows].find((r) => Number(r.dataset.order) < order);
+      if (below) rows.insertBefore(row, below);
+      else if (rows.rows.length < Number(page.size)) rows.append(row);
+      else return;
       showTimes(row);
-      rows.prepend(row);
       while (rows.rows.length > Number(page.size)) rows.lastElementChild.remove();
       const empty = document.getElementById("empty");
       if (empty) empty.hidden = true;
@@ -1513,12 +1519,13 @@ fn video_row(video: &db::StoredVideo) -> String {
         video.duration_seconds.map(duration).unwrap_or_default()
     };
     format!(
-        "<tr data-platform=\"{platform}\" data-key=\"{platform}/{id}\"><td class=\"thumb\">{thumbnail}</td>\
+        "<tr data-platform=\"{platform}\" data-key=\"{platform}/{id}\" data-order=\"{order}\"><td class=\"thumb\">{thumbnail}</td>\
          <td class=\"title\"><a href=\"{href}\">{title}</a></td><td class=\"author\">{author}</td>\
          <td class=\"num\">{length}</td><td class=\"date\">{posted}</td><td class=\"date\">{added}</td>\
          <td class=\"source\"><span class=\"badge badge-{platform}\">{source}</span></td></tr>",
         platform = escape(&video.platform),
         id = escape(&video.video_id),
+        order = video.like_order,
         title = escape(&truncate(&short_title(video), 120)),
         author = escape(&author_label(video)),
         posted = video
@@ -2176,6 +2183,7 @@ mod tests {
             posted_at: None,
             added_at: 1_700_000_000,
             thumbnail: None,
+            like_order: 1,
         }
     }
 
@@ -2216,7 +2224,9 @@ mod tests {
     #[test]
     fn rows_escape_titles_and_tag_their_platform() {
         let row = video_row(&video("youtube", Some("<b>hi</b>")));
-        assert!(row.starts_with("<tr data-platform=\"youtube\" data-key=\"youtube/abc\">"));
+        assert!(row.starts_with(
+            "<tr data-platform=\"youtube\" data-key=\"youtube/abc\" data-order=\"1\">"
+        ));
         assert!(row.contains("badge-youtube"));
         assert!(row.contains("&lt;b&gt;hi&lt;/b&gt;"));
         assert!(row.contains("i.ytimg.com/vi/abc/"));
@@ -2236,7 +2246,7 @@ mod tests {
             };
             let row = video_row(&saved);
             assert!(row.contains(&format!(
-                "data-key=\"{platform}/abc\"><td class=\"thumb\"><a href=\"/videos/{platform}/abc\">\
+                "data-key=\"{platform}/abc\" data-order=\"1\"><td class=\"thumb\"><a href=\"/videos/{platform}/abc\">\
                  <img src=\"/videos/{platform}/abc/media/thumbnail.jpg\""
             )));
             assert!(!row.contains("nothumb") && !row.contains("i.ytimg.com"));

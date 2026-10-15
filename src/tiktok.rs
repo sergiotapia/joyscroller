@@ -94,56 +94,53 @@ struct Page {
     has_more: bool,
 }
 
-/// List liked videos, newest like first. `limit` of 0 means all of them.
-/// `keep_going` sees each video as it arrives; returning false stops the
-/// listing there (that video is still included), so callers can quit once
-/// they reach likes they already have.
+/// List liked videos page by page, newest like first, starting at `cursor`
+/// (None for the start of the list). `on_page` gets each page's videos and
+/// the cursor for the page after it (None after the last page), and
+/// returns whether to go on, so callers can store each page as it comes and
+/// quit once they reach likes they already have.
 ///
 /// A full listing is about one request per 30 likes; 5,000 likes take two
 /// minutes.
 pub async fn liked_videos(
     browser: Browser,
     cookies: &[Cookie],
-    limit: usize,
-    mut keep_going: impl FnMut(&Video) -> bool,
-) -> Result<Vec<Video>> {
+    cursor: Option<&str>,
+    mut on_page: impl FnMut(Vec<Video>, Option<&str>) -> Result<bool>,
+) -> Result<()> {
     // Checked up front so a user who doesn't use TikTok costs nothing: no
     // browser launch, and a clear message instead of a page that never loads.
     if !cookies.iter().any(|c| c.name == "sessionid") {
         bail!("not logged in to TikTok in this browser profile");
     }
     let mut tab = Headless::launch(browser, cookies).await?;
-    let result = list_liked(&mut tab, limit, &mut keep_going).await;
+    let result = list_liked(&mut tab, cursor, &mut on_page).await;
     tab.close().await;
     result
 }
 
 async fn list_liked(
     tab: &mut Headless,
-    limit: usize,
-    keep_going: &mut impl FnMut(&Video) -> bool,
-) -> Result<Vec<Video>> {
+    cursor: Option<&str>,
+    on_page: &mut impl FnMut(Vec<Video>, Option<&str>) -> Result<bool>,
+) -> Result<()> {
     tab.goto(START_PAGE, PAGE_READY).await?;
     let Value::String(sec_uid) = tab.eval(SEC_UID).await? else {
         bail!("not logged in to TikTok in this browser profile");
     };
 
-    let mut videos = Vec::new();
-    let mut cursor = "0".to_string();
+    let mut cursor = cursor.unwrap_or("0").to_string();
     loop {
         let page = fetch_page(tab, &sec_uid, &cursor).await?;
-        for video in page.videos {
-            let go_on = keep_going(&video);
-            videos.push(video);
-            if !go_on || videos.len() == limit {
-                return Ok(videos);
-            }
-        }
         // A cursor that doesn't move would fetch the same page forever.
-        if !page.has_more || page.cursor == cursor {
-            return Ok(videos);
+        let next = (page.has_more && page.cursor != cursor).then_some(page.cursor);
+        if !on_page(page.videos, next.as_deref())? {
+            return Ok(());
         }
-        cursor = page.cursor;
+        match next {
+            Some(next) => cursor = next,
+            None => return Ok(()),
+        }
     }
 }
 

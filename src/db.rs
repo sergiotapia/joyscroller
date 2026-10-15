@@ -3,7 +3,8 @@
 //! looked like when we first saw it; only `available` is refreshed on each
 //! sync, so a video that goes private later still has its title on file.
 //! Every query lives in this module and the ones under it, one per concern:
-//! `migrate` (the schema and its migrations), `videos`, `syncs`, `downloads`,
+//! `migrate` (the schema and its migrations), `videos`, `listings` (like
+//! order, and listings under way), `syncs`, `downloads`,
 //! `playback` (playback copies), `list` (the UI's pages and sorts) and
 //! `search` (two FTS5 indexes over each video's text, queried with what
 //! `query.rs` parses). Callers use what's re-exported here.
@@ -15,6 +16,7 @@ use rusqlite::Connection;
 
 mod downloads;
 mod list;
+mod listings;
 mod migrate;
 mod playback;
 mod search;
@@ -28,6 +30,7 @@ pub use downloads::{
     pending_downloads, record_download, record_download_failure,
 };
 pub use list::{Dir, Order, Sort, videos_count, videos_page};
+pub use listings::{Listing, finish_listing, open_listing, store_page};
 pub use migrate::init;
 use migrate::{back_up_before_migrating, refuse_newer};
 pub use playback::{

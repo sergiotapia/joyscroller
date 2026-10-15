@@ -64,7 +64,8 @@ const PENDING_WHERE: &str = "v.available = 1 AND d.downloaded_at IS NULL \
           OR d.last_attempt_at + MIN(3600 << MIN(d.failures - 1, 20), ?1) <= ?2)";
 
 /// Up to `limit` videos to download next, on `platform` or all of them, most
-/// recently stored first, so new likes don't wait behind the backlog. Skips
+/// recently liked first (by `like_order`), so new likes don't wait behind
+/// the backlog. Skips
 /// videos that are unavailable, already downloaded, or waiting out a retry
 /// delay.
 pub fn pending_downloads(
@@ -75,7 +76,7 @@ pub fn pending_downloads(
     let mut stmt = conn.prepare(&format!(
         "SELECT {PENDING_COLUMNS} FROM videos v \
          LEFT JOIN downloads d ON d.platform = v.platform AND d.video_id = v.video_id \
-         WHERE {PENDING_WHERE} ORDER BY v.rowid DESC LIMIT ?4"
+         WHERE {PENDING_WHERE} ORDER BY v.like_order DESC, v.rowid DESC LIMIT ?4"
     ))?;
     let rows = stmt
         .query_map(
@@ -264,10 +265,11 @@ mod tests {
         insert_new(
             &mut conn,
             "youtube",
+            // Listed newest first.
             &[
-                new_video("old", true),
-                new_video("gone", false),
                 new_video("new", true),
+                new_video("gone", false),
+                new_video("old", true),
             ],
         )
         .unwrap();
@@ -281,7 +283,7 @@ mod tests {
         insert_new(
             &mut conn,
             "tiktok",
-            &[new_video("t1", true), new_video("t2", true)],
+            &[new_video("t2", true), new_video("t1", true)],
         )
         .unwrap();
         let ids = |platform| -> Vec<String> {

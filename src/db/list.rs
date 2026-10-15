@@ -1,5 +1,5 @@
 //! The video list: a page of videos, filtered by platform and search, in a
-//! column's order. Each column sort has two indexes (migration 2), and
+//! column's order. Each column sort has two indexes (migration 6), and
 //! `order_by` must match them term for term; a test checks the query plans.
 
 use anyhow::Result;
@@ -20,7 +20,7 @@ pub enum Sort {
     Author,
     Length,
     Posted,
-    /// Like order, which is rowid order.
+    /// Like order (`like_order`).
     Added,
 }
 
@@ -47,21 +47,21 @@ impl Order {
 /// The `ORDER BY` terms for `order`, over `videos v` joined to `matches m`
 /// when `searching`. Rows without the value (no caption, a YouTube video
 /// whose post date isn't known until it's downloaded) go last either way.
-/// Every order ends in the rowid, so equal values keep one order and paging
-/// neither skips nor repeats a row. Each column order is term for term one
-/// of the indexes migration 2 made, so SQLite reads it from the index
-/// instead of sorting the table.
+/// Every order ends in like order and then the rowid, so equal values keep
+/// one order and paging neither skips nor repeats a row. Each column order
+/// is term for term one of the indexes migration 6 made (every index ends in
+/// the rowid), so SQLite reads it from the index instead of sorting the table.
 fn order_by(order: Order, searching: bool) -> String {
     // Names compare without regard to case, so "alice" doesn't sort after
     // "Zed". The collation goes on the sort term only: `title IS NULL` must
     // read exactly as the index has it.
     let (column, collate) = match order.sort {
-        Sort::Best if searching => return "m.score, v.rowid DESC".into(),
-        Sort::Best => return "v.rowid DESC".into(),
+        Sort::Best if searching => return "m.score, v.like_order DESC, v.rowid DESC".into(),
+        Sort::Best => return "v.like_order DESC, v.rowid DESC".into(),
         Sort::Added => {
             return match order.dir {
-                Dir::Asc => "v.rowid ASC".into(),
-                Dir::Desc => "v.rowid DESC".into(),
+                Dir::Asc => "v.like_order ASC, v.rowid ASC".into(),
+                Dir::Desc => "v.like_order DESC, v.rowid DESC".into(),
             };
         }
         Sort::Title => ("v.title", " COLLATE NOCASE"),
@@ -71,8 +71,10 @@ fn order_by(order: Order, searching: bool) -> String {
     };
     // SQLite sorts NULL lowest, so descending already puts it last.
     match order.dir {
-        Dir::Asc => format!("{column} IS NULL, {column}{collate} ASC, v.rowid ASC"),
-        Dir::Desc => format!("{column}{collate} DESC, v.rowid DESC"),
+        Dir::Asc => {
+            format!("{column} IS NULL, {column}{collate} ASC, v.like_order ASC, v.rowid ASC")
+        }
+        Dir::Desc => format!("{column}{collate} DESC, v.like_order DESC, v.rowid DESC"),
     }
 }
 
@@ -152,7 +154,8 @@ mod tests {
         insert_new(
             &mut conn,
             "youtube",
-            &[new_video("y1", true), new_video("y2", true)],
+            // Listed newest first.
+            &[new_video("y2", true), new_video("y1", true)],
         )
         .unwrap();
         insert_new(&mut conn, "tiktok", &[new_video("t1", true)]).unwrap();
@@ -188,18 +191,11 @@ mod tests {
             "youtube",
             &[
                 NewVideo {
-                    title: Some("banana"),
-                    author_name: Some("Zed"),
+                    title: Some("cherry"),
+                    author_name: Some("Bob"),
                     duration_seconds: Some(30),
-                    posted_at: Some(200),
-                    ..new_video("b", true)
-                },
-                NewVideo {
-                    title: None,
-                    author_name: None,
-                    duration_seconds: None,
-                    posted_at: None,
-                    ..new_video("none", true)
+                    posted_at: Some(300),
+                    ..new_video("c", true)
                 },
                 NewVideo {
                     title: Some("Apple"),
@@ -209,11 +205,18 @@ mod tests {
                     ..new_video("a", true)
                 },
                 NewVideo {
-                    title: Some("cherry"),
-                    author_name: Some("Bob"),
+                    title: None,
+                    author_name: None,
+                    duration_seconds: None,
+                    posted_at: None,
+                    ..new_video("none", true)
+                },
+                NewVideo {
+                    title: Some("banana"),
+                    author_name: Some("Zed"),
                     duration_seconds: Some(30),
-                    posted_at: Some(300),
-                    ..new_video("c", true)
+                    posted_at: Some(200),
+                    ..new_video("b", true)
                 },
             ],
         )
@@ -241,7 +244,14 @@ mod tests {
         let ids: Vec<String> = (0..2000).map(|n| format!("v{n}")).collect();
         let videos: Vec<NewVideo> = ids.iter().map(|id| new_video(id, true)).collect();
         insert_new(&mut conn, "youtube", &videos).unwrap();
-        for sort in [Sort::Title, Sort::Author, Sort::Length, Sort::Posted] {
+        for sort in [
+            Sort::Title,
+            Sort::Author,
+            Sort::Length,
+            Sort::Posted,
+            Sort::Added,
+            Sort::Best,
+        ] {
             for dir in [Dir::Asc, Dir::Desc] {
                 let sql = format!(
                     "EXPLAIN QUERY PLAN SELECT v.rowid FROM videos v \

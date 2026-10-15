@@ -169,70 +169,70 @@ pub fn check_logged_in(cookies: &[Cookie]) -> Result<()> {
     Ok(())
 }
 
-/// List saved posts into `posts`, newest save first. `limit` of 0 means all
-/// of them. `keep_going` sees each post as it arrives; returning false stops
-/// the listing there (that post is still included), so callers can quit once
-/// they reach saves they already have. When a page fails, `posts` keeps what
-/// the pages before it listed.
-pub async fn saved_posts(
+/// Which of Instagram's lists to read.
+#[derive(Debug, Clone, Copy)]
+pub enum List {
+    /// The posts the user saved.
+    Saved,
+    /// The posts the user liked.
+    Liked,
+}
+
+/// List the posts on `list` page by page, newest first, starting at
+/// `cursor` (None for the start of the list). `on_page` gets each page's
+/// posts and the cursor for the page after it (None after the last page),
+/// and returns whether to go on, so callers can store each page as it comes
+/// and quit once they reach posts they already have.
+pub async fn posts(
+    list: List,
     browser: Browser,
     cookies: &[Cookie],
-    limit: usize,
-    mut keep_going: impl FnMut(&Post) -> bool,
-    posts: &mut Vec<Post>,
+    cursor: Option<&str>,
+    mut on_page: impl FnMut(Vec<Post>, Option<&str>) -> Result<bool>,
 ) -> Result<()> {
     check_logged_in(cookies)?;
-    let mut tab = Headless::launch(browser, cookies).await?;
-    let result = async {
-        tab.goto(START_PAGE, PAGE_READY).await?;
-        list(Feed::Saved(&mut tab), limit, &mut keep_going, posts).await
+    match list {
+        List::Saved => {
+            let mut tab = Headless::launch(browser, cookies).await?;
+            let result = async {
+                tab.goto(START_PAGE, PAGE_READY).await?;
+                read(Feed::Saved(&mut tab), cursor, &mut on_page).await
+            }
+            .await;
+            tab.close().await;
+            result
+        }
+        List::Liked => {
+            let login = AppLogin::new(cookies);
+            read(Feed::Liked(&login), cursor, &mut on_page).await
+        }
     }
-    .await;
-    tab.close().await;
-    result
 }
 
-/// List liked posts into `posts`, newest like first, as `saved_posts` lists
-/// saves.
-pub async fn liked_posts(
-    cookies: &[Cookie],
-    limit: usize,
-    mut keep_going: impl FnMut(&Post) -> bool,
-    posts: &mut Vec<Post>,
-) -> Result<()> {
-    check_logged_in(cookies)?;
-    let login = AppLogin::new(cookies);
-    list(Feed::Liked(&login), limit, &mut keep_going, posts).await
-}
-
-async fn list(
+async fn read(
     mut feed: Feed<'_>,
-    limit: usize,
-    keep_going: &mut impl FnMut(&Post) -> bool,
-    posts: &mut Vec<Post>,
+    cursor: Option<&str>,
+    on_page: &mut impl FnMut(Vec<Post>, Option<&str>) -> Result<bool>,
 ) -> Result<()> {
-    let mut max_id: Option<String> = None;
+    let mut max_id = cursor.map(str::to_string);
+    let mut listed = 0;
     for pages in 1_u32.. {
         // A full read of a long list takes many minutes; say how it's going.
         if pages % PROGRESS_EVERY == 0 {
-            eprintln!(
-                "instagram: {} list, {} posts so far",
-                feed.name(),
-                posts.len()
-            );
+            eprintln!("instagram: {} list, {listed} posts so far", feed.name());
         }
         let page = fetch_page(&mut feed, max_id.as_deref()).await?;
-        for post in page.posts {
-            let go_on = keep_going(&post);
-            posts.push(post);
-            if !go_on || posts.len() == limit {
-                return Ok(());
-            }
-        }
         // A cursor that doesn't move would fetch the same page forever.
-        match page.next_max_id {
-            Some(next) if max_id.as_ref() != Some(&next) => max_id = Some(next),
-            _ => return Ok(()),
+        let next = page
+            .next_max_id
+            .filter(|next| max_id.as_ref() != Some(next));
+        listed += page.posts.len();
+        if !on_page(page.posts, next.as_deref())? {
+            return Ok(());
+        }
+        match next {
+            Some(next) => max_id = Some(next),
+            None => return Ok(()),
         }
         tokio::time::sleep(PAGE_PAUSE).await;
     }

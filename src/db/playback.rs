@@ -60,11 +60,11 @@ fn pending_playback_from(
 }
 
 /// Up to `limit` downloaded videos to make playback copies of, most recently
-/// stored first, as the downloads go.
+/// liked first, as the downloads go.
 pub fn pending_playback(conn: &Connection, limit: usize) -> Result<Vec<PendingPlayback>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PENDING_COLUMNS}, {PLAYBACK_COLUMNS} FROM {PLAYBACK_TABLES} \
-         WHERE {PLAYBACK_WHERE} ORDER BY v.rowid DESC LIMIT ?3"
+         WHERE {PLAYBACK_WHERE} ORDER BY v.like_order DESC, v.rowid DESC LIMIT ?3"
     ))?;
     let rows = stmt
         .query_map(
@@ -260,11 +260,12 @@ mod tests {
         insert_new(
             &mut conn,
             "tiktok",
+            // Listed newest first.
             &[
-                new_video("old", true),
-                new_video("new", true),
-                photo,
                 new_video("not yet", true),
+                photo,
+                new_video("new", true),
+                new_video("old", true),
             ],
         )
         .unwrap();
