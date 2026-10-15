@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- The sidebar lists the kinds of post under TikTok (videos and slideshows) and Instagram (videos, photos and carousels), each with its count, so you can browse just your slideshows, say. Search and sorting work within them.
+
 ## [0.8.2] - 2026-10-15
 
 ### Fixed

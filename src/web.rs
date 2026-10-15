@@ -59,6 +59,25 @@ const PLATFORMS: [(&str, &str); 3] = [
     ("instagram", "Instagram"),
 ];
 
+/// The kinds of post the side panel lists under each platform, as
+/// (platform, post type as `db::Filter` names it, label). YouTube's are all
+/// videos, so it has none.
+const POST_TYPES: [(&str, &str, &str); 5] = [
+    ("tiktok", "video", "Videos"),
+    ("tiktok", "slideshow", "Slideshows"),
+    ("instagram", "video", "Videos"),
+    ("instagram", "photo", "Photos"),
+    ("instagram", "carousel", "Carousels"),
+];
+
+/// The label of `platform`'s `post_type`, e.g. "Slideshows".
+fn post_type_label(platform: &str, post_type: &str) -> &'static str {
+    POST_TYPES
+        .iter()
+        .find(|(p, t, _)| *p == platform && *t == post_type)
+        .map_or("Posts", |(_, _, label)| label)
+}
+
 fn display_name(platform: &str) -> &str {
     PLATFORMS
         .iter()
@@ -397,6 +416,9 @@ fn not_found() -> Failure {
 #[derive(Deserialize)]
 struct ListQuery {
     platform: Option<String>,
+    /// One of the platform's `POST_TYPES`.
+    #[serde(rename = "type")]
+    post_type: Option<String>,
     page: Option<usize>,
     q: Option<String>,
     sort: Option<String>,
@@ -421,6 +443,8 @@ const SORTS: [(db::Sort, &str, db::Dir); 6] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ListView<'a> {
     platform: Option<&'a str>,
+    /// One of the platform's `POST_TYPES`, or None for all its posts.
+    post_type: Option<&'a str>,
     /// The search as typed, trimmed; empty for none.
     q: String,
     order: db::Order,
@@ -432,14 +456,20 @@ impl<'a> ListView<'a> {
     fn plain(platform: Option<&'a str>, page: usize) -> Self {
         ListView {
             platform,
+            post_type: None,
             q: String::new(),
             order: db::Order::NEWEST,
             page,
         }
     }
 
-    fn from_query(platform: Option<&'a str>, query: &ListQuery) -> Self {
+    fn from_query(
+        platform: Option<&'a str>,
+        post_type: Option<&'a str>,
+        query: &ListQuery,
+    ) -> Self {
         let mut view = ListView::plain(platform, query.page.unwrap_or(1).max(1));
+        view.post_type = post_type;
         view.q = query.q.as_deref().unwrap_or_default().trim().into();
         let sort = SORTS
             .iter()
@@ -498,11 +528,22 @@ impl<'a> ListView<'a> {
         }
     }
 
+    /// The filter it shows.
+    fn filter(&self) -> db::Filter<'a> {
+        db::Filter {
+            platform: self.platform,
+            post_type: self.post_type,
+        }
+    }
+
     /// The URL that shows this list, escaped for an attribute.
     fn href(&self) -> String {
         let mut params = Vec::new();
         if let Some(name) = self.platform {
             params.push(format!("platform={}", url_encode(name)));
+        }
+        if let Some(post_type) = self.post_type {
+            params.push(format!("type={}", url_encode(post_type)));
         }
         if self.searching() {
             params.push(format!("q={}", url_encode(&self.q)));
@@ -562,7 +603,19 @@ async fn list_page(
                 .0,
         ),
     };
-    let view = ListView::from_query(platform, &query);
+    // A type only goes with the platform it's listed under.
+    let post_type = match (platform, query.post_type.as_deref()) {
+        (_, None | Some("")) => None,
+        (Some(platform), Some(wanted)) => Some(
+            POST_TYPES
+                .iter()
+                .find(|(p, t, _)| *p == platform && *t == wanted)
+                .ok_or_else(not_found)?
+                .1,
+        ),
+        (None, Some(_)) => return Err(not_found()),
+    };
+    let view = ListView::from_query(platform, post_type, &query);
     let search = crate::query::parse(&view.q);
     // A search with nothing searchable in it ("*", "-") finds nothing,
     // rather than everything.
@@ -574,11 +627,11 @@ async fn list_page(
             (Vec::new(), 0)
         } else {
             (
-                db::videos_page(conn, platform, &search, view.order, PAGE_SIZE, offset)?,
+                db::videos_page(conn, view.filter(), &search, view.order, PAGE_SIZE, offset)?,
                 if view.searching() {
-                    db::videos_count(conn, platform, &search)?
+                    db::videos_count(conn, view.filter(), &search)?
                 } else {
-                    count_of(&counts, platform)
+                    count_of(&counts, platform, post_type)
                 },
             )
         };
@@ -588,15 +641,24 @@ async fn list_page(
     let board = app.pipeline.board();
     let pages = found.div_ceil(PAGE_SIZE).max(1);
 
-    let heading = match platform {
-        Some(name) => format!("{} likes", display_name(name)),
-        None => "All likes".into(),
+    let heading = match (platform, post_type) {
+        (Some(name), Some(post_type)) => format!(
+            "{} {}",
+            display_name(name),
+            post_type_label(name, post_type).to_lowercase()
+        ),
+        (Some(name), None) => format!("{} likes", display_name(name)),
+        (None, _) => "All likes".into(),
     };
     let pager = pager(&view, pages);
     let main = format!(
         "<p id=\"new\" class=\"balloon\" hidden><a href=\"{}\"><span id=\"new-count\">0</span> new likes — show them</a></p>\n\
          {}{pager}{}{pager}",
-        list_href(platform, 1),
+        ListView {
+            post_type,
+            ..ListView::plain(platform, 1)
+        }
+        .href(),
         search_html(&view),
         table_html(&view, &videos),
     );
@@ -613,14 +675,18 @@ async fn list_page(
     } else {
         format!(
             "<span data-count=\"{}\">{}</span> likes",
-            platform.unwrap_or("all"),
+            count_name(platform, post_type),
             found
         )
+    };
+    let current = match (platform, post_type) {
+        (Some(platform), Some(post_type)) => Section::PostType(platform, post_type),
+        _ => Section::Likes(platform),
     };
     Ok(Html(layout(
         &Frame {
             title: &heading,
-            current: Section::Likes(platform),
+            current,
             list: Some(&view),
             status: &status,
             counts: &counts,
@@ -666,12 +732,17 @@ fn table_html(view: &ListView, videos: &[db::StoredVideo]) -> String {
 /// starts at its best matches. While searching, it offers to go back to best
 /// match after a column sort, and to clear the search.
 fn search_html(view: &ListView) -> String {
-    let platform = view.platform.map_or(String::new(), |name| {
-        format!(
-            "<input type=\"hidden\" name=\"platform\" value=\"{}\">",
-            escape(name)
-        )
-    });
+    let platform = [("platform", view.platform), ("type", view.post_type)]
+        .into_iter()
+        .filter_map(|(name, value)| {
+            value.map(|value| {
+                format!(
+                    "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
+                    escape(value)
+                )
+            })
+        })
+        .collect::<String>();
     let mut extra = Vec::new();
     if view.searching() {
         if view.order.sort != db::Sort::Best {
@@ -1148,6 +1219,8 @@ fn updates_since(app: &App, status: &SyncStatus, after: i64) -> (Vec<Event>, i64
 enum Section<'a> {
     /// A list of likes: all of them (`None`), or one platform's.
     Likes(Option<&'a str>),
+    /// One platform's posts of one type, e.g. TikTok's slideshows.
+    PostType(&'a str, &'a str),
     Downloading,
 }
 
@@ -1158,7 +1231,7 @@ struct Frame<'a> {
     /// On the list page, what it shows, which the platform links keep.
     list: Option<&'a ListView<'a>>,
     status: &'a SyncStatus,
-    counts: &'a [(String, usize)],
+    counts: &'a [db::VideoCount],
     board: &'a Board,
     /// The window's status bar, under its contents.
     footer: String,
@@ -1182,39 +1255,54 @@ struct NavEntry {
     section: Section<'static>,
     href: String,
     label: &'static str,
+    /// A post type under its platform: only in the side panel, indented.
+    sub: bool,
     /// What its `data-count` element is called in the live updates.
-    count_name: &'static str,
+    count_name: String,
     count: usize,
 }
 
+/// The lists of likes, each platform followed by its post types, then the
+/// downloads. From a list, the links keep its search and order.
 fn nav_entries(frame: &Frame) -> Vec<NavEntry> {
-    [(None, "All likes")]
-        .into_iter()
-        .chain(PLATFORMS.map(|(name, label)| (Some(name), label)))
-        .map(|(name, label)| NavEntry {
-            section: Section::Likes(name),
-            href: frame.list.map_or_else(
-                || list_href(name, 1),
-                |view| {
-                    ListView {
-                        platform: name,
-                        ..view.at(1)
-                    }
-                    .href()
-                },
-            ),
+    let entry = |name: Option<&'static str>, post_type: Option<&'static str>, label| {
+        let href = frame.list.map_or_else(
+            || ListView::plain(name, 1),
+            |view| ListView {
+                platform: name,
+                post_type,
+                ..view.at(1)
+            },
+        );
+        let href = ListView { post_type, ..href }.href();
+        NavEntry {
+            section: match (name, post_type) {
+                (Some(name), Some(post_type)) => Section::PostType(name, post_type),
+                _ => Section::Likes(name),
+            },
+            href,
             label,
-            count_name: name.unwrap_or("all"),
-            count: count_of(frame.counts, name),
-        })
-        .chain([NavEntry {
-            section: Section::Downloading,
-            href: "/downloading".into(),
-            label: "Downloading",
-            count_name: "downloading",
-            count: busy_count(frame.board),
-        }])
-        .collect()
+            sub: post_type.is_some(),
+            count_name: count_name(name, post_type),
+            count: count_of(frame.counts, name, post_type),
+        }
+    };
+    let mut entries = vec![entry(None, None, "All likes")];
+    for (name, label) in PLATFORMS {
+        entries.push(entry(Some(name), None, label));
+        for (_, post_type, label) in POST_TYPES.iter().filter(|(p, _, _)| *p == name) {
+            entries.push(entry(Some(name), Some(post_type), label));
+        }
+    }
+    entries.push(NavEntry {
+        section: Section::Downloading,
+        href: "/downloading".into(),
+        label: "Downloading",
+        sub: false,
+        count_name: "downloading".into(),
+        count: busy_count(frame.board),
+    });
+    entries
 }
 
 /// ` aria-current="page"` on the link to the page we're on.
@@ -1235,11 +1323,12 @@ fn panel_html(frame: &Frame, entries: &[NavEntry]) -> String {
             .iter()
             .map(|entry| {
                 format!(
-                    "<li><a href=\"{}\"{}>{}{}\
+                    "<li{}><a href=\"{}\"{}>{}{}\
                      <span class=\"count\" data-count=\"{}\">{}</span></a></li>\n",
+                    if entry.sub { " class=\"sub\"" } else { "" },
                     entry.href,
                     current(frame, entry.section),
-                    icon(entry.section),
+                    if entry.sub { "" } else { icon(entry.section) },
                     entry.label,
                     entry.count_name,
                     entry.count
@@ -1271,6 +1360,7 @@ fn layout(frame: &Frame, main: &str) -> String {
     let entries = nav_entries(frame);
     let quick = entries
         .iter()
+        .filter(|entry| !entry.sub)
         .map(|entry| {
             format!(
                 "<a href=\"{}\"{}>{}{}</a>\n",
@@ -1293,7 +1383,7 @@ fn layout(frame: &Frame, main: &str) -> String {
          <link rel=\"icon\" href=\"/assets/splat.svg\">\n\
          {player}\
          </head>\n\
-         <body data-after=\"{after}\" data-platform=\"{platform}\" data-live=\"{live}\" data-size=\"{PAGE_SIZE}\">\n\
+         <body data-after=\"{after}\" data-platform=\"{platform}\" data-type=\"{post_type}\" data-live=\"{live}\" data-size=\"{PAGE_SIZE}\">\n\
          <header class=\"topbar\">\n\
          <a class=\"logo\" href=\"/\"><span class=\"splat\">joyscroller</span>\
          <span class=\"edition\">Archive Edition</span></a>\n\
@@ -1324,7 +1414,12 @@ fn layout(frame: &Frame, main: &str) -> String {
         after = frame.after,
         platform = match frame.current {
             Section::Likes(platform) => platform.unwrap_or(""),
+            Section::PostType(platform, _) => platform,
             Section::Downloading => "",
+        },
+        post_type = match frame.current {
+            Section::PostType(_, post_type) => post_type,
+            _ => "",
         },
         live = u8::from(frame.live),
         player = if frame.player { PLAYER_HEAD } else { "" },
@@ -1350,6 +1445,7 @@ const RADIO_LCD: &str = "<svg class=\"radio-lcd\" viewBox=\"0 0 960 691\" aria-h
 /// (`assets/blender/badges.py`), like the radio.
 fn icon(section: Section) -> &'static str {
     match section {
+        Section::PostType(platform, _) => icon(Section::Likes(Some(platform))),
         Section::Likes(Some("youtube")) => {
             "<img class=\"icon\" src=\"/assets/icon-youtube.webp\" alt=\"\">"
         }
@@ -1440,6 +1536,7 @@ function connect() {
     template.innerHTML = e.data;
     const row = template.content.firstElementChild;
     if (!rows || (page.platform && row.dataset.platform !== page.platform)) return;
+    if (page.type && row.dataset.type !== page.type) return;
     if (page.live === "1") {
       // In like order, newest first. A sync stores a listing page by page,
       // newest first, so a row can belong below others that came before it.
@@ -1557,11 +1654,12 @@ fn video_row(video: &db::StoredVideo) -> String {
         video.duration_seconds.map(duration).unwrap_or_default()
     };
     format!(
-        "<tr data-platform=\"{platform}\" data-key=\"{platform}/{id}\" data-order=\"{order}\"><td class=\"thumb\">{thumbnail}</td>\
+        "<tr data-platform=\"{platform}\" data-type=\"{post_type}\" data-key=\"{platform}/{id}\" data-order=\"{order}\"><td class=\"thumb\">{thumbnail}</td>\
          <td class=\"title\"><a href=\"{href}\">{title}</a></td><td class=\"author\">{author}</td>\
          <td class=\"num\">{length}</td><td class=\"date\">{posted}</td><td class=\"date\">{added}</td>\
          <td class=\"source\"><span class=\"badge badge-{platform}\">{source}</span></td></tr>",
         platform = escape(&video.platform),
+        post_type = escape(&video.post_type),
         id = escape(&video.video_id),
         order = video.like_order,
         title = escape(&truncate(&short_title(video), 120)),
@@ -1636,22 +1734,40 @@ fn paused_html(site: &str, paused: &[Paused]) -> String {
 }
 
 /// `{"all": n, "youtube": n, ...}`, for the sidebar's counts.
-fn counts_json(counts: &[(String, usize)]) -> String {
+fn counts_json(counts: &[db::VideoCount]) -> String {
     let mut object = serde_json::Map::new();
-    object.insert("all".into(), count_of(counts, None).into());
+    object.insert("all".into(), count_of(counts, None, None).into());
     for (name, _) in PLATFORMS {
-        object.insert(name.into(), count_of(counts, Some(name)).into());
+        object.insert(name.into(), count_of(counts, Some(name), None).into());
+    }
+    for (name, post_type, _) in POST_TYPES {
+        object.insert(
+            count_name(Some(name), Some(post_type)),
+            count_of(counts, Some(name), Some(post_type)).into(),
+        );
     }
     serde_json::Value::Object(object).to_string()
 }
 
-/// How many videos `platform` has, or all platforms together.
-fn count_of(counts: &[(String, usize)], platform: Option<&str>) -> usize {
+/// How many videos `platform` has (all platforms together for None), of
+/// `post_type` or all of them.
+fn count_of(counts: &[db::VideoCount], platform: Option<&str>, post_type: Option<&str>) -> usize {
     counts
         .iter()
-        .filter(|(name, _)| platform.is_none_or(|wanted| name == wanted))
-        .map(|(_, count)| count)
+        .filter(|c| platform.is_none_or(|wanted| c.platform == wanted))
+        .filter(|c| post_type.is_none_or(|wanted| c.post_type == wanted))
+        .map(|c| c.count)
         .sum()
+}
+
+/// What a count's `data-count` elements are called, for the live updates:
+/// `all`, `tiktok`, `tiktok/slideshow`.
+fn count_name(platform: Option<&str>, post_type: Option<&str>) -> String {
+    match (platform, post_type) {
+        (Some(platform), Some(post_type)) => format!("{platform}/{post_type}"),
+        (Some(platform), None) => platform.into(),
+        (None, _) => "all".into(),
+    }
 }
 
 /// The pager line: where we are, and links to the neighboring pages.
@@ -2257,6 +2373,7 @@ mod tests {
             duration_seconds: Some(75),
             available: true,
             kind: "video".into(),
+            post_type: "video".into(),
             posted_at: None,
             added_at: 1_700_000_000,
             thumbnail: None,
@@ -2302,7 +2419,7 @@ mod tests {
     fn rows_escape_titles_and_tag_their_platform() {
         let row = video_row(&video("youtube", Some("<b>hi</b>")));
         assert!(row.starts_with(
-            "<tr data-platform=\"youtube\" data-key=\"youtube/abc\" data-order=\"1\">"
+            "<tr data-platform=\"youtube\" data-type=\"video\" data-key=\"youtube/abc\" data-order=\"1\">"
         ));
         assert!(row.contains("badge-youtube"));
         assert!(row.contains("&lt;b&gt;hi&lt;/b&gt;"));
@@ -2345,6 +2462,7 @@ mod tests {
     fn list_query(q: Option<&str>, sort: Option<&str>, dir: Option<&str>) -> ListQuery {
         ListQuery {
             platform: None,
+            post_type: None,
             page: Some(2),
             q: q.map(Into::into),
             sort: sort.map(Into::into),
@@ -2356,6 +2474,7 @@ mod tests {
     fn sort_and_search_live_in_the_url() {
         let view = ListView::from_query(
             Some("tiktok"),
+            None,
             &list_query(Some(" cat & dog "), Some("duration"), Some("asc")),
         );
         assert_eq!(view.q, "cat & dog");
@@ -2379,16 +2498,16 @@ mod tests {
 
     #[test]
     fn a_search_defaults_to_best_match() {
-        let view = ListView::from_query(None, &list_query(Some("cat"), None, None));
+        let view = ListView::from_query(None, None, &list_query(Some("cat"), None, None));
         assert_eq!(view.order.sort, db::Sort::Best);
         assert_eq!(view.at(1).href(), "/?q=cat");
         // Without a search, best match means nothing, and so does junk.
         for sort in [Some("best"), Some("rowid; DROP TABLE videos"), None] {
-            let view = ListView::from_query(None, &list_query(None, sort, Some("up")));
+            let view = ListView::from_query(None, None, &list_query(None, sort, Some("up")));
             assert_eq!(view.order, db::Order::NEWEST, "for {sort:?}");
             assert_eq!(view.at(1).href(), "/");
         }
-        let view = ListView::from_query(None, &list_query(None, Some("added"), Some("desc")));
+        let view = ListView::from_query(None, None, &list_query(None, Some("added"), Some("desc")));
         assert!(view.at(1).live());
     }
 
@@ -2408,7 +2527,7 @@ mod tests {
         let added = sort_header(&view, db::Sort::Added, "Added", "date");
         assert!(added.contains("aria-sort=\"descending\"") && added.contains("Added ▼"));
         assert!(added.contains("href=\"/?sort=added&amp;dir=asc\""));
-        let title = ListView::from_query(None, &list_query(None, Some("title"), None));
+        let title = ListView::from_query(None, None, &list_query(None, Some("title"), None));
         assert!(
             sort_header(&title, db::Sort::Title, "Title", "")
                 .contains("href=\"/?sort=title&amp;dir=desc\"")
@@ -2430,14 +2549,85 @@ mod tests {
     }
 
     #[test]
-    fn counts_cover_every_platform() {
-        let counts = [("youtube".to_string(), 3)];
-        assert_eq!(count_of(&counts, None), 3);
-        assert_eq!(count_of(&counts, Some("tiktok")), 0);
+    fn counts_cover_every_platform_and_post_type() {
+        let count = |platform: &str, post_type: &str, count| db::VideoCount {
+            platform: platform.into(),
+            post_type: post_type.into(),
+            count,
+        };
+        let counts = [
+            count("youtube", "video", 3),
+            count("tiktok", "video", 2),
+            count("tiktok", "slideshow", 1),
+        ];
+        assert_eq!(count_of(&counts, None, None), 6);
+        assert_eq!(count_of(&counts, Some("tiktok"), None), 3);
+        assert_eq!(count_of(&counts, Some("tiktok"), Some("slideshow")), 1);
+        assert_eq!(count_of(&counts, Some("instagram"), None), 0);
         assert_eq!(
             counts_json(&counts),
-            r#"{"all":3,"instagram":0,"tiktok":0,"youtube":3}"#
+            r#"{"all":6,"instagram":0,"instagram/carousel":0,"instagram/photo":0,"instagram/video":0,"tiktok":3,"tiktok/slideshow":1,"tiktok/video":2,"youtube":3}"#
         );
+    }
+
+    #[test]
+    fn post_types_sit_under_their_platform() {
+        let view = ListView {
+            post_type: Some("slideshow"),
+            q: "cat".into(),
+            order: db::Order {
+                sort: db::Sort::Best,
+                dir: db::Dir::Asc,
+            },
+            ..ListView::plain(Some("tiktok"), 3)
+        };
+        assert_eq!(
+            view.href(),
+            "/?platform=tiktok&amp;type=slideshow&amp;q=cat&amp;page=3"
+        );
+        // The search box keeps the type.
+        assert!(search_html(&view).contains("name=\"type\" value=\"slideshow\""));
+        let frame = Frame {
+            title: "TikTok slideshows",
+            current: Section::PostType("tiktok", "slideshow"),
+            list: Some(&view),
+            status: &SyncStatus::default(),
+            counts: &[],
+            board: &Board::default(),
+            footer: String::new(),
+            after: 0,
+            live: false,
+            player: false,
+        };
+        let entries = nav_entries(&frame);
+        let labels: Vec<_> = entries.iter().map(|e| (e.label, e.sub)).collect();
+        assert_eq!(
+            labels,
+            [
+                ("All likes", false),
+                ("YouTube", false),
+                ("TikTok", false),
+                ("Videos", true),
+                ("Slideshows", true),
+                ("Instagram", false),
+                ("Videos", true),
+                ("Photos", true),
+                ("Carousels", true),
+                ("Downloading", false),
+            ]
+        );
+        // A platform's link drops the type; a type's keeps the search.
+        assert_eq!(entries[2].href, "/?platform=tiktok&amp;q=cat");
+        assert_eq!(
+            entries[7].href,
+            "/?platform=instagram&amp;type=photo&amp;q=cat"
+        );
+        assert_eq!(entries[4].count_name, "tiktok/slideshow");
+        // Only the type's own entry is current, and the top bar has no types.
+        let html = layout(&frame, "");
+        assert_eq!(html.matches("aria-current").count(), 1);
+        assert!(html.contains("<li class=\"sub\"><a href=\"/?platform=tiktok&amp;type=slideshow&amp;q=cat\" aria-current=\"page\">Slideshows"));
+        assert!(html.contains("data-type=\"slideshow\""));
     }
 
     #[test]

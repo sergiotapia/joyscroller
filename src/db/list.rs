@@ -1,5 +1,5 @@
-//! The video list: a page of videos, filtered by platform and search, in a
-//! column's order. Each column sort has two indexes (migration 6), and
+//! The video list: a page of videos, filtered by platform, post type and
+//! search, in a column's order. Each column sort has two indexes (migration 6), and
 //! `order_by` must match them term for term; a test checks the query plans.
 
 use anyhow::Result;
@@ -7,7 +7,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
 
 use super::search::search_matches;
-use super::videos::{StoredVideo, VIDEO_COLUMNS, VIDEO_TABLES, video_from_row};
+use super::videos::{StoredVideo, VIDEO_COLUMNS, VIDEO_TABLES, post_type_sql, video_from_row};
 use crate::query::Query;
 
 /// What the list can be ordered by. This is the whole list: no other text
@@ -78,22 +78,48 @@ fn order_by(order: Order, searching: bool) -> String {
     }
 }
 
+/// Which videos the list shows, besides a search: one platform's or all,
+/// and of those, one post type (`POST_TYPE`'s names) or all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Filter<'a> {
+    pub platform: Option<&'a str>,
+    pub post_type: Option<&'a str>,
+}
+
+impl<'a> From<Option<&'a str>> for Filter<'a> {
+    /// Every post on `platform`, or on all of them.
+    fn from(platform: Option<&'a str>) -> Self {
+        Filter {
+            platform,
+            post_type: None,
+        }
+    }
+}
+
+/// `filter` as SQL, for after the `WHERE`; `list_params` gives its values.
+const FILTER_WHERE: &str = concat!(
+    "(? IS NULL OR v.platform = ?) AND (? IS NULL OR ",
+    post_type_sql!(),
+    " = ?)"
+);
+
 /// The values for `videos_page` and `videos_count`'s `?`s: the search's,
-/// then the platform twice.
-fn list_params(search: Vec<String>, platform: Option<&str>) -> Vec<Value> {
-    let platform = platform.map_or(Value::Null, |name| Value::Text(name.into()));
+/// then the filter's, each twice.
+fn list_params(search: Vec<String>, filter: Filter) -> Vec<Value> {
+    let text = |value: Option<&str>| value.map_or(Value::Null, |text| Value::Text(text.into()));
+    let (platform, post_type) = (text(filter.platform), text(filter.post_type));
     search
         .into_iter()
         .map(Value::Text)
-        .chain([platform.clone(), platform])
+        .chain([platform.clone(), platform, post_type.clone(), post_type])
         .collect()
 }
 
-/// One page of videos on one platform or all, those `search` matches (all
-/// of them when it's empty), in `order`.
-pub fn videos_page(
+/// One page of the videos `filter` lets through, those `search` matches
+/// (all of them when it's empty), in `order`.
+pub fn videos_page<'a>(
     conn: &Connection,
-    platform: Option<&str>,
+    filter: impl Into<Filter<'a>>,
     search: &Query,
     order: Order,
     limit: usize,
@@ -110,12 +136,12 @@ pub fn videos_page(
         ),
         None => (String::new(), "", Vec::new()),
     };
-    let mut params = list_params(search_params, platform);
+    let mut params = list_params(search_params, filter.into());
     params.push(Value::Integer(i64::try_from(limit)?));
     params.push(Value::Integer(i64::try_from(offset)?));
     let mut stmt = conn.prepare(&format!(
         "{with} SELECT {VIDEO_COLUMNS} FROM {VIDEO_TABLES} {join} \
-         WHERE ? IS NULL OR v.platform = ? ORDER BY {} LIMIT ? OFFSET ?",
+         WHERE {FILTER_WHERE} ORDER BY {} LIMIT ? OFFSET ?",
         order_by(order, searching)
     ))?;
     let videos = stmt
@@ -125,7 +151,11 @@ pub fn videos_page(
 }
 
 /// How many videos `videos_page` pages through.
-pub fn videos_count(conn: &Connection, platform: Option<&str>, search: &Query) -> Result<usize> {
+pub fn videos_count<'a>(
+    conn: &Connection,
+    filter: impl Into<Filter<'a>>,
+    search: &Query,
+) -> Result<usize> {
     let (with, join, search_params) = match search_matches(search, false) {
         Some((sql, params)) => (
             format!("WITH {sql}"),
@@ -135,8 +165,8 @@ pub fn videos_count(conn: &Connection, platform: Option<&str>, search: &Query) -
         None => (String::new(), "", Vec::new()),
     };
     let count: i64 = conn.query_row(
-        &format!("{with} SELECT count(*) FROM videos v {join} WHERE ? IS NULL OR v.platform = ?"),
-        params_from_iter(list_params(search_params, platform)),
+        &format!("{with} SELECT count(*) FROM videos v {join} WHERE {FILTER_WHERE}"),
+        params_from_iter(list_params(search_params, filter.into())),
         |r| r.get(0),
     )?;
     Ok(usize::try_from(count)?)
@@ -178,9 +208,19 @@ mod tests {
         assert_eq!(ids(Some("youtube"), 10, 0), ["y2", "y1"]);
         assert!(ids(Some("instagram"), 10, 0).is_empty());
 
-        let mut counts = video_counts(&conn).unwrap();
+        let mut counts: Vec<(String, String, usize)> = video_counts(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.platform, c.post_type, c.count))
+            .collect();
         counts.sort();
-        assert_eq!(counts, [("tiktok".into(), 1), ("youtube".into(), 2)]);
+        assert_eq!(
+            counts,
+            [
+                ("tiktok".into(), "video".into(), 1),
+                ("youtube".into(), "video".into(), 2)
+            ]
+        );
     }
 
     #[test]
@@ -238,6 +278,67 @@ mod tests {
     }
 
     #[test]
+    fn filters_by_post_type() {
+        let mut conn = memory_db();
+        let listed = |media_type: u8| format!(r#"{{"media_type": {media_type}}}"#);
+        let (photo, carousel) = (listed(1), listed(8));
+        insert_new(
+            &mut conn,
+            "instagram",
+            &[
+                new_video("reel", true),
+                NewVideo {
+                    kind: "photo",
+                    listing_json: &photo,
+                    ..new_video("photo", true)
+                },
+                NewVideo {
+                    kind: "photo",
+                    listing_json: &carousel,
+                    ..new_video("carousel", true)
+                },
+            ],
+        )
+        .unwrap();
+        insert_new(
+            &mut conn,
+            "tiktok",
+            &[
+                new_video("clip", true),
+                NewVideo {
+                    kind: "photo",
+                    ..new_video("slides", true)
+                },
+            ],
+        )
+        .unwrap();
+        let ids = |platform, post_type| -> Vec<String> {
+            let filter = Filter {
+                platform: Some(platform),
+                post_type: Some(post_type),
+            };
+            let page = videos_page(&conn, filter, &Query::default(), Order::NEWEST, 10, 0);
+            assert_eq!(
+                videos_count(&conn, filter, &Query::default()).unwrap(),
+                page.as_ref().unwrap().len()
+            );
+            page.unwrap().into_iter().map(|v| v.video_id).collect()
+        };
+        assert_eq!(ids("instagram", "video"), ["reel"]);
+        assert_eq!(ids("instagram", "photo"), ["photo"]);
+        assert_eq!(ids("instagram", "carousel"), ["carousel"]);
+        assert_eq!(ids("tiktok", "slideshow"), ["slides"]);
+        assert_eq!(ids("tiktok", "video"), ["clip"]);
+        assert!(ids("tiktok", "carousel").is_empty());
+        let carousels = video_counts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.post_type == "carousel")
+            .map(|c| (c.platform, c.count));
+        assert_eq!(carousels, Some(("instagram".into(), 1)));
+    }
+
+    #[test]
     fn column_sorts_read_their_index() {
         // SQLite plans an empty table differently from an archive.
         let mut conn = memory_db();
@@ -255,13 +356,13 @@ mod tests {
             for dir in [Dir::Asc, Dir::Desc] {
                 let sql = format!(
                     "EXPLAIN QUERY PLAN SELECT v.rowid FROM videos v \
-                     WHERE ?1 IS NULL OR v.platform = ?1 ORDER BY {} LIMIT 50",
+                     WHERE {FILTER_WHERE} ORDER BY {} LIMIT 50",
                     order_by(Order { sort, dir }, false)
                 );
                 let plan: Vec<String> = conn
                     .prepare(&sql)
                     .unwrap()
-                    .query_map([Option::<&str>::None], |r| r.get(3))
+                    .query_map([Option::<&str>::None; 4], |r| r.get(3))
                     .unwrap()
                     .collect::<rusqlite::Result<_>>()
                     .unwrap();

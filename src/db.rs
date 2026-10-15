@@ -29,7 +29,7 @@ pub use downloads::{
     DownloadState, Downloaded, PendingDownload, download_item, download_state, pending_count,
     pending_downloads, record_download, record_download_failure,
 };
-pub use list::{Dir, Order, Sort, videos_count, videos_page};
+pub use list::{Dir, Filter, Order, Sort, videos_count, videos_page};
 pub use listings::{Listing, finish_listing, open_listing, store_page};
 pub use migrate::init;
 use migrate::{back_up_before_migrating, refuse_newer};
@@ -40,7 +40,8 @@ pub use playback::{
 };
 pub use syncs::{finish_sync, full_sync_done, full_sync_due, start_sync};
 pub use videos::{
-    NewVideo, StoredVideo, insert_new, last_rowid, video, video_counts, video_ids, videos_after,
+    NewVideo, StoredVideo, VideoCount, insert_new, last_rowid, video, video_counts, video_ids,
+    videos_after,
 };
 
 /// Open the database at `path`, creating it if needed, ready to use: brought

@@ -103,6 +103,9 @@ pub struct StoredVideo {
     pub duration_seconds: Option<i64>,
     pub available: bool,
     pub kind: String,
+    /// What sort of post it is, finer than `kind` (`POST_TYPE`): `video`,
+    /// `slideshow` (TikTok), `photo` or `carousel` (Instagram).
+    pub post_type: String,
     pub posted_at: Option<i64>,
     pub added_at: i64,
     /// Once its media is downloaded, the file in its folder to show as its
@@ -110,18 +113,39 @@ pub struct StoredVideo {
     pub thumbnail: Option<String>,
 }
 
+/// What sort of post a row of `videos v` is, for the sidebar's types: a
+/// `video`, or one of the kinds of `photo` post, which `kind` lumps
+/// together because they play the same way: a TikTok `slideshow`, or an
+/// Instagram `photo` or `carousel` (its `media_type`, 1 or 8, from the list).
+macro_rules! post_type_sql {
+    () => {
+        "CASE WHEN v.kind = 'video' THEN 'video' \
+           WHEN v.platform = 'instagram' AND json_extract(v.listing_json, '$.media_type') = 8 \
+             THEN 'carousel' \
+           WHEN v.platform = 'instagram' THEN 'photo' \
+           ELSE 'slideshow' END"
+    };
+}
+pub(super) use post_type_sql;
+
 /// `StoredVideo`'s columns, for `video_from_row`, selected from
 /// `VIDEO_TABLES`. The file lists are sorted, so `MIN` is the first image.
-pub(super) const VIDEO_COLUMNS: &str = "v.rowid, v.platform, v.video_id, v.url, v.title, v.author_id, \
+pub(super) const VIDEO_COLUMNS: &str = concat!(
+    "v.rowid, v.platform, v.video_id, v.url, v.title, v.author_id, \
      v.author_name, v.duration_seconds, v.available, v.kind, v.posted_at, v.added_at, \
      COALESCE(\
        (SELECT MIN(value) FROM json_each(d.files_json) WHERE value LIKE 'thumbnail.%'), \
        (SELECT MIN(value) FROM json_each(d.files_json) WHERE value LIKE 'image-%')), \
-     v.like_order";
+     v.like_order, ",
+    post_type_sql!()
+);
 
 /// The videos, each with its download if that has finished.
 pub(super) const VIDEO_TABLES: &str = "videos v LEFT JOIN downloads d ON d.platform = v.platform \
      AND d.video_id = v.video_id AND d.downloaded_at IS NOT NULL";
+
+/// How many columns `VIDEO_COLUMNS` selects.
+const VIDEO_COLUMN_COUNT: usize = 15;
 
 pub(super) fn video_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredVideo> {
     Ok(StoredVideo {
@@ -139,19 +163,38 @@ pub(super) fn video_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredVideo>
         added_at: r.get(11)?,
         thumbnail: r.get(12)?,
         like_order: r.get(13)?,
+        post_type: r.get(VIDEO_COLUMN_COUNT - 1)?,
     })
 }
 
-/// How many videos are stored per platform.
-pub fn video_counts(conn: &Connection) -> Result<Vec<(String, usize)>> {
-    let mut stmt = conn.prepare("SELECT platform, COUNT(*) FROM videos GROUP BY platform")?;
-    let counts: Vec<(String, i64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+/// How many videos are stored, by platform and post type.
+pub fn video_counts(conn: &Connection) -> Result<Vec<VideoCount>> {
+    let mut stmt = conn.prepare(concat!(
+        "SELECT v.platform, ",
+        post_type_sql!(),
+        ", COUNT(*) FROM videos v GROUP BY 1, 2"
+    ))?;
+    let counts: Vec<(String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     counts
         .into_iter()
-        .map(|(platform, count)| Ok((platform, usize::try_from(count)?)))
+        .map(|(platform, post_type, count)| {
+            Ok(VideoCount {
+                platform,
+                post_type,
+                count: usize::try_from(count)?,
+            })
+        })
         .collect()
+}
+
+/// How many videos there are of one post type on one platform.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VideoCount {
+    pub platform: String,
+    pub post_type: String,
+    pub count: usize,
 }
 
 /// Every video stored after `rowid`, oldest first.
@@ -187,7 +230,8 @@ pub fn video(
                  WHERE v.platform = ?1 AND v.video_id = ?2"
             ),
             [platform, video_id],
-            |r| Ok((video_from_row(r)?, r.get(14)?)),
+            // `listing_json` comes after `VIDEO_COLUMNS`.
+            |r| Ok((video_from_row(r)?, r.get(VIDEO_COLUMN_COUNT)?)),
         )
         .optional()?;
     Ok(found)
