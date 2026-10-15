@@ -35,3 +35,23 @@ chrome-hashes version:
     for platform in linux64 linux-arm64 mac-arm64 mac-x64 win64; do \
       echo "$platform $(curl -fsSL https://storage.googleapis.com/chrome-for-testing-public/{{version}}/$platform/chrome-headless-shell-$platform.zip | sha256sum | cut -d' ' -f1)"; \
     done
+
+# Render the side panel's clock radio and its hover animation into assets/
+# with Blender (see assets/blender/radio.py and radio_motion.py): the still,
+# the layers that move, and radio.json, which says where they go. Fetches
+# the two fonts the scene sets type in. About 15 minutes on a recent GPU.
+radio samples="512":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(mktemp -d)
+    trap 'rm -rf "$out"' EXIT
+    mkdir "$out/fonts"
+    curl -fsSL -o "$out/fonts/LuckiestGuy.ttf" https://github.com/google/fonts/raw/main/apache/luckiestguy/LuckiestGuy-Regular.ttf
+    curl -fsSL -o "$out/fonts/Fredoka.ttf" "https://github.com/google/fonts/raw/main/ofl/fredoka/Fredoka%5Bwdth,wght%5D.ttf"
+    blender -b -P assets/blender/radio.py -- "$out/radio.png" "$out/fonts" {{samples}} "$out/motion" > "$out/blender.log" 2>&1 \
+      || { tail -30 "$out/blender.log"; exit 1; }
+    cwebp -quiet -q 90 -alpha_q 100 -m 6 "$out/radio.png" -o assets/radio.webp
+    for layer in lit dome dome-lit knob; do
+      cwebp -quiet -q 90 -alpha_q 100 -m 6 "$out/motion/$layer.png" -o "assets/radio-$layer.webp"
+    done
+    cp "$out/motion/motion.json" assets/radio.json

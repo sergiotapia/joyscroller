@@ -5,21 +5,28 @@ clear fluorescent-lime acrylic tube, a red mushroom alarm dome, a spotted
 lime speaker with an orange burst, a backlit LCD (left dark, the page lights
 it), purple knobs, the alarm rocker and a crescent FM dial.
 
-    blender -b -P assets/blender/radio.py -- /tmp/r/radio.png /tmp/r 512
-    cwebp -q 90 -alpha_q 100 -m 6 /tmp/r/radio.png -o assets/radio.webp
+    just radio
 
-The fonts dir needs LuckiestGuy.ttf and Fredoka.ttf (Blender can't read the
-web fonts in assets/fonts/; get the TTFs from github.com/google/fonts).
+which runs
+
+    blender -b -P assets/blender/radio.py -- <out.png> <fonts dir> 512 [<motion dir>]
+
+and converts what it writes into assets/. The fonts dir needs
+LuckiestGuy.ttf and Fredoka.ttf (Blender can't read the web fonts in
+assets/fonts/); the recipe fetches them from github.com/google/fonts.
 
 Writes <out.png> (transparent, with a contact shadow) and <out>.json with
 the image's size and where the LCD glass lands in it. The page draws its
-live clock over the glass: copy `width`, `height` and `svg_matrix` into
-RADIO_LCD and the radio's <img> in web.rs.
+live clock over the glass: if the camera moves, copy `width`, `height` and
+`svg_matrix` into RADIO_LCD in web.rs. Given a motion dir, it also renders
+the hover animation's layers there (radio_motion.py), and cuts the still
+to fit under them.
 """
 
 import glob
 import json
 import math
+import os
 import sys
 
 import bmesh
@@ -31,6 +38,7 @@ argv = sys.argv[sys.argv.index("--") + 1 :]
 OUT = argv[0]
 FONTS = argv[1]
 SAMPLES = int(argv[2]) if len(argv) > 2 else 256
+MOTION = argv[3] if len(argv) > 3 else None
 RES_X = 960
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -667,6 +675,9 @@ bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.co.z < -1e-4], context="VERT
 bm.to_mesh(dome.data)
 bm.free()
 lathe("dome-lip", [(1.95, 0), (2.12, 0.06), (2.1, 0.2), (1.95, 0.24)], DOMEX, 0, DOME.z - 0.12, M["red"], bev=0.04)
+# The plunger the cap rides on, hidden in the collar and under the cap at
+# rest; it shows when the hover animation bounces the cap (radio_motion.py).
+lathe("dome-stem", [(0.7, 0), (0.7, DOME.z - TOP + 0.4)], DOMEX, 0, TOP - 0.4, M["purple"], bev=0.03)
 
 # The tube: heat-bent clear lime acrylic, leaving the ball's collar level,
 # zigzagging, and dropping into a fitting on the top.
@@ -925,3 +936,12 @@ img.pixels.foreach_set(px.ravel())
 img.filepath_raw = OUT
 img.file_format = "PNG"
 img.save()
+
+if MOTION:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.dont_write_bytecode = True  # no __pycache__ in assets/
+    import radio_motion
+
+    floor.hide_render = False
+    scene.cycles.samples = SAMPLES
+    radio_motion.render(globals(), MOTION)

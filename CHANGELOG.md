@@ -6,6 +6,7 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ### Added
 
+- The clock radio at the top of the side panel comes alive when you point at it: its tube switches on with electricity crackling through it, the red alarm button bounces and the tuning knob spins. Move away and it winds down. It's also a link to all your likes. If your system is set to reduce motion, the tube just glows.
 - The taskbar's tray shows how things are going at a glance: a light that's green once everything has synced, blinks while a sync runs and turns red when one fails, and a download arrow that lights up while videos download and is grey otherwise. Hover over them, in Windows XP's yellow tooltips, for each platform's sync and how many videos are downloading. Hovering over the clock shows the date.
 
 ### Changed

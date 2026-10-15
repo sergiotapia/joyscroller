@@ -230,12 +230,35 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 /* ---- The clock radio --------------------------------------------------- */
 
 .radio {
+  display: block;
   position: relative;
   margin: -2px 8px 0;
   /* A pool of light behind it, so the navy body stands off the blue panel. */
   background: radial-gradient(ellipse 60% 48% at 50% 58%, rgba(190, 220, 255, .55), transparent 70%);
 }
-.radio img { display: block; width: 100%; height: auto; }
+/* XP's dotted focus rectangle. The radio switching on shows it too. */
+.radio:focus-visible { outline: 1px dotted #fff; outline-offset: 2px; }
+.radio-still { display: block; width: 100%; height: auto; }
+/* Hovered, it comes alive (radio.js): the lit radio fades in over the
+   unlit one, added to it in an isolated group so the two always sum to
+   one picture (see radio_html in web.rs). The moving parts are sprite
+   sheets in boxes over the still, each frame a translate of the sheet. */
+.radio-stack { display: block; position: relative; isolation: isolate; }
+.radio-off { display: block; position: relative; will-change: opacity; }
+.radio-on { position: absolute; inset: 0; opacity: 0; mix-blend-mode: plus-lighter; will-change: opacity; }
+.radio-part { position: absolute; overflow: hidden; }
+.radio-part img { position: absolute; left: 0; top: 0; max-width: none; height: auto; will-change: transform; }
+/* The arc in the tube, in the render's pixels: a neon glow round a pale
+   filament with a white-hot thread beside it, and a surge running along. */
+.radio-arc {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  visibility: hidden; pointer-events: none; mix-blend-mode: screen; will-change: opacity;
+}
+.radio-arc path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.arc-glow { stroke: #39ff14; stroke-width: 20px; opacity: .7; filter: url(#arc-blur); }
+.arc-core { stroke: #efffcf; stroke-width: 5px; }
+.arc-hot { stroke: #fff; stroke-width: 2.5px; }
+.arc-surge { stroke: #fff; stroke-width: 18px; stroke-dasharray: .16 2; filter: url(#arc-blur); }
 /* The live clock, drawn over the dark LCD glass in radio.webp (see
    RADIO_LCD in web.rs): a backlit display's green segments. Screen blending
    adds their light to the glass, so its reflections stay on top. Sizes are

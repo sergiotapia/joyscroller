@@ -229,7 +229,7 @@ You can close this tab.</p>\n\
 /// The stylesheets, scripts, fonts and pictures, as (name, type, contents).
 /// They're built into the executable, so the app stays a single file.
 /// `videojs.js` is Video.js 10, bundled by `just videojs`.
-const ASSETS: [(&str, &str, &[u8]); 28] = [
+const ASSETS: [(&str, &str, &[u8]); 33] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -251,6 +251,11 @@ const ASSETS: [(&str, &str, &[u8]); 28] = [
         include_bytes!("../assets/videojs.js"),
     ),
     (
+        "radio.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../assets/radio.js"),
+    ),
+    (
         "lab.webp",
         "image/webp",
         include_bytes!("../assets/lab.webp"),
@@ -259,6 +264,26 @@ const ASSETS: [(&str, &str, &[u8]); 28] = [
         "radio.webp",
         "image/webp",
         include_bytes!("../assets/radio.webp"),
+    ),
+    (
+        "radio-lit.webp",
+        "image/webp",
+        include_bytes!("../assets/radio-lit.webp"),
+    ),
+    (
+        "radio-dome.webp",
+        "image/webp",
+        include_bytes!("../assets/radio-dome.webp"),
+    ),
+    (
+        "radio-dome-lit.webp",
+        "image/webp",
+        include_bytes!("../assets/radio-dome-lit.webp"),
+    ),
+    (
+        "radio-knob.webp",
+        "image/webp",
+        include_bytes!("../assets/radio-knob.webp"),
     ),
     (
         "splat.webp",
@@ -372,26 +397,41 @@ const ASSETS: [(&str, &str, &[u8]); 28] = [
     ),
 ];
 
-async fn asset(Path(name): Path<String>) -> Result<Response, Failure> {
+async fn asset(Path(name): Path<String>, headers: HeaderMap) -> Result<Response, Failure> {
     let &(_, content_type, body) = ASSETS
         .iter()
         .find(|(file, ..)| *file == name)
         .ok_or_else(not_found)?;
     // Fonts never change. The rest changes with the app, so the browser
-    // checks for a new copy each time.
+    // checks for a new copy each time, and with the ETag it's told to keep
+    // the one it has (the radio's frames alone are over a megabyte).
     let cache = if content_type.starts_with("font/") {
         "max-age=31536000, immutable"
     } else {
         "no-cache"
     };
-    Ok((
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, cache),
-        ],
-        body,
-    )
-        .into_response())
+    let etag = etag(body);
+    let kept = headers
+        .get(header::IF_NONE_MATCH)
+        .is_some_and(|tags| tags.as_bytes() == etag.as_bytes());
+    let headers = [
+        (header::CONTENT_TYPE, content_type),
+        (header::CACHE_CONTROL, cache),
+        (header::ETAG, etag.as_str()),
+    ];
+    Ok(if kept {
+        (StatusCode::NOT_MODIFIED, headers).into_response()
+    } else {
+        (headers, body).into_response()
+    })
+}
+
+/// An asset's entity tag: a hash of its contents. `DefaultHasher::new`
+/// hashes with fixed keys, so a build gives the same tag every run.
+fn etag(body: &[u8]) -> String {
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(body, &mut hasher);
+    format!("\"{:016x}\"", std::hash::Hasher::finish(&hasher))
 }
 
 /// A failed request: a status code and a plain-text message.
@@ -1316,8 +1356,8 @@ fn current(frame: &Frame, section: Section) -> &'static str {
 }
 
 /// The side panel, in the manner of MSN's: a clock radio (a Blender render,
-/// see `assets/blender/radio.py`) whose LCD shows the time, the menu, and
-/// each platform's sync.
+/// see `assets/blender/radio.py`) whose LCD shows the time and which comes
+/// alive on hover, the menu, and each platform's sync.
 fn panel_html(frame: &Frame, entries: &[NavEntry]) -> String {
     let menu = |entries: &[NavEntry]| {
         entries
@@ -1341,13 +1381,14 @@ fn panel_html(frame: &Frame, entries: &[NavEntry]) -> String {
     let (likes, downloads) = entries.split_at(entries.len() - 1);
     format!(
         "<aside class=\"panel\">\n\
-         <div class=\"radio\"><img src=\"/assets/radio.webp\" width=\"960\" height=\"691\" alt=\"\">{RADIO_LCD}</div>\n\
+         {radio}\
          <nav>\n\
          <h2>Likes</h2>\n<ul class=\"menu\">\n{likes}</ul>\n\
          <h2>Downloads</h2>\n<ul class=\"menu\">\n{downloads}</ul>\n\
          </nav>\n\
          <h2>Sync</h2>\n<ul class=\"sync\" id=\"status\">\n{status}</ul>\n\
          </aside>\n",
+        radio = radio_html(),
         likes = menu(likes),
         downloads = menu(downloads),
         status = status_html(frame.status),
@@ -1382,6 +1423,7 @@ fn layout(frame: &Frame, main: &str) -> String {
          <title>{title} – joyscroller</title>\n\
          <link rel=\"stylesheet\" href=\"/assets/style.css\">\n\
          <link rel=\"icon\" href=\"/assets/splat.svg\">\n\
+         <script type=\"module\" src=\"/assets/radio.js\"></script>\n\
          {player}\
          </head>\n\
          <body data-after=\"{after}\" data-platform=\"{platform}\" data-type=\"{post_type}\" data-live=\"{live}\" data-size=\"{PAGE_SIZE}\">\n\
@@ -1439,6 +1481,92 @@ fn layout(frame: &Frame, main: &str) -> String {
             ""
         },
         downloads_tip = downloads_tip(busy_count(frame.board)),
+    )
+}
+
+/// Where the radio's moving layers go and how their sprite sheets are laid
+/// out, as `assets/blender/radio_motion.py` rendered them (`just radio`).
+/// `radio.js` reads the rest: the tube's path, the dome's poses.
+const RADIO_JSON: &str = include_str!("../assets/radio.json");
+
+#[derive(Deserialize)]
+struct RadioMotion {
+    width: u32,
+    height: u32,
+    dome: RadioSheet,
+    knob: RadioSheet,
+}
+
+/// A sprite sheet of one part's frames: `cols` x `rows` tiles of the size
+/// of `box` (x, y, width, height in the still), each `gutter` pixels apart
+/// from the next.
+#[derive(Deserialize)]
+struct RadioSheet {
+    r#box: [u32; 4],
+    cols: u32,
+    rows: u32,
+    gutter: u32,
+}
+
+/// `RADIO_JSON` read, or `None` (said once) if it couldn't be, which leaves
+/// the radio still. A test checks it reads.
+static RADIO_MOTION: std::sync::LazyLock<Option<RadioMotion>> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(RADIO_JSON)
+        .inspect_err(|err| eprintln!("warning: assets/radio.json: {err}"))
+        .ok()
+});
+
+/// The clock radio: the still with its moving parts on top, at their first
+/// frame, then the same lit up, faded in by `radio.js` on hover; the arc it
+/// draws in the tube; and the LCD's clock. It links to all likes.
+///
+/// The lit radio is added to the unlit one (plus-lighter) inside an
+/// isolated group, with opacities summing to one: an exact cross-fade, even
+/// where they're see-through. Laid over it the usual way, the shadow and
+/// edges would count twice.
+fn radio_html() -> String {
+    let Some(motion) = &*RADIO_MOTION else {
+        return format!(
+            "<a class=\"radio\" href=\"/\" aria-label=\"All likes\">\
+             <img class=\"radio-still\" src=\"/assets/radio.webp\" alt=\"\">{RADIO_LCD}</a>\n"
+        );
+    };
+    let (width, height) = (f64::from(motion.width), f64::from(motion.height));
+    let part = |class: &str, file: &str, sheet: &RadioSheet| {
+        let [x, y, w, h] = sheet.r#box.map(f64::from);
+        let gutter = f64::from(sheet.gutter);
+        let (cols, rows) = (f64::from(sheet.cols), f64::from(sheet.rows));
+        format!(
+            "<span class=\"radio-part {class}\" style=\"left:{:.4}%;top:{:.4}%;width:{:.4}%;height:{:.4}%\">\
+             <img src=\"/assets/{file}\" alt=\"\" style=\"width:{:.4}%;transform:translate({:.4}%, {:.4}%)\"></span>",
+            x / width * 100.0,
+            y / height * 100.0,
+            w / width * 100.0,
+            h / height * 100.0,
+            cols * (w + 2.0 * gutter) / w * 100.0,
+            -gutter / (cols * (w + 2.0 * gutter)) * 100.0,
+            -gutter / (rows * (h + 2.0 * gutter)) * 100.0,
+        )
+    };
+    format!(
+        "<a class=\"radio\" href=\"/\" aria-label=\"All likes\" data-motion=\"{json}\">\
+         <span class=\"radio-stack\">\
+         <span class=\"radio-off\"><img class=\"radio-still\" src=\"/assets/radio.webp\" \
+         width=\"{w}\" height=\"{h}\" alt=\"\">{knob}{dome}</span>\
+         <span class=\"radio-on\"><img class=\"radio-still\" src=\"/assets/radio-lit.webp\" \
+         width=\"{w}\" height=\"{h}\" alt=\"\">{knob}{dome_lit}</span></span>\
+         <svg class=\"radio-arc\" viewBox=\"0 0 {w} {h}\" aria-hidden=\"true\">\
+         <filter id=\"arc-blur\" x=\"-10%\" y=\"-10%\" width=\"120%\" height=\"120%\">\
+         <feGaussianBlur stdDeviation=\"5\"/></filter>\
+         <path class=\"arc-glow\"/><path class=\"arc-core\"/><path class=\"arc-hot\"/>\
+         <path class=\"arc-surge\" pathLength=\"1\"/></svg>\
+         {RADIO_LCD}</a>\n",
+        json = escape(RADIO_JSON.trim()),
+        w = motion.width,
+        h = motion.height,
+        knob = part("radio-knob", "radio-knob.webp", &motion.knob),
+        dome = part("radio-dome", "radio-dome.webp", &motion.dome),
+        dome_lit = part("radio-dome", "radio-dome-lit.webp", &motion.dome),
     )
 }
 
@@ -3076,6 +3204,31 @@ mod tests {
             update["pictures"],
             serde_json::json!({"youtube/abc": "/videos/youtube/abc/media/thumbnail.webp"})
         );
+    }
+
+    #[test]
+    fn radio_motion_reads() {
+        let motion = RADIO_MOTION.as_ref().unwrap();
+        for sheet in [&motion.dome, &motion.knob] {
+            let [x, y, w, h] = sheet.r#box;
+            assert!(x + w <= motion.width && y + h <= motion.height);
+        }
+        assert!(radio_html().contains("radio-dome-lit.webp"));
+    }
+
+    #[tokio::test]
+    async fn an_asset_already_had_is_not_sent_again() {
+        let Ok(first) = asset(Path("style.css".into()), HeaderMap::new()).await else {
+            panic!("style.css isn't served");
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, first.headers()[header::ETAG].clone());
+        let Ok(again) = asset(Path("style.css".into()), headers).await else {
+            panic!("style.css isn't served");
+        };
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(etag(b"a"), etag(b"a"));
+        assert_ne!(etag(b"a"), etag(b"b"));
     }
 
     #[test]
