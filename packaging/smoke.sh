@@ -47,7 +47,7 @@ echo "$got"
 echo "== tools"
 # A macOS app logs to its file, so its output is there rather than here.
 "$exe" tools
-[ "$os" != macos ] || tail -n 8 "$log"
+[ "$os" != macos ] || tail -n 9 "$log"
 
 echo "== launch"
 if [ "$os" = macos ]; then

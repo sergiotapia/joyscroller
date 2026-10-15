@@ -15,7 +15,7 @@ You've liked thousands of videos. Some get deleted, some go private, and the res
 
 ## How to get it and run it
 
-You need a Mac or Linux, and Chrome, Edge, Opera, Brave, Opera GX, Arc, Chromium or Vivaldi logged in to YouTube, TikTok and Instagram. Joyscroller finds the browser itself each time it starts: if you have more than one, it picks the one logged in to the most of the three. With Arc, which can't run unseen in the background, TikTok and Instagram also need one of the others installed.
+You need a Mac or Linux, and Chrome, Edge, Firefox, Opera, Brave, Opera GX, Arc, Chromium or Vivaldi logged in to YouTube, TikTok and Instagram. Joyscroller finds the browser itself each time it starts: if you have more than one, it picks the one logged in to the most of the three. TikTok and Instagram have to be opened in a browser running unseen in the background, which Firefox and Arc can't do. So with those, Joyscroller uses another browser you have installed, or downloads its own hidden copy of Chrome (about 125 MB) the first time.
 
 ### On a Mac
 

@@ -1,5 +1,6 @@
-//! Reads (and decrypts) cookies straight out of a Chromium-family browser's
-//! on-disk cookie store, so joyscroller can act as the logged-in user.
+//! Reads (and decrypts) cookies straight out of the user's browser's on-disk
+//! cookie store, so joyscroller can act as the logged-in user. Firefox's are
+//! plain (`browser/firefox.rs`); the rest of this is for the Chromium family.
 //!
 //! Linux and macOS for now. Chromium encrypts cookie values with AES-128-CBC
 //! using a key derived (PBKDF2-SHA1, salt "saltysalt") from a password:
@@ -11,7 +12,11 @@
 //!
 //! `sniff` picks which browser to read from: the one logged in to the most of
 //! YouTube, TikTok and Instagram. TikTok and Instagram also run a browser
-//! headless (`headless.rs`), the same one unless it can't (Arc).
+//! headless (`headless.rs`): the same one, or for a browser that can't run
+//! headless (Firefox, Arc), another installed one, or failing that a copy of
+//! Chrome's headless shell that `tools.rs` downloads.
+
+mod firefox;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
@@ -39,16 +44,18 @@ pub enum Browser {
     OperaGx,
     /// Made for macOS and Windows only.
     Arc,
+    Firefox,
 }
 
 impl Browser {
     /// Every browser Joyscroller can read logins from, the most widely used
     /// first: Chrome by far, then Edge (on every Windows PC and many Macs),
-    /// Opera, Brave, Opera GX, Arc, Chromium (the default on many Linux
-    /// distros) and Vivaldi.
-    const MOST_USED_FIRST: [Browser; 8] = [
+    /// Firefox, Opera, Brave, Opera GX, Arc, Chromium (the default on many
+    /// Linux distros) and Vivaldi.
+    const MOST_USED_FIRST: [Browser; 9] = [
         Browser::Chrome,
         Browser::Edge,
+        Browser::Firefox,
         Browser::Opera,
         Browser::Brave,
         Browser::OperaGx,
@@ -68,35 +75,31 @@ impl Browser {
             Browser::Opera => "Opera",
             Browser::OperaGx => "Opera GX",
             Browser::Arc => "Arc",
+            Browser::Firefox => "Firefox",
         }
     }
 
-    /// Whether the browser can run headless for TikTok and Instagram. Arc
-    /// can't: it only takes a DevTools connection when no other copy of it is
-    /// running, and crashes when asked to open a tab (`Target.createTarget`).
+    /// Whether the browser can run headless for TikTok and Instagram over the
+    /// Chrome DevTools Protocol. Firefox dropped its support for it. Arc only
+    /// takes a DevTools connection when no other copy of it is running, and
+    /// crashes when asked to open a tab (`Target.createTarget`).
     fn runs_headless(self) -> bool {
-        !matches!(self, Browser::Arc)
+        !matches!(self, Browser::Arc | Browser::Firefox)
     }
 
-    /// The program to run headless with this browser's logins: its own, or
-    /// for a browser that can't run headless, the most widely used installed
-    /// one that can. The logins are copied into a throwaway profile either
-    /// way, so any of them will do.
-    pub fn headless_executable(self) -> Result<PathBuf> {
+    /// The installed program to run headless with this browser's logins: its
+    /// own, or for a browser that can't run headless, the most widely used
+    /// installed one that can. The logins are copied into a throwaway profile
+    /// either way, so any of them will do. `None` leaves Chrome's headless
+    /// shell, which `tools::headless_chrome` downloads.
+    pub fn installed_headless(self) -> Option<PathBuf> {
         if self.runs_headless() {
-            return self.executable();
+            return self.executable().ok();
         }
         Browser::MOST_USED_FIRST
             .into_iter()
             .filter(|browser| browser.runs_headless())
             .find_map(|browser| browser.executable().ok())
-            .ok_or_else(|| {
-                anyhow!(
-                    "{} can't run in the background, which TikTok and Instagram need; \
-                     install Chrome too",
-                    self.name()
-                )
-            })
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -110,6 +113,7 @@ impl Browser {
             Browser::Edge => "microsoft-edge",
             Browser::Opera => "opera",
             Browser::OperaGx | Browser::Arc => return not_made_for_this_os(self),
+            Browser::Firefox => return firefox_has_no_config_dir(),
         }))
     }
 
@@ -126,6 +130,7 @@ impl Browser {
             Browser::Opera => "com.operasoftware.Opera",
             Browser::OperaGx => "com.operasoftware.OperaGX",
             Browser::Arc => "Arc/User Data",
+            Browser::Firefox => return firefox_has_no_config_dir(),
         }))
     }
 
@@ -140,6 +145,8 @@ impl Browser {
             Browser::Edge => &["microsoft-edge-stable", "microsoft-edge"],
             Browser::Opera => &["opera"],
             Browser::OperaGx | Browser::Arc => return not_made_for_this_os(self),
+            // The last is Flatpak's, on `PATH` where Flatpak adds its exports.
+            Browser::Firefox => &["firefox", "firefox-esr", "org.mozilla.firefox"],
         };
         crate::tools::on_path(names).ok_or_else(|| anyhow!("none of {names:?} is on PATH"))
     }
@@ -182,6 +189,7 @@ impl Browser {
             Browser::Opera => "Opera",
             Browser::OperaGx => "Opera GX",
             Browser::Arc => "Arc",
+            Browser::Firefox => "Firefox",
         }
     }
 
@@ -190,9 +198,10 @@ impl Browser {
     /// Opera's is yt-dlp's. Arc's and Opera GX's services are from users'
     /// reports, and their accounts are guesses, so `keychain_password` falls
     /// back to finding the item by service alone.
+    /// Firefox doesn't encrypt its cookies, so it has none.
     #[cfg(target_os = "macos")]
-    fn keychain_item(self) -> (&'static str, &'static str) {
-        match self {
+    fn keychain_item(self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
             Browser::Brave => ("Brave Safe Storage", "Brave"),
             Browser::Chrome => ("Chrome Safe Storage", "Chrome"),
             Browser::Chromium => ("Chromium Safe Storage", "Chromium"),
@@ -201,27 +210,31 @@ impl Browser {
             // Opera GX shares Opera's item.
             Browser::Opera | Browser::OperaGx => ("Opera Safe Storage", "Opera"),
             Browser::Arc => ("Arc Safe Storage", "Arc"),
-        }
+            Browser::Firefox => return None,
+        })
     }
 
     /// The `application` attribute Chromium stores its keyring secret under.
-    /// Edge's was found on CI's Linux runners (Edge 152-155).
+    /// Edge's was found on CI's Linux runners (Edge 152-155). Opera GX and Arc
+    /// aren't made for Linux, and Firefox doesn't encrypt its cookies.
     #[cfg(target_os = "linux")]
-    fn keyring_application(self) -> &'static str {
-        match self {
+    fn keyring_application(self) -> Option<&'static str> {
+        Some(match self {
             Browser::Brave => "brave",
             Browser::Chrome => "chrome",
             // Edge and Opera (per yt-dlp) keep Chromium's own name rather
-            // than their brand. Opera GX and Arc never get here, having no
-            // Linux config folder.
-            Browser::Chromium
-            | Browser::Edge
-            | Browser::Opera
-            | Browser::OperaGx
-            | Browser::Arc => "chromium",
+            // than their brand.
+            Browser::Chromium | Browser::Edge | Browser::Opera => "chromium",
             Browser::Vivaldi => "vivaldi",
-        }
+            Browser::OperaGx | Browser::Arc | Browser::Firefox => return None,
+        })
     }
+}
+
+/// Firefox's profiles are found through `profiles.ini` instead
+/// (`firefox::cookie_db`).
+fn firefox_has_no_config_dir<T>() -> Result<T> {
+    Err(anyhow!("Firefox keeps its profiles elsewhere"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -242,7 +255,12 @@ pub struct Cookie {
 
 /// All cookies whose host matches `domain` (e.g. "youtube.com" matches
 /// ".youtube.com" and "www.youtube.com").
+/// Firefox has no profile named like Chromium's, so it reads the profile in
+/// use whatever `profile` says.
 pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Result<Vec<Cookie>> {
+    if let Browser::Firefox = browser {
+        return firefox::cookies_for(domain);
+    }
     let (_copy, conn) = open_copy(&cookie_db(browser, profile)?)?;
 
     let db_version: i64 = conn
@@ -305,6 +323,9 @@ pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Resul
 
 /// The profile's cookie database, which moved into `Network/` in Chromium 96.
 fn cookie_db(browser: Browser, profile: &str) -> Result<PathBuf> {
+    if let Browser::Firefox = browser {
+        return firefox::cookie_db();
+    }
     let config_dir = browser.config_dir()?;
     let profile_dir = config_dir.join(profile);
     let mut candidates = vec![
@@ -326,12 +347,22 @@ fn cookie_db(browser: Browser, profile: &str) -> Result<PathBuf> {
 }
 
 /// Opens a copy of the cookie database at `db_path`, since the browser holds
-/// a lock on the live one. The copy lasts as long as the returned file.
-fn open_copy(db_path: &Path) -> Result<(tempfile::NamedTempFile, rusqlite::Connection)> {
-    let copy = tempfile::NamedTempFile::new()?;
-    std::fs::copy(db_path, copy.path())
-        .with_context(|| format!("copying {}", db_path.display()))?;
-    let conn = rusqlite::Connection::open(copy.path())?;
+/// a lock on the live one. Its write-ahead log comes along when it has one
+/// (Firefox's does), since recent changes wait there. The copy lasts as long
+/// as the returned folder.
+fn open_copy(db_path: &Path) -> Result<(tempfile::TempDir, rusqlite::Connection)> {
+    let copy = tempfile::tempdir()?;
+    let db = copy.path().join("cookies.sqlite");
+    std::fs::copy(db_path, &db).with_context(|| format!("copying {}", db_path.display()))?;
+    let mut wal = db_path.as_os_str().to_owned();
+    wal.push("-wal");
+    match std::fs::copy(&wal, copy.path().join("cookies.sqlite-wal")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("copying {}", Path::new(&wal).display()));
+        }
+        _ => {}
+    }
+    let conn = rusqlite::Connection::open(&db)?;
     Ok((copy, conn))
 }
 
@@ -359,7 +390,7 @@ pub fn sniff(profile: &str) -> Browser {
         // stale), and no cookie database means it has never been opened.
         browser.executable().ok()?;
         let db = cookie_db(browser, profile).ok()?;
-        match open_copy(&db).and_then(|(_copy, conn)| logged_in_sites(&conn)) {
+        match open_copy(&db).and_then(|(_copy, conn)| logged_in_sites(&conn, browser)) {
             Ok(sites) => Some((browser, sites)),
             Err(e) => {
                 eprintln!("warning: couldn't read {}'s logins: {e:#}", browser.name());
@@ -385,8 +416,11 @@ pub fn sniff(profile: &str) -> Browser {
     } else {
         eprintln!("browser: using {name}, logged in to {}", sites.join(", "));
     }
-    if let Err(e) = browser.headless_executable() {
-        eprintln!("warning: {e:#}");
+    if browser.installed_headless().is_none() {
+        eprintln!(
+            "browser: {name} can't run TikTok and Instagram in the background, so \
+             Joyscroller runs its own copy of Chrome's headless shell for them"
+        );
     }
     browser
 }
@@ -402,15 +436,19 @@ fn most_logged_in(
     })
 }
 
-/// Which of `LOGINS`' sites a cookie database holds an unexpired login for.
-fn logged_in_sites(conn: &rusqlite::Connection) -> Result<Vec<&'static str>> {
+/// Which of `LOGINS`' sites `browser`'s cookie database holds an unexpired
+/// login for.
+fn logged_in_sites(conn: &rusqlite::Connection, browser: Browser) -> Result<Vec<&'static str>> {
     // Chromium's times are microseconds since 1601; 0 is a session cookie.
-    let mut stmt = conn.prepare(
-        "SELECT EXISTS (SELECT 1 FROM cookies \
-         WHERE (host_key = ?1 OR host_key LIKE '%.' || ?1) AND name = ?2 \
-         AND (expires_utc = 0 \
-              OR expires_utc > (unixepoch() + 11644473600) * 1000000))",
-    )?;
+    let sql = match browser {
+        Browser::Firefox => firefox::has_login_sql(),
+        _ => "SELECT EXISTS (SELECT 1 FROM cookies \
+              WHERE (host_key = ?1 OR host_key LIKE '%.' || ?1) AND name = ?2 \
+              AND (expires_utc = 0 \
+                   OR expires_utc > (unixepoch() + 11644473600) * 1000000))"
+            .to_owned(),
+    };
+    let mut stmt = conn.prepare(&sql)?;
     let mut sites = Vec::new();
     for (site, domain, names) in LOGINS {
         for name in names {
@@ -455,7 +493,9 @@ async fn keys(browser: Browser) -> Result<Keys> {
         tokio::sync::Mutex::const_new(None);
     let mut known = KEYS.lock().await;
     let known = known.get_or_insert_with(HashMap::new);
-    let (service, account) = browser.keychain_item();
+    let (service, account) = browser
+        .keychain_item()
+        .with_context(|| format!("{} has no Keychain item", browser.name()))?;
     let key = if let Some(key) = known.get(service) {
         *key
     } else {
@@ -533,8 +573,11 @@ fn decrypt(key: &[u8; 16], ciphertext: &[u8], host: &str, db_version: i64) -> Re
 async fn keyring_password(browser: Browser) -> Result<Vec<u8>> {
     use secret_service::{EncryptionType, SecretService};
 
+    let application = browser
+        .keyring_application()
+        .with_context(|| format!("{} has no keyring secret", browser.name()))?;
     let ss = SecretService::connect(EncryptionType::Dh).await?;
-    let attrs = HashMap::from([("application", browser.keyring_application())]);
+    let attrs = HashMap::from([("application", application)]);
     let found = ss.search_items(attrs).await?;
     let item = match (found.unlocked.first(), found.locked.first()) {
         (Some(item), _) => item,
@@ -542,7 +585,7 @@ async fn keyring_password(browser: Browser) -> Result<Vec<u8>> {
             item.unlock().await?;
             item
         }
-        (None, None) => bail!("no '{}' secret in keyring", browser.keyring_application()),
+        (None, None) => bail!("no '{application}' secret in keyring"),
     };
     Ok(item.get_secret().await?)
 }
@@ -673,7 +716,10 @@ mod tests {
             (".tiktok.com", "sessionid", 0),
             (".instagram.com", "csrftoken", LATER),
         ]);
-        assert_eq!(logged_in_sites(&conn).unwrap(), ["YouTube", "TikTok"]);
+        assert_eq!(
+            logged_in_sites(&conn, Browser::Chrome).unwrap(),
+            ["YouTube", "TikTok"]
+        );
     }
 
     #[test]
@@ -683,7 +729,10 @@ mod tests {
             (".nottiktok.com", "sessionid", LATER),
             ("www.instagram.com", "sessionid", LATER),
         ]);
-        assert_eq!(logged_in_sites(&conn).unwrap(), ["Instagram"]);
+        assert_eq!(
+            logged_in_sites(&conn, Browser::Chrome).unwrap(),
+            ["Instagram"]
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 ### Changed
 
 - Joyscroller no longer needs Brave. Each time it starts, it looks for every browser it supports and reads your logins from the one logged in to the most of YouTube, TikTok and Instagram. To switch browsers, log in with the new one and restart Joyscroller.
-- Joyscroller now also reads your logins from Opera, and on a Mac from Opera GX and Arc. Arc can't run in the background, so with Arc, TikTok and Instagram need another of these browsers installed too.
+- Joyscroller now also reads your logins from Firefox and Opera, and on a Mac from Opera GX and Arc. Firefox and Arc can't open TikTok and Instagram unseen in the background, so with them Joyscroller uses another browser you have installed, or the first time downloads its own hidden copy of Chrome (about 125 MB).
 
 ## [0.5.0] - 2026-10-14
 

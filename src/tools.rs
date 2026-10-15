@@ -10,6 +10,10 @@
 //! a ~150 MB download. Prebuilt copies exist for Linux, macOS and Windows on
 //! `x86_64` and `aarch64` (`ASSETS`); anywhere else, everything comes from `PATH`.
 //! Tool files carry the platform's executable suffix (`.exe` on Windows).
+//!
+//! Chrome's headless shell is fetched only when it's needed: when the user's
+//! browser can't run TikTok and Instagram headless (Firefox, Arc) and no
+//! other installed browser can either (`headless_chrome`).
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -34,6 +38,14 @@ const FFMPEG_RELEASE: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/d
 const BUN_RELEASE: &str = "https://github.com/oven-sh/bun/releases/latest/download";
 /// ffmpeg release builds for macOS, which yt-dlp's builds don't cover.
 const MARTIN_RIEDL: &str = "https://ffmpeg.martin-riedl.de";
+/// Chrome for Testing's builds, in folders by version and platform.
+const CHROME_FOR_TESTING: &str = "https://storage.googleapis.com/chrome-for-testing-public";
+/// The Chrome headless shell we fetch. Google publishes no checksums for these
+/// builds, so the version is pinned and each platform's zip has its SHA-256
+/// recorded in `ASSETS`. To move to a newer one, take the Stable version from
+/// <https://googlechromelabs.github.io/chrome-for-testing/>, run
+/// `just chrome-hashes <version>`, and update both.
+const CHROME_VERSION: &str = "155.0.8059.79";
 
 /// What the programs in yt-dlp's Windows ffmpeg zips end in. Fixed rather than
 /// the running platform's suffix so the matching can be tested anywhere.
@@ -48,6 +60,16 @@ struct Assets {
     ffmpeg: FfmpegBuild,
     /// A `.zip` with the `bun` executable in a folder named like the zip.
     bun: &'static str,
+    /// Chrome's headless shell, where Chrome for Testing builds it.
+    chrome: Option<ChromeBuild>,
+}
+
+/// One platform's Chrome for Testing headless shell: `platform` is its folder
+/// and name there (`chrome-headless-shell-<platform>.zip`, which holds a
+/// folder of the same name), and `sha256` the zip's at `CHROME_VERSION`.
+struct ChromeBuild {
+    platform: &'static str,
+    sha256: &'static str,
 }
 
 /// Where a platform's ffmpeg and ffprobe come from.
@@ -71,6 +93,10 @@ const ASSETS: &[Assets] = &[
         // The default x86_64 build needs AVX2; baseline runs on any x86_64 CPU,
         // and solving YouTube's challenges is too little work to tell them apart.
         bun: "bun-linux-x64-baseline.zip",
+        chrome: Some(ChromeBuild {
+            platform: "linux64",
+            sha256: "4cea4c32b501aa43cc2b81eb45734af991a6a82feded48380d6dfaf96642a1c1",
+        }),
     },
     Assets {
         os: "linux",
@@ -78,6 +104,10 @@ const ASSETS: &[Assets] = &[
         yt_dlp: "yt-dlp_linux_aarch64",
         ffmpeg: FfmpegBuild::TarXz("ffmpeg-master-latest-linuxarm64-gpl.tar.xz"),
         bun: "bun-linux-aarch64.zip",
+        chrome: Some(ChromeBuild {
+            platform: "linux-arm64",
+            sha256: "72d938cabad9674610939c72ef2d3faf20214a4418c3b4e94c1cebca683e767b",
+        }),
     },
     // The same universal yt-dlp binary runs on both Macs.
     Assets {
@@ -86,6 +116,10 @@ const ASSETS: &[Assets] = &[
         yt_dlp: "yt-dlp_macos",
         ffmpeg: FfmpegBuild::MartinRiedl("macos/arm64"),
         bun: "bun-darwin-aarch64.zip",
+        chrome: Some(ChromeBuild {
+            platform: "mac-arm64",
+            sha256: "5f51504ead3d41815111cd73e79c4979df3a4e6aedc7cf6fe2b042ae037363b5",
+        }),
     },
     Assets {
         os: "macos",
@@ -94,6 +128,10 @@ const ASSETS: &[Assets] = &[
         ffmpeg: FfmpegBuild::MartinRiedl("macos/amd64"),
         // Baseline for the same reason as on Linux.
         bun: "bun-darwin-x64-baseline.zip",
+        chrome: Some(ChromeBuild {
+            platform: "mac-x64",
+            sha256: "36a1da728fc936770a0edc52989b74d8d3a194e8747f490e372a210853ad831c",
+        }),
     },
     Assets {
         os: "windows",
@@ -101,6 +139,10 @@ const ASSETS: &[Assets] = &[
         yt_dlp: "yt-dlp.exe",
         ffmpeg: FfmpegBuild::Zip("ffmpeg-master-latest-win64-gpl.zip"),
         bun: "bun-windows-x64-baseline.zip",
+        chrome: Some(ChromeBuild {
+            platform: "win64",
+            sha256: "c4cc49fa7908cf018600b04c95918d336565d90f9c72241fd83dacd9ec41855c",
+        }),
     },
     Assets {
         os: "windows",
@@ -108,6 +150,8 @@ const ASSETS: &[Assets] = &[
         yt_dlp: "yt-dlp_arm64.exe",
         ffmpeg: FfmpegBuild::Zip("ffmpeg-master-latest-winarm64-gpl.zip"),
         bun: "bun-windows-aarch64.zip",
+        // Chrome for Testing has no Windows on Arm build.
+        chrome: None,
     },
 ];
 
@@ -269,6 +313,90 @@ pub async fn ensure_helpers() -> Result<()> {
         let dir = dir.clone();
         blocking(move || fetch_bun(&dir, assets.bun)).await?;
         eprintln!("tools: bun ready");
+    }
+    Ok(())
+}
+
+/// Chrome's headless shell, fetched the first time it's asked for: it runs
+/// TikTok and Instagram when no installed browser can
+/// (`Browser::installed_headless`). About 110-125 MB.
+pub async fn headless_chrome() -> Result<PathBuf> {
+    // TikTok's sync and a photo post's download can ask at once; one fetches.
+    static FETCHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let Some(build) = assets().and_then(|assets| assets.chrome.as_ref()) else {
+        bail!("there's no Chrome headless shell for this computer; install Chrome");
+    };
+    let dir = dir()?;
+    let program = chrome_folder(&dir).join(chrome_in_zip(build, std::env::consts::EXE_SUFFIX));
+    let _one_at_a_time = FETCHING.lock().await;
+    if !program.is_file() {
+        eprintln!("tools: downloading Chrome's headless shell (about 125 MB)");
+        blocking(move || fetch_chrome(&dir, build)).await?;
+        eprintln!("tools: Chrome's headless shell ready");
+    }
+    Ok(program)
+}
+
+/// Where the headless shell at `CHROME_VERSION` is unpacked.
+fn chrome_folder(dir: &Path) -> PathBuf {
+    dir.join(format!("chrome-headless-shell-{CHROME_VERSION}"))
+}
+
+/// The program in a headless shell zip, which holds everything in a folder
+/// named like the zip.
+fn chrome_in_zip(build: &ChromeBuild, exe_suffix: &str) -> String {
+    format!(
+        "chrome-headless-shell-{}/chrome-headless-shell{exe_suffix}",
+        build.platform
+    )
+}
+
+/// Download the headless shell, unpack it beside its final folder, then move
+/// it into place in one rename, so nothing ever runs a half-unpacked copy.
+/// Copies of other versions are deleted after.
+fn fetch_chrome(dir: &Path, build: &ChromeBuild) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let name = format!("chrome-headless-shell-{}.zip", build.platform);
+    let url = format!(
+        "{CHROME_FOR_TESTING}/{CHROME_VERSION}/{}/{name}",
+        build.platform
+    );
+    let mut archive = tempfile::tempfile_in(dir)?;
+    download_verified(
+        &url,
+        &format!("{}  {name}", build.sha256),
+        &name,
+        &mut archive,
+    )?;
+    let unpacking = tempfile::Builder::new()
+        .prefix(".chrome-unpacking-")
+        .tempdir_in(dir)?;
+    zip::ZipArchive::new(archive)
+        .and_then(|mut zip| zip.extract(unpacking.path()))
+        .context("unpacking Chrome's headless shell")?;
+    let folder = chrome_folder(dir);
+    // A folder already there is missing its program (we wouldn't be fetching
+    // otherwise), and a folder can't be renamed onto one that isn't empty.
+    if folder.exists() {
+        std::fs::remove_dir_all(&folder)
+            .with_context(|| format!("removing the broken {}", folder.display()))?;
+    }
+    std::fs::rename(unpacking.path(), &folder)
+        .with_context(|| format!("installing {}", folder.display()))?;
+    // Other versions, and what an unpacking cut short by a crash left behind.
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let old = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| {
+                (name.starts_with("chrome-headless-shell-")
+                    || name.starts_with(".chrome-unpacking-"))
+                    && path != folder
+            });
+        if old && let Err(e) = std::fs::remove_dir_all(&path) {
+            eprintln!("warning: couldn't remove {}: {e}", path.display());
+        }
     }
     Ok(())
 }
@@ -553,6 +681,26 @@ pub async fn versions() -> Result<String> {
         let first = stdout.lines().next().unwrap_or_default().trim();
         writeln!(lines, "{name}: {first} ({})", path.display())?;
     }
+    if let Some(build) = assets().and_then(|assets| assets.chrome.as_ref()) {
+        let program =
+            chrome_folder(&dir()?).join(chrome_in_zip(build, std::env::consts::EXE_SUFFIX));
+        if program.is_file() {
+            let out = Command::new(&program)
+                .arg("--version")
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output()
+                .await
+                .with_context(|| format!("running {} --version", program.display()))?;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            writeln!(
+                lines,
+                "chrome-headless-shell: {} ({})",
+                stdout.trim(),
+                program.display()
+            )?;
+        }
+    }
     Ok(lines)
 }
 
@@ -682,6 +830,22 @@ mod tests {
         ));
         assert!(tool(&format!("{dir}/bin/ffplay")).is_none());
         assert!(tool(&format!("{dir}/LICENSE.txt")).is_none());
+    }
+
+    #[test]
+    fn finds_chrome_inside_its_zip() {
+        let build = |platform| ChromeBuild {
+            platform,
+            sha256: "",
+        };
+        assert_eq!(
+            chrome_in_zip(&build("linux64"), ""),
+            "chrome-headless-shell-linux64/chrome-headless-shell"
+        );
+        assert_eq!(
+            chrome_in_zip(&build("win64"), ".exe"),
+            "chrome-headless-shell-win64/chrome-headless-shell.exe"
+        );
     }
 
     #[test]

@@ -36,10 +36,14 @@ pub struct Headless {
 }
 
 impl Headless {
-    /// Start `browser` headless with `cookies` loaded and a blank tab open
-    /// (another browser, for one that can't run headless).
+    /// Start `browser` headless with `cookies` loaded and a blank tab open:
+    /// another installed browser for one that can't run headless, or failing
+    /// that, Chrome's headless shell, fetched the first time.
     pub async fn launch(browser: Browser, cookies: &[Cookie]) -> Result<Self> {
-        let exe = browser.headless_executable()?;
+        let exe = match browser.installed_headless() {
+            Some(exe) => exe,
+            None => crate::tools::headless_chrome().await?,
+        };
         let profile = tempfile::Builder::new()
             .prefix("joyscroller-browser-")
             .tempdir()?;

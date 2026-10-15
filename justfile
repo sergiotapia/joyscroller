@@ -28,3 +28,10 @@ test:
 # the versions pinned in assets/videojs/package-lock.json. Needs Node.
 videojs:
     cd assets/videojs && npm ci && npm run build
+
+# The SHA-256 of each platform's Chrome headless shell zip at `version`, for
+# ASSETS and CHROME_VERSION in src/tools.rs. Downloads about 600 MB.
+chrome-hashes version:
+    for platform in linux64 linux-arm64 mac-arm64 mac-x64 win64; do \
+      echo "$platform $(curl -fsSL https://storage.googleapis.com/chrome-for-testing-public/{{version}}/$platform/chrome-headless-shell-$platform.zip | sha256sum | cut -d' ' -f1)"; \
+    done

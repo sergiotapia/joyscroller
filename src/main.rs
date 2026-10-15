@@ -263,6 +263,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Tools => {
             tools::ensure_yt_dlp().await?;
             tools::ensure_helpers().await?;
+            tools::headless_chrome().await?;
             print!("{}", tools::versions().await?);
         }
         Command::Download {
