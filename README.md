@@ -15,7 +15,7 @@ You've liked thousands of videos. Some get deleted, some go private, and the res
 
 ## How to get it and run it
 
-You need a Mac or Linux, and Chrome, Edge, Firefox, Opera, Brave, Opera GX, Arc, Chromium or Vivaldi logged in to YouTube, TikTok and Instagram. Joyscroller finds the browser itself each time it starts: if you have more than one, it picks the one logged in to the most of the three. TikTok and Instagram have to be opened in a browser running unseen in the background, which Firefox and Arc can't do. So with those, Joyscroller uses another browser you have installed, or downloads its own hidden copy of Chrome (about 125 MB) the first time.
+You need a Mac or Linux, and Chrome, Safari, Edge, Firefox, Opera, Brave, Opera GX, Arc, Chromium or Vivaldi logged in to YouTube, TikTok and Instagram. Joyscroller finds the browser itself each time it starts: if you have more than one, it picks the one logged in to the most of the three. TikTok and Instagram have to be opened in a browser running unseen in the background, which Firefox, Safari and Arc can't do. So with those, Joyscroller uses another browser you have installed, or downloads its own hidden copy of Chrome (about 125 MB) the first time.
 
 ### On a Mac
 
@@ -24,6 +24,7 @@ You need a Mac or Linux, and Chrome, Edge, Firefox, Opera, Brave, Opera GX, Arc,
 3. Open Joyscroller. It isn't signed by Apple, so the first time macOS says *"Joyscroller" Not Opened* because Apple could not verify it. Click **Done**, not **Move to Trash**. Then open **System Settings → Privacy & Security**, scroll to the bottom and click **Open Anyway**.
 4. Joyscroller opens in your browser at **http://127.0.0.1:4774**. It has no window or Dock icon of its own; open the app again to get back to it.
 5. macOS asks for your Mac's password so Joyscroller can use your browser's "Safe Storage" key in the Keychain. That's how it reads your logins: type your password and click **Always Allow**. After each update it asks once more.
+6. If you use Safari, macOS won't let Joyscroller read its logins until you open **System Settings → Privacy & Security → Full Disk Access** and turn on **Joyscroller** (click **+** if it isn't listed), then open Joyscroller again. After each update, remove it from that list with **−** and add it again.
 
 Your videos are saved in `Movies/Joyscroller` in your home folder, and everything else in `Library/Application Support/Joyscroller`. To stop it, click **Turn off** at the end of its taskbar.
 

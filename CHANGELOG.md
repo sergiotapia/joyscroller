@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- On a Mac, Joyscroller now also reads your logins from Safari. macOS only lets it do that once you turn on Joyscroller in **System Settings → Privacy & Security → Full Disk Access**; until you do, the sidebar says so where a sync failed. Safari can't open TikTok and Instagram unseen in the background, so Joyscroller uses another browser you have installed for them, or downloads its own hidden copy of Chrome.
+
 ## [0.6.0] - 2026-10-15
 
 ### Added

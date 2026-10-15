@@ -1,6 +1,7 @@
 //! Reads (and decrypts) cookies straight out of the user's browser's on-disk
-//! cookie store, so joyscroller can act as the logged-in user. Firefox's are
-//! plain (`browser/firefox.rs`); the rest of this is for the Chromium family.
+//! cookie store, so joyscroller can act as the logged-in user. Firefox's and
+//! Safari's are plain (`browser/firefox.rs`, `browser/safari.rs`); the rest of
+//! this is for the Chromium family.
 //!
 //! Linux and macOS for now. Chromium encrypts cookie values with AES-128-CBC
 //! using a key derived (PBKDF2-SHA1, salt "saltysalt") from a password:
@@ -13,10 +14,11 @@
 //! `sniff` picks which browser to read from: the one logged in to the most of
 //! YouTube, TikTok and Instagram. TikTok and Instagram also run a browser
 //! headless (`headless.rs`): the same one, or for a browser that can't run
-//! headless (Firefox, Arc), another installed one, or failing that a copy of
+//! headless (Firefox, Safari, Arc), another installed one, or failing that a copy of
 //! Chrome's headless shell that `tools.rs` downloads.
 
 mod firefox;
+mod safari;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
@@ -45,15 +47,18 @@ pub enum Browser {
     /// Made for macOS and Windows only.
     Arc,
     Firefox,
+    /// Made for macOS only.
+    Safari,
 }
 
 impl Browser {
     /// Every browser Joyscroller can read logins from, the most widely used
-    /// first: Chrome by far, then Edge (on every Windows PC and many Macs),
-    /// Firefox, Opera, Brave, Opera GX, Arc, Chromium (the default on many
-    /// Linux distros) and Vivaldi.
-    const MOST_USED_FIRST: [Browser; 9] = [
+    /// first: Chrome by far, then Safari (on every Mac), Edge (on every
+    /// Windows PC and many Macs), Firefox, Opera, Brave, Opera GX, Arc,
+    /// Chromium (the default on many Linux distros) and Vivaldi.
+    const MOST_USED_FIRST: [Browser; 10] = [
         Browser::Chrome,
+        Browser::Safari,
         Browser::Edge,
         Browser::Firefox,
         Browser::Opera,
@@ -76,15 +81,17 @@ impl Browser {
             Browser::OperaGx => "Opera GX",
             Browser::Arc => "Arc",
             Browser::Firefox => "Firefox",
+            Browser::Safari => "Safari",
         }
     }
 
     /// Whether the browser can run headless for TikTok and Instagram over the
-    /// Chrome DevTools Protocol. Firefox dropped its support for it. Arc only
+    /// Chrome DevTools Protocol. Firefox dropped its support for it, and Safari
+    /// never had it. Arc only
     /// takes a DevTools connection when no other copy of it is running, and
     /// crashes when asked to open a tab (`Target.createTarget`).
     fn runs_headless(self) -> bool {
-        !matches!(self, Browser::Arc | Browser::Firefox)
+        !matches!(self, Browser::Arc | Browser::Firefox | Browser::Safari)
     }
 
     /// The installed program to run headless with this browser's logins: its
@@ -112,7 +119,9 @@ impl Browser {
             Browser::Vivaldi => "vivaldi",
             Browser::Edge => "microsoft-edge",
             Browser::Opera => "opera",
-            Browser::OperaGx | Browser::Arc => return not_made_for_this_os(self),
+            Browser::OperaGx | Browser::Arc | Browser::Safari => {
+                return not_made_for_this_os(self);
+            }
             Browser::Firefox => return firefox_has_no_config_dir(),
         }))
     }
@@ -131,6 +140,7 @@ impl Browser {
             Browser::OperaGx => "com.operasoftware.OperaGX",
             Browser::Arc => "Arc/User Data",
             Browser::Firefox => return firefox_has_no_config_dir(),
+            Browser::Safari => return Err(anyhow!("Safari keeps its cookies elsewhere")),
         }))
     }
 
@@ -144,7 +154,9 @@ impl Browser {
             Browser::Vivaldi => &["vivaldi-stable", "vivaldi"],
             Browser::Edge => &["microsoft-edge-stable", "microsoft-edge"],
             Browser::Opera => &["opera"],
-            Browser::OperaGx | Browser::Arc => return not_made_for_this_os(self),
+            Browser::OperaGx | Browser::Arc | Browser::Safari => {
+                return not_made_for_this_os(self);
+            }
             // The last is Flatpak's, on `PATH` where Flatpak adds its exports.
             Browser::Firefox => &["firefox", "firefox-esr", "org.mozilla.firefox"],
         };
@@ -190,6 +202,7 @@ impl Browser {
             Browser::OperaGx => "Opera GX",
             Browser::Arc => "Arc",
             Browser::Firefox => "Firefox",
+            Browser::Safari => "Safari",
         }
     }
 
@@ -198,7 +211,7 @@ impl Browser {
     /// Opera's is yt-dlp's. Arc's and Opera GX's services are from users'
     /// reports, and their accounts are guesses, so `keychain_password` falls
     /// back to finding the item by service alone.
-    /// Firefox doesn't encrypt its cookies, so it has none.
+    /// Firefox and Safari don't encrypt their cookies, so they have none.
     #[cfg(target_os = "macos")]
     fn keychain_item(self) -> Option<(&'static str, &'static str)> {
         Some(match self {
@@ -210,13 +223,14 @@ impl Browser {
             // Opera GX shares Opera's item.
             Browser::Opera | Browser::OperaGx => ("Opera Safe Storage", "Opera"),
             Browser::Arc => ("Arc Safe Storage", "Arc"),
-            Browser::Firefox => return None,
+            Browser::Firefox | Browser::Safari => return None,
         })
     }
 
     /// The `application` attribute Chromium stores its keyring secret under.
     /// Edge's was found on CI's Linux runners (Edge 152-155). Opera GX and Arc
-    /// aren't made for Linux, and Firefox doesn't encrypt its cookies.
+    /// aren't made for Linux, nor is Safari, and Firefox doesn't encrypt its
+    /// cookies.
     #[cfg(target_os = "linux")]
     fn keyring_application(self) -> Option<&'static str> {
         Some(match self {
@@ -226,7 +240,7 @@ impl Browser {
             // than their brand.
             Browser::Chromium | Browser::Edge | Browser::Opera => "chromium",
             Browser::Vivaldi => "vivaldi",
-            Browser::OperaGx | Browser::Arc | Browser::Firefox => return None,
+            Browser::OperaGx | Browser::Arc | Browser::Firefox | Browser::Safari => return None,
         })
     }
 }
@@ -255,11 +269,13 @@ pub struct Cookie {
 
 /// All cookies whose host matches `domain` (e.g. "youtube.com" matches
 /// ".youtube.com" and "www.youtube.com").
-/// Firefox has no profile named like Chromium's, so it reads the profile in
-/// use whatever `profile` says.
+/// Firefox and Safari have no profiles named like Chromium's, so they read
+/// the profile in use whatever `profile` says.
 pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Result<Vec<Cookie>> {
-    if let Browser::Firefox = browser {
-        return firefox::cookies_for(domain);
+    match browser {
+        Browser::Firefox => return firefox::cookies_for(domain),
+        Browser::Safari => return safari::cookies_for(domain),
+        _ => {}
     }
     let (_copy, conn) = open_copy(&cookie_db(browser, profile)?)?;
 
@@ -382,16 +398,22 @@ const LOGINS: [(&str, &str, &[&str]); 3] = [
 /// installed browsers with a `profile`, the one logged in to the most of
 /// YouTube, TikTok and Instagram, and on a tie the most widely used. Only
 /// cookie names and expiry dates are read, which Chromium doesn't encrypt,
-/// so this never asks the keyring or the Keychain for anything. With no
-/// browser to be found, it's Chrome, whose errors at least say what's missing.
+/// so this never asks the keyring or the Keychain for anything. Safari's
+/// logins can't be read without Full Disk Access, so then it's picked only
+/// when no other browser is logged in to anything, and its syncs fail saying
+/// what to turn on. With no browser to be found, it's Chrome, whose errors
+/// at least say what's missing.
 pub fn sniff(profile: &str) -> Browser {
     let found = Browser::MOST_USED_FIRST.into_iter().filter_map(|browser| {
         // No program means it isn't installed (what's left of one that was is
-        // stale), and no cookie database means it has never been opened.
+        // stale), and no cookies means it has never been opened.
         browser.executable().ok()?;
-        let db = cookie_db(browser, profile).ok()?;
-        match open_copy(&db).and_then(|(_copy, conn)| logged_in_sites(&conn, browser)) {
-            Ok(sites) => Some((browser, sites)),
+        match logins(browser, profile)? {
+            Ok(sites) => Some((browser, Some(sites))),
+            Err(e) if e.is::<safari::NoFullDiskAccess>() => {
+                eprintln!("warning: couldn't check Safari's logins: {e}");
+                Some((browser, None))
+            }
             Err(e) => {
                 eprintln!("warning: couldn't read {}'s logins: {e:#}", browser.name());
                 None
@@ -408,6 +430,10 @@ pub fn sniff(profile: &str) -> Browser {
         return Browser::Chrome;
     };
     let name = browser.name();
+    let Some(sites) = sites else {
+        eprintln!("warning: using {name}, as no other browser is logged in, but can't read it yet");
+        return browser;
+    };
     if sites.is_empty() {
         eprintln!(
             "warning: using {name}, which isn't logged in to YouTube, TikTok or Instagram; \
@@ -425,15 +451,45 @@ pub fn sniff(profile: &str) -> Browser {
     browser
 }
 
-/// The first of `found` logged in to the most sites. `found` comes most used
-/// first, so that's the tie-break.
-fn most_logged_in(
-    found: impl IntoIterator<Item = (Browser, Vec<&'static str>)>,
-) -> Option<(Browser, Vec<&'static str>)> {
+/// The sites a browser is logged in to, or `None` where they couldn't be
+/// checked (Safari without Full Disk Access).
+type Found = (Browser, Option<Vec<&'static str>>);
+
+/// The first of `found` logged in to the most sites. One that couldn't be
+/// checked might be logged in, so it beats one logged in to none. `found`
+/// comes most used first, so that's the tie-break.
+fn most_logged_in(found: impl IntoIterator<Item = Found>) -> Option<Found> {
+    // Doubled, so an unknown one fits between none and one.
+    let rank = |sites: &Option<Vec<_>>| sites.as_ref().map_or(1, |sites| 2 * sites.len());
     found.into_iter().fold(None, |best, candidate| match best {
-        Some(best) if best.1.len() >= candidate.1.len() => Some(best),
+        Some(best) if rank(&best.1) >= rank(&candidate.1) => Some(best),
         _ => Some(candidate),
     })
+}
+
+/// Which of `LOGINS`' sites `browser` holds an unexpired login for. `None`
+/// when it has no cookies there at all.
+fn logins(browser: Browser, profile: &str) -> Option<Result<Vec<&'static str>>> {
+    if let Browser::Safari = browser {
+        safari::cookie_file().ok()?;
+        return Some(safari::read().map(|cookies| safari_logins(&cookies, crate::db::now())));
+    }
+    let db = cookie_db(browser, profile).ok()?;
+    Some(open_copy(&db).and_then(|(_copy, conn)| logged_in_sites(&conn, browser)))
+}
+
+/// Which of `LOGINS`' sites Safari's `cookies` hold a login for that's
+/// unexpired at `now`.
+fn safari_logins(cookies: &[Cookie], now: i64) -> Vec<&'static str> {
+    LOGINS
+        .into_iter()
+        .filter(|(_, domain, names)| {
+            cookies.iter().any(|c| {
+                safari::on_domain(&c.host, domain) && names.contains(&&*c.name) && c.expires > now
+            })
+        })
+        .map(|(site, _, _)| site)
+        .collect()
 }
 
 /// Which of `LOGINS`' sites `browser`'s cookie database holds an unexpired
@@ -745,21 +801,59 @@ mod tests {
 
     #[test]
     fn prefers_most_logins_then_most_used() {
-        let picked = |found: Vec<(Browser, Vec<&'static str>)>| {
-            most_logged_in(found).map(|(browser, _)| format!("{browser:?}"))
-        };
+        let picked =
+            |found: Vec<Found>| most_logged_in(found).map(|(browser, _)| format!("{browser:?}"));
         assert_eq!(picked(vec![]), None);
         assert_eq!(
             picked(vec![
-                (Browser::Chrome, vec!["YouTube"]),
-                (Browser::Brave, vec!["YouTube", "TikTok"]),
-                (Browser::Vivaldi, vec!["YouTube", "Instagram"]),
+                (Browser::Chrome, Some(vec!["YouTube"])),
+                (Browser::Safari, None),
+                (Browser::Brave, Some(vec!["YouTube", "TikTok"])),
+                (Browser::Vivaldi, Some(vec!["YouTube", "Instagram"])),
             ]),
             Some("Brave".into())
         );
         assert_eq!(
-            picked(vec![(Browser::Chrome, vec![]), (Browser::Edge, vec![])]),
+            picked(vec![
+                (Browser::Chrome, Some(vec![])),
+                (Browser::Edge, Some(vec![]))
+            ]),
             Some("Chrome".into())
         );
+        // Safari might be logged in, where Chrome surely isn't, but it isn't
+        // picked over a browser that is.
+        assert_eq!(
+            picked(vec![
+                (Browser::Chrome, Some(vec![])),
+                (Browser::Safari, None)
+            ]),
+            Some("Safari".into())
+        );
+        assert_eq!(
+            picked(vec![
+                (Browser::Safari, None),
+                (Browser::Edge, Some(vec!["TikTok"]))
+            ]),
+            Some("Edge".into())
+        );
+    }
+
+    #[test]
+    fn finds_safari_logins() {
+        let cookie = |host: &str, name: &str, expires| Cookie {
+            host: host.into(),
+            path: "/".into(),
+            secure: true,
+            expires,
+            name: name.into(),
+            value: "v".into(),
+        };
+        let cookies = [
+            cookie(".youtube.com", "SAPISID", 2_000),
+            cookie(".tiktok.com", "sessionid", 500),
+            cookie(".notinstagram.com", "sessionid", 2_000),
+            cookie(".instagram.com", "csrftoken", 2_000),
+        ];
+        assert_eq!(safari_logins(&cookies, 1_000), ["YouTube"]);
     }
 }
