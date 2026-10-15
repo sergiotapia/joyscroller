@@ -524,7 +524,6 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 10px;
   height: 40px;
   background: linear-gradient(#3168d5 0%, #4993e6 4%, #2157d7 10%, #2663e0 50%, #245dd7 90%, #1941a5 100%);
   box-shadow: 0 -1px 0 #0c59b9;
@@ -544,12 +543,14 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   text-shadow: 1px 1px 2px rgba(0, 0, 0, .6);
 }
 .start:hover { filter: brightness(1.1); }
-.start img { width: 40px; height: auto; transform: rotate(-8deg); }
+.start:active { filter: brightness(.9); }
+.start img { width: 28px; height: 28px; transform: rotate(-8deg); filter: drop-shadow(1px 2px 1px rgba(0, 0, 0, .45)); }
 .task {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+  margin-left: 10px;
   max-width: 240px;
   height: 30px;
   padding: 0 10px;
@@ -563,17 +564,64 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 .tray {
   display: flex;
   align-items: center;
+  gap: 4px;
   height: 100%;
   margin-left: auto;
-  padding: 0 16px;
+  padding: 0 14px 0 8px;
   color: #fff;
   background: linear-gradient(#0c97f0, #13a0f3 10%, #0b85e3 60%, #0a6fd0);
   border-left: 1px solid #092e8e;
   box-shadow: inset 1px 0 1px #18bbff;
 }
+.tray-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 3px;
+}
+.tray-icon .led { margin: 0; }
+.tray-icon img { width: 18px; height: 18px; }
+/* Lit while something downloads, grey otherwise. */
+.tray-icon.idle img { filter: grayscale(1) brightness(1.15) opacity(.6); }
+#tray-clock { margin-left: 6px; }
+/* XP's tooltips: a pale yellow box with a black edge that shows after a
+   moment's hover, here above the taskbar, growing leftward from the item
+   so it stays on screen. pre-line keeps the sync light's line per
+   platform. */
+.tray [data-tip] { position: relative; }
+.tray [data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 12px);
+  width: max-content;
+  max-width: 340px;
+  padding: 2px 6px;
+  border: 1px solid #000;
+  background: #ffffe1;
+  box-shadow: 2px 2px 3px rgba(0, 0, 0, .35);
+  color: #000;
+  font: 11px/1.45 var(--font-ui);
+  text-align: left;
+  white-space: pre-line;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity .1s, visibility 0s .1s;
+}
+.tray [data-tip]:not([data-tip=""]):hover::after {
+  visibility: visible;
+  opacity: 1;
+  transition: opacity .1s .5s, visibility 0s .5s;
+}
+
 /* XP's red Turn Off Computer button, at the end of the tray. */
 .turn-off { height: 100%; margin: 0; }
 .turn-off button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   height: 100%;
   padding: 0 12px;
   border: 0;
@@ -585,8 +633,94 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   text-shadow: 1px 1px 1px rgba(0, 0, 0, .5);
   cursor: pointer;
 }
+.turn-off svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  filter: drop-shadow(1px 1px 1px rgba(0, 0, 0, .5));
+}
 .turn-off button:hover { filter: brightness(1.12); }
 .turn-off button:active { box-shadow: inset 1px 1px 3px rgba(0, 0, 0, .5); }
+
+/* ---- The Turn off box -------------------------------------------------- */
+
+/* XP's Turn off computer: navy bands above and below a lighter one holding
+   the big button, over a desktop that fades to grey. */
+.shutdown {
+  width: 312px;
+  max-width: calc(100vw - 24px);
+  padding: 0;
+  border: 1px solid #001a66;
+  background: #0b2e8f;
+  color: #fff;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+}
+.shutdown::backdrop {
+  background: rgba(0, 0, 0, .25);
+  backdrop-filter: grayscale(1);
+  animation: fade-grey 1s ease-out;
+}
+@keyframes fade-grey { from { background: transparent; backdrop-filter: grayscale(0); } }
+@media (prefers-reduced-motion: reduce) { .shutdown::backdrop { animation: none; } }
+.shutdown-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 12px 0 14px;
+  background: linear-gradient(#103aa3, #0b2e8f);
+}
+.shutdown-head h2 { margin: 0; font: 700 18px var(--font-title); text-shadow: 1px 1px 0 #061c5c; }
+.shutdown-head img { width: 30px; height: 30px; filter: drop-shadow(1px 2px 1px rgba(0, 0, 0, .45)); }
+.shutdown-body {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 20px 24px 16px;
+  background: linear-gradient(90deg, #5a7edc, #8eaaf0 50%, #5a7edc);
+  border-top: 1px solid #a9c1f7;
+  border-bottom: 1px solid #a9c1f7;
+}
+.shutdown-body button {
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border: 1px dotted transparent;
+  background: none;
+  color: #fff;
+  font: 700 13px var(--font-ui);
+  text-shadow: 1px 1px 1px rgba(0, 0, 0, .5);
+  cursor: pointer;
+}
+.shutdown-body button:focus-visible { outline: none; border-color: #fff; }
+.knob {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid #fff;
+  border-radius: 7px;
+  background: radial-gradient(ellipse at 35% 20%, rgba(255, 255, 255, .55), transparent 55%), linear-gradient(#ef7a55, #d4421c 55%, #a92e0f);
+  box-shadow: 1px 2px 3px rgba(0, 0, 0, .4);
+}
+.knob svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  filter: drop-shadow(1px 1px 1px rgba(0, 0, 0, .4));
+}
+.shutdown-body button:hover .knob { filter: brightness(1.12); }
+.shutdown-body button:active .knob { box-shadow: inset 1px 1px 3px rgba(0, 0, 0, .5); }
+.shutdown-body p { margin: 0; font-size: 12px; text-align: center; text-shadow: 1px 1px 1px rgba(0, 0, 0, .45); }
+.shutdown-foot { display: flex; justify-content: flex-end; margin: 0; padding: 10px 12px; }
 
 /* ---- The search box ------------------------------------------------------ */
 

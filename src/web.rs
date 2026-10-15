@@ -218,7 +218,8 @@ async fn turn_off(State(app): State<App>, headers: HeaderMap) -> Result<Response
 
 const TURNED_OFF_PAGE: &str = "<!doctype html>\n\
 <html lang=\"en\">\n\
-<head><meta charset=\"utf-8\"><title>Turned off – joyscroller</title></head>\n\
+<head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Turned off – joyscroller</title></head>\n\
 <body style=\"margin:0;min-height:100vh;display:grid;place-items:center;\
 background:#004e98;color:#fff;font:18px Tahoma,Verdana,sans-serif;text-align:center\">\n\
 <p>Joyscroller is turned off.<br>Open it again to keep archiving your likes.<br>\
@@ -1400,13 +1401,18 @@ fn layout(frame: &Frame, main: &str) -> String {
          </main>\n\
          </div>\n\
          <footer class=\"taskbar\">\n\
-         <a class=\"start\" href=\"/\"><img src=\"/assets/splat.webp\" alt=\"\">start</a>\n\
-         <span class=\"task\">{icon}<span>{title}</span></span>\n\
-         <span class=\"tray\" id=\"tray-clock\"></span>\n\
-         <form class=\"turn-off\" method=\"post\" action=\"/quit\" \
-         onsubmit=\"return confirm('Turn off Joyscroller? Syncing and downloads stop until you open it again.')\">\
-         <button type=\"submit\" title=\"Turn off Joyscroller\">⏻ Turn off</button></form>\n\
+         <a class=\"start\" href=\"/\"><img src=\"/assets/icon-likes.webp\" alt=\"\">start</a>\n\
+         <span class=\"task\" title=\"{title}\">{icon}<span>{title}</span></span>\n\
+         <span class=\"tray\">\
+         <span class=\"tray-icon\" id=\"tray-sync\" role=\"img\"><span class=\"led\"></span></span>\
+         <span class=\"tray-icon{downloads_idle}\" id=\"tray-downloads\" role=\"img\" \
+         data-tip=\"{downloads_tip}\" aria-label=\"{downloads_tip}\">\
+         <img src=\"/assets/icon-downloading.webp\" alt=\"\"></span>\
+         <span id=\"tray-clock\"></span></span>\n\
+         <form class=\"turn-off\" method=\"post\" action=\"/quit\">\
+         <button type=\"submit\" title=\"Turn off Joyscroller\">{POWER_ICON}Turn off</button></form>\n\
          </footer>\n\
+         {turn_off_dialog}\
          <script>{SCRIPT}</script>\n\
          </body>\n\
          </html>\n",
@@ -1426,6 +1432,13 @@ fn layout(frame: &Frame, main: &str) -> String {
         panel = panel_html(frame, &entries),
         icon = icon(frame.current),
         footer = frame.footer,
+        turn_off_dialog = turn_off_dialog(),
+        downloads_idle = if busy_count(frame.board) == 0 {
+            " idle"
+        } else {
+            ""
+        },
+        downloads_tip = downloads_tip(busy_count(frame.board)),
     )
 }
 
@@ -1440,6 +1453,37 @@ const RADIO_LCD: &str = "<svg class=\"radio-lcd\" viewBox=\"0 0 960 691\" aria-h
 <text class=\"lcd-digits\" id=\"lcd-clock\" x=\"84\" y=\"33\">!!:!!</text>\
 <text class=\"lcd-ampm\" id=\"lcd-ampm\" x=\"95\" y=\"15\"></text>\
 </g></svg>";
+
+/// The tray's download arrow's tooltip. The page's script words it the same.
+fn downloads_tip(count: usize) -> String {
+    if count == 0 {
+        "Nothing downloading".into()
+    } else {
+        format!("{count} downloading")
+    }
+}
+
+/// The Turn off button's power symbol. Drawn rather than typed: fonts that
+/// have ⏻ are few, and the ones that do don't agree on its width.
+const POWER_ICON: &str = "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\">\
+<path d=\"M8 1.5v6M4.8 3.6a5.5 5.5 0 1 0 6.4 0\"/></svg>";
+
+/// What the taskbar's Turn off button asks first, in the manner of XP's Turn
+/// off computer box: its big button, the screen behind gone grey, and Cancel
+/// (or Esc, or a click outside). Without the script, the taskbar's button
+/// turns off straight away.
+fn turn_off_dialog() -> String {
+    format!(
+        "<dialog class=\"shutdown\" id=\"turn-off\" aria-labelledby=\"turn-off-title\">\n\
+         <div class=\"shutdown-head\"><h2 id=\"turn-off-title\">Turn off Joyscroller</h2>\
+         <img src=\"/assets/icon-likes.webp\" alt=\"\"></div>\n\
+         <form class=\"shutdown-body\" method=\"post\" action=\"/quit\">\
+         <button type=\"submit\" autofocus><span class=\"knob\">{POWER_ICON}</span>Turn off</button>\
+         <p>Syncing and downloads stop until you open Joyscroller again.</p></form>\n\
+         <form class=\"shutdown-foot\" method=\"dialog\"><button class=\"button\">Cancel</button></form>\n\
+         </dialog>\n"
+    )
+}
 
 /// A section's icon: a molded plastic piece rendered in Blender
 /// (`assets/blender/badges.py`), like the radio.
@@ -1483,11 +1527,46 @@ function tick() {
   const minutes = String(now.getMinutes()).padStart(2, "0");
   document.getElementById("lcd-clock").textContent = (hour < 10 ? "!" : "") + hour + ":" + minutes;
   document.getElementById("lcd-ampm").textContent = now.getHours() < 12 ? "AM" : "PM";
-  document.getElementById("tray-clock").textContent =
-    now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const tray = document.getElementById("tray-clock");
+  tray.textContent = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  // XP's tray clock shows the date on hover. Set only when it changes, so
+  // an open tooltip doesn't flicker.
+  const date = now.toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  if (tray.dataset.tip !== date) tip(tray, date);
 }
 tick();
 setInterval(tick, 1000);
+
+// The tray's tooltips are drawn by the stylesheet from data-tip, in XP's
+// yellow, rather than the browser's own from title. An icon's also names it.
+function tip(el, text) {
+  el.dataset.tip = text;
+  if (el.getAttribute("role") === "img") el.setAttribute("aria-label", text);
+}
+
+// The tray's light sums up the panel's: red if a platform's sync failed,
+// blinking while one runs, grey until each has synced, green once all
+// have. Hovering shows each platform's line.
+function traySync() {
+  const lines = [...document.getElementById("status").children];
+  const light = ["failed", "running", "waiting"].find((state) =>
+    lines.some((li) => li.classList.contains("sync-" + state))) || "done";
+  const tray = document.getElementById("tray-sync");
+  tray.className = "tray-icon sync-" + light;
+  tip(tray, lines.map((li) =>
+    li.querySelector("b").textContent + ": " + li.querySelector(".what").textContent).join("\n"));
+}
+traySync();
+
+const turnOff = document.getElementById("turn-off");
+document.querySelector("form.turn-off").addEventListener("submit", (e) => {
+  e.preventDefault();
+  turnOff.showModal();
+});
+// A click outside the box lands on the dialog itself, which the box fills.
+turnOff.addEventListener("click", (e) => {
+  if (e.target === turnOff) turnOff.close();
+});
 
 // Whether the video on the page has been started and plays: reloading
 // would lose the viewer's place.
@@ -1562,10 +1641,14 @@ function connect() {
     const el = document.getElementById("status");
     el.innerHTML = e.data;
     showTimes(el);
+    traySync();
   });
   events.addEventListener("downloads", (e) => {
     const update = JSON.parse(e.data);
     setCount("downloading", update.count);
+    const tray = document.getElementById("tray-downloads");
+    tray.classList.toggle("idle", update.count === 0);
+    tip(tray, update.count === 0 ? "Nothing downloading" : update.count + " downloading");
     const board = document.getElementById("downloads");
     if (board) {
       board.innerHTML = update.board;

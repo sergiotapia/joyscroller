@@ -4,6 +4,20 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- The taskbar's tray shows how things are going at a glance: a light that's green once everything has synced, blinks while a sync runs and turns red when one fails, and a download arrow that lights up while videos download and is grey otherwise. Hover over them, in Windows XP's yellow tooltips, for each platform's sync and how many videos are downloading. Hovering over the clock shows the date.
+
+### Changed
+
+- Turn off now asks in a Windows XP–style Turn off box, with the screen going grey behind it, instead of the browser's plain confirm box. Cancel, Esc or a click outside the box keeps Joyscroller running.
+- The start button wears the heart badge.
+
+### Fixed
+
+- The taskbar's clock and Turn off button sit flush together, with no stray strip of blue between them. Turn off's power symbol shows on every system and no longer runs into the word.
+- The taskbar's window button shows its full title when you hover over it, for titles too long to fit.
+
 ## [0.9.0] - 2026-10-15
 
 ### Added
