@@ -22,10 +22,19 @@ use super::videos::{NewVideo, insert_rows};
 /// trillion listings.
 const BAND: i64 = 1 << 24;
 
-/// How long a listing cut short may wait to carry on from its cursor. The
-/// platforms don't say how long their cursors stay good, so one older than
-/// this reads its list again from the top, in its own band.
+/// How long a listing cut short may wait to carry on from its cursor, from
+/// the last page it read, which is when the platform gave the cursor out.
+/// The platforms don't say how long their cursors stay good, so one older
+/// than this reads its list again from the top, in its own band.
 const STALE_AFTER: i64 = 24 * 60 * 60;
+
+/// Whether `list`'s cursor can go bad. Instagram's liked list's is the id of
+/// the last post read (`max_id`), good for as long as the post is, and
+/// that list is the one Instagram blocks for days at a time: a read of it
+/// waits out any block and carries on.
+fn cursor_ages(list: &str) -> bool {
+    list != "instagram liked"
+}
 
 /// A listing under way.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,14 +65,14 @@ pub(super) fn new_top(tx: &Transaction) -> Result<i64> {
 
 /// The listing of `list` to read now: the one under way, carrying on from
 /// its cursor, or a new one from the top of the list. `full` makes either
-/// read to the end. A listing that has waited past `STALE_AFTER` starts its
-/// list again from the top, in full: the posts it stored are passed over,
+/// read to the end. A listing whose last page was read more than
+/// `STALE_AFTER` ago starts its list again from the top, in full: the posts it stored are passed over,
 /// and the ones it never got to fill in the rest of its band.
 pub fn open_listing(conn: &mut Connection, list: &str, full: bool) -> Result<Listing> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let found = tx
         .query_row(
-            "SELECT top, listed, cursor, full, started_at FROM listings WHERE list = ?1",
+            "SELECT top, listed, cursor, full, read_at FROM listings WHERE list = ?1",
             [list],
             |r| {
                 Ok((
@@ -77,10 +86,10 @@ pub fn open_listing(conn: &mut Connection, list: &str, full: bool) -> Result<Lis
         )
         .optional()?;
     let listing = match found {
-        Some((top, _, _, _, started_at)) if now() - started_at > STALE_AFTER => {
+        Some((top, _, _, _, read_at)) if cursor_ages(list) && now() - read_at > STALE_AFTER => {
             tx.execute(
-                "UPDATE listings SET listed = 0, cursor = NULL, full = 1, started_at = ?2 \
-                 WHERE list = ?1",
+                "UPDATE listings SET listed = 0, cursor = NULL, full = 1, started_at = ?2, \
+                 read_at = ?2 WHERE list = ?1",
                 params![list, now()],
             )?;
             Listing {
@@ -106,7 +115,8 @@ pub fn open_listing(conn: &mut Connection, list: &str, full: bool) -> Result<Lis
         None => {
             let top = new_top(&tx)?;
             tx.execute(
-                "INSERT INTO listings (list, top, full, started_at) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO listings (list, top, full, started_at, read_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![list, top, full, now()],
             )?;
             Listing {
@@ -136,8 +146,8 @@ pub fn store_page(
     let added = insert_rows(&tx, platform, videos, listing.top - listing.listed)?;
     let listed = listing.listed + i64::try_from(videos.len())?;
     tx.execute(
-        "UPDATE listings SET listed = ?2, cursor = ?3 WHERE list = ?1",
-        params![listing.list, listed, next],
+        "UPDATE listings SET listed = ?2, cursor = ?3, read_at = ?4 WHERE list = ?1",
+        params![listing.list, listed, next, now()],
     )?;
     tx.commit()?;
     listing.listed = listed;
@@ -274,15 +284,41 @@ mod tests {
             Some("c1"),
         )
         .unwrap();
-        conn.execute(
-            "UPDATE listings SET started_at = started_at - 2 * 86400",
-            [],
-        )
-        .unwrap();
+        conn.execute("UPDATE listings SET read_at = read_at - 2 * 86400", [])
+            .unwrap();
 
         let again = open_listing(&mut conn, "tiktok liked", false).unwrap();
         assert_eq!((again.cursor.as_deref(), again.full), (None, true));
         assert_eq!(again.top, listing.top);
+    }
+
+    #[test]
+    fn a_listing_reading_now_and_then_stays_fresh() {
+        // Started days ago, paused for hours at a time, but its last page
+        // came an hour ago: it carries on from its cursor.
+        let mut conn = memory_db();
+        let mut listing = open_listing(&mut conn, "instagram liked", true).unwrap();
+        store_page(
+            &mut conn,
+            "instagram",
+            &mut listing,
+            &[new_video("a", true)],
+            Some("c1"),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE listings SET started_at = started_at - 3 * 86400, read_at = read_at - 3600",
+            [],
+        )
+        .unwrap();
+        let resumed = open_listing(&mut conn, "instagram liked", false).unwrap();
+        assert_eq!(resumed.cursor.as_deref(), Some("c1"));
+        // Instagram's liked list's cursor is a post id, good for as long as
+        // the post is.
+        conn.execute("UPDATE listings SET read_at = read_at - 30 * 86400", [])
+            .unwrap();
+        let resumed = open_listing(&mut conn, "instagram liked", false).unwrap();
+        assert_eq!(resumed.cursor.as_deref(), Some("c1"));
     }
 
     #[test]

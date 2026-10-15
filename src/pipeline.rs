@@ -555,7 +555,7 @@ async fn wait(platform: &str, shared: &Shared, why: Wait, pause: Duration) {
 
 /// A pause of random length from `shortest` to `longest`. The clock's
 /// nanoseconds are random enough to vary a pause by a few seconds.
-fn between(shortest: Duration, longest: Duration) -> Duration {
+pub fn between(shortest: Duration, longest: Duration) -> Duration {
     let spread = longest.saturating_sub(shortest).as_millis();
     if spread == 0 {
         return shortest;

@@ -49,9 +49,15 @@ const APP_USER_AGENT: &str = "Instagram 361.0.0.46.88 Android (34/14; 480dpi; 10
 const ANDROID_APP_ID: &str = "567067343352427";
 
 /// Instagram is quick to answer bursts of requests with "Please wait a few
-/// minutes". The apps load a page per scroll; this keeps us near that, for
-/// both lists.
+/// minutes". The apps load a page per scroll; this keeps us near that on
+/// the saved list.
 const PAGE_PAUSE: Duration = Duration::from_secs(1);
+
+/// The liked list's pause between pages, as the shortest and longest: a
+/// random length in between. At a page a second, a first full read got
+/// Instagram's "Try Again Later" block after about 1,300 posts. An ordinary
+/// sync reads a page or two, so only a full read takes long at this pace.
+const LIKED_PAGE_PAUSE: (Duration, Duration) = (Duration::from_secs(5), Duration::from_secs(10));
 
 /// How many pages go by between the progress lines a long read logs.
 const PROGRESS_EVERY: u32 = 10;
@@ -116,6 +122,14 @@ impl Feed<'_> {
         match self {
             Feed::Saved(_) => "saved",
             Feed::Liked(_) => "liked",
+        }
+    }
+
+    /// How long to wait before the next page.
+    fn pause(&self) -> Duration {
+        match self {
+            Feed::Saved(_) => PAGE_PAUSE,
+            Feed::Liked(_) => crate::pipeline::between(LIKED_PAGE_PAUSE.0, LIKED_PAGE_PAUSE.1),
         }
     }
 
@@ -234,7 +248,7 @@ async fn read(
             Some(next) => max_id = Some(next),
             None => return Ok(()),
         }
-        tokio::time::sleep(PAGE_PAUSE).await;
+        tokio::time::sleep(feed.pause()).await;
     }
     Ok(())
 }
