@@ -4,6 +4,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-15
+
 ### Added
 
 - On a Mac, Joyscroller now also reads your logins from Safari. macOS only lets it do that once you turn on Joyscroller in **System Settings → Privacy & Security → Full Disk Access**; until you do, the sidebar says so where a sync failed. Safari can't open TikTok and Instagram unseen in the background, so Joyscroller uses another browser you have installed for them, or downloads its own hidden copy of Chrome.
@@ -80,7 +82,8 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/sergiotapia/joyscroller/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/sergiotapia/joyscroller/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/sergiotapia/joyscroller/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sergiotapia/joyscroller/compare/v0.3.0...v0.4.0
