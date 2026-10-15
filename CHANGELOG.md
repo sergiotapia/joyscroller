@@ -4,6 +4,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-15
+
 ### Added
 
 - Joyscroller now also keeps the posts you like on Instagram, not only the ones you save.
@@ -13,11 +15,11 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 - YouTube, TikTok and Instagram sync at the same time instead of one after another, so a long first sync of one doesn't hold up the others.
 - Your TikTok and Instagram likes show up in the library as each page of them is read, instead of only once a sync has read them all. A sync that's stopped partway, by turning Joyscroller off or a lost connection, carries on where it left off the next time.
+- When Instagram asks Joyscroller to slow down (its "Try Again Later" block), Joyscroller leaves that list alone for a few hours instead of asking again every 5 minutes, which only makes the block last longer. Your other Instagram list keeps syncing meanwhile, and the sidebar says when it'll try again.
+- The sidebar explains a failed sync in plain words, and what to do about it where there's something to do (like logging back in), instead of showing the raw error. The error is still there when you hover over it.
 
 ### Fixed
 
-- When Instagram blocks Joyscroller for reading your liked posts too fast (its "Try Again Later" block), Joyscroller now stops asking for a few hours instead of every 5 minutes, which only made the block last longer. Your saved posts keep syncing meanwhile, and the sidebar says when it'll try the liked list again.
-- The sidebar explains a failed sync in plain words, and what to do about it where there's something to do (like logging back in), instead of showing the raw error. The error is still there when you hover over it.
 - A tall video, like most of TikTok's, no longer shows a white gap between it and the player's purple frame; the screen stays dark on either side of it.
 
 ## [0.7.0] - 2026-10-15
@@ -98,7 +100,8 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/sergiotapia/joyscroller/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/sergiotapia/joyscroller/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/sergiotapia/joyscroller/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/sergiotapia/joyscroller/compare/v0.4.0...v0.5.0
