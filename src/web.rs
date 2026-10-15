@@ -1406,19 +1406,32 @@ function setCount(name, count) {
 }
 
 const page = document.body.dataset;
-// Brave keeps a page you leave in its back/forward cache, open stream and
-// all, and over plain HTTP it allows six connections per site. A few clicks
-// back would leave every one held by hidden pages and hang the next click.
-// So the stream closes when the page is hidden and reopens when it's shown
-// again, from the last video it got.
+// Over plain HTTP, browsers allow six connections per site, and each page's
+// stream holds one for as long as it's open. Seven tabs, or a few pages
+// kept in the back/forward cache, would hold them all and hang the next
+// page. So only a page on screen has a stream: it closes when the tab goes
+// to the background or the page is left, and reopens when it's shown again,
+// from the last video it got. The server sends the current state on
+// connecting, so nothing is missed meanwhile.
 let after = page.after;
-let events;
+let events = null;
 let unseen = 0;
-addEventListener("pagehide", () => events.close());
+addEventListener("pagehide", disconnect);
 addEventListener("pageshow", (e) => { if (e.persisted) connect(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) disconnect();
+  else connect();
+});
+// A tab opened in the background waits until it's looked at.
 connect();
 
+function disconnect() {
+  if (events) events.close();
+  events = null;
+}
+
 function connect() {
+  if (events || document.hidden) return;
   events = new EventSource("/events?after=" + after);
   events.addEventListener("video", (e) => {
     after = e.lastEventId;

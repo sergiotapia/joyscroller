@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening more than a handful of Joyscroller tabs no longer leaves the newest ones stuck loading. Each tab kept a live connection to Joyscroller open, and browsers allow only six per site; now only the tab you're looking at keeps one, and a tab you come back to catches up.
+
 ## [0.8.1] - 2026-10-15
 
 ### Changed
