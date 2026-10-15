@@ -269,11 +269,31 @@ async fn fetch_page(feed: &mut Feed<'_>, max_id: Option<&str>) -> Result<Page> {
 
 /// Errors a retry won't fix, which retrying would only make worse.
 #[derive(Debug)]
-struct Refused(String);
+struct Refused {
+    message: String,
+    /// Instagram is telling us to slow down, rather than refusing for good.
+    throttled: bool,
+}
+
+impl Refused {
+    fn new(message: String) -> Self {
+        Self {
+            message,
+            throttled: false,
+        }
+    }
+
+    fn throttled(message: String) -> Self {
+        Self {
+            message,
+            throttled: true,
+        }
+    }
+}
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -281,6 +301,19 @@ impl std::error::Error for Refused {}
 
 fn is_final(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Refused>().is_some()
+}
+
+/// Whether `e` is Instagram telling us to slow down (HTTP 429, or its
+/// `feedback_required` block). Asking again before it lifts only makes it
+/// last longer, so the list it came from should sit out a while.
+pub fn is_throttled(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Refused>().is_some_and(|r| r.throttled)
+}
+
+/// Instagram telling us to slow down, for other modules' tests.
+#[cfg(test)]
+pub fn slow_down_for_tests() -> anyhow::Error {
+    Refused::throttled("Instagram is rate limiting us (HTTP 429)".into()).into()
 }
 
 /// The page script that fetches one page of the saved list and returns its
@@ -398,14 +431,14 @@ fn parse_response(status: u64, body: &str, what: &str) -> Result<Value> {
     // A lapsed login comes back as a 401 or 403 (`login_required`), or as a
     // redirect to the login page, which fetch follows to an HTML page.
     if matches!(status, 401 | 403) || message == "login_required" {
-        return Err(Refused(format!(
+        return Err(Refused::new(format!(
             "Instagram wants a login (HTTP {status}{detail}); log in to Instagram in the browser"
         ))
         .into());
     }
     // Instagram wants the user to confirm it's them before it answers again.
     if message == "checkpoint_required" || message == "challenge_required" {
-        return Err(Refused(format!(
+        return Err(Refused::new(format!(
             "Instagram wants you to confirm it's you (HTTP {status}{detail}); open Instagram in the browser"
         ))
         .into());
@@ -413,12 +446,26 @@ fn parse_response(status: u64, body: &str, what: &str) -> Result<Value> {
     // "Please wait a few minutes before you try again": more requests now
     // only extend the wait.
     if status == 429 {
-        return Err(Refused(format!("Instagram is rate limiting us (HTTP 429{detail})")).into());
+        return Err(Refused::throttled(format!(
+            "Instagram is rate limiting us (HTTP 429{detail})"
+        ))
+        .into());
+    }
+    // "Try Again Later. We restrict certain activity to protect our
+    // community": Instagram's block on what looks automated. It lifts after
+    // hours or a day, sooner if left alone.
+    if message == "feedback_required" {
+        return Err(Refused::throttled(format!(
+            "Instagram is limiting how fast we read (HTTP {status}{detail})"
+        ))
+        .into());
     }
     // A request Instagram won't take, such as "useragent mismatch" when it
     // stops accepting the app's user agent. Asking again changes nothing.
     if status == 400 {
-        return Err(Refused(format!("Instagram refused the request (HTTP 400{detail})")).into());
+        return Err(
+            Refused::new(format!("Instagram refused the request (HTTP 400{detail})")).into(),
+        );
     }
     if status != 200 {
         bail!("Instagram answered HTTP {status}{detail}");
@@ -826,6 +873,24 @@ mod tests {
     }
 
     #[test]
+    fn slowing_down_is_told_apart_through_context() {
+        let blocked = parse_page(400, r#"{"message": "feedback_required", "status": "fail"}"#)
+            .unwrap_err()
+            .context("liked list page at 1")
+            .context("reading the liked list");
+        assert!(is_throttled(&blocked));
+        let limited = parse_page(429, "")
+            .unwrap_err()
+            .context("saved list page at 1");
+        assert!(is_throttled(&limited));
+        let agent = parse_page(400, r#"{"message": "useragent mismatch"}"#);
+        assert!(!is_throttled(&agent.unwrap_err()));
+        let login = parse_page(401, r#"{"message": "login_required"}"#);
+        assert!(!is_throttled(&login.unwrap_err()));
+        assert!(!is_throttled(&parse_page(500, "").unwrap_err()));
+    }
+
+    #[test]
     fn refusals_are_final() {
         let login = parse_page(401, r#"{"message": "login_required", "status": "fail"}"#);
         assert!(is_final(&login.unwrap_err()));
@@ -838,6 +903,8 @@ mod tests {
             r#"{"message": "useragent mismatch", "status": "fail"}"#,
         );
         assert!(is_final(&agent.unwrap_err()));
+        let blocked = parse_page(400, r#"{"message": "feedback_required", "status": "fail"}"#);
+        assert!(is_final(&blocked.unwrap_err()));
         let checkpoint = parse_page(400, r#"{"message": "checkpoint_required"}"#).unwrap_err();
         assert!(format!("{checkpoint}").contains("confirm it's you"));
         // Worth another try.

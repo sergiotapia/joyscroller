@@ -12,6 +12,7 @@
 //! `assets/` are built into the executable.
 
 use std::convert::Infallible;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -73,8 +74,26 @@ pub struct SyncStatus(Vec<(&'static str, SyncState)>);
 #[derive(Debug, Clone)]
 pub enum SyncState {
     Running,
-    Done { at: i64, added: usize },
-    Failed { at: i64, error: String },
+    Done {
+        at: i64,
+        added: usize,
+        paused: Vec<Paused>,
+    },
+    Failed {
+        at: i64,
+        error: String,
+        paused: Vec<Paused>,
+    },
+}
+
+/// One of a platform's lists sitting out a while, after the platform told
+/// us to slow down.
+#[derive(Clone, Debug)]
+pub struct Paused {
+    /// Which list: "liked", "saved".
+    pub list: &'static str,
+    /// When it's read again (unix seconds).
+    pub until: i64,
 }
 
 impl SyncStatus {
@@ -1547,15 +1566,22 @@ fn status_html(status: &SyncStatus) -> String {
             let (light, state) = match status.get(name) {
                 None => ("waiting", "waiting to sync".into()),
                 Some(SyncState::Running) => ("running", "syncing…".into()),
-                Some(SyncState::Done { at, added }) => (
+                Some(SyncState::Done { at, added, paused }) => (
                     "done",
-                    format!("synced at {}, {added} new", time(*at, "time")),
-                ),
-                Some(SyncState::Failed { at, error }) => (
-                    "failed",
                     format!(
-                        "failed at {}: {}",
+                        "synced at {}, {added} new{}",
                         time(*at, "time"),
+                        paused_html(paused)
+                    ),
+                ),
+                Some(SyncState::Failed { at, error, paused }) => (
+                    "failed",
+                    // The pause goes before the error, which the panel cuts
+                    // short.
+                    format!(
+                        "failed at {}{}: {}",
+                        time(*at, "time"),
+                        paused_html(paused),
                         escape(&error.replace(['\r', '\n'], " "))
                     ),
                 ),
@@ -1567,6 +1593,20 @@ fn status_html(status: &SyncStatus) -> String {
         })
         .collect::<Vec<_>>()
         .concat()
+}
+
+/// ", liked list paused until 7:30 PM", for each list sitting out.
+fn paused_html(paused: &[Paused]) -> String {
+    let mut html = String::new();
+    for p in paused {
+        let _ = write!(
+            html,
+            ", {} list paused until {}",
+            escape(p.list),
+            time(p.until, "time")
+        );
+    }
+    html
 }
 
 /// `{"all": n, "youtube": n, ...}`, for the sidebar's counts.
@@ -2372,9 +2412,17 @@ mod tests {
             SyncState::Failed {
                 at: 0,
                 error: "logged\nout".into(),
+                paused: Vec::new(),
             },
         );
-        status.set("tiktok", SyncState::Done { at: 0, added: 2 });
+        status.set(
+            "tiktok",
+            SyncState::Done {
+                at: 0,
+                added: 2,
+                paused: Vec::new(),
+            },
+        );
         let html = status_html(&status);
         assert!(
             html.starts_with("<li class=\"sync-failed\"><span class=\"led\"></span><b>YouTube</b>")
@@ -2385,6 +2433,20 @@ mod tests {
         assert!(tiktok.is_some_and(|at| at > 0));
         assert!(html.contains("2 new"));
         assert!(html.contains("<b>Instagram</b><span class=\"what\">waiting to sync</span>"));
+        status.set(
+            "instagram",
+            SyncState::Done {
+                at: 0,
+                added: 0,
+                paused: vec![Paused {
+                    list: "liked",
+                    until: 10_800,
+                }],
+            },
+        );
+        assert!(status_html(&status).contains(
+            "0 new, liked list paused until <time data-ts=\"10800\" data-format=\"time\">"
+        ));
     }
 
     fn job(video: &db::StoredVideo) -> Job {

@@ -132,6 +132,13 @@ const STOP_AFTER_KNOWN: usize = 100;
 /// How often the app pulls new likes while it's running.
 const SYNC_EVERY: Duration = Duration::from_mins(5);
 
+/// How long a list sits out after the platform tells us to slow down. It
+/// doubles each time that happens again before a read gets through, up to
+/// `MAX_PAUSE`: Instagram's blocks last hours to a day, and asking during
+/// one only makes it last longer, or gets the account flagged.
+const FIRST_PAUSE: Duration = Duration::from_hours(3);
+const MAX_PAUSE: Duration = Duration::from_hours(24);
+
 /// How often the app updates its own yt-dlp. Fixes for site changes ship in
 /// yt-dlp releases every week or two.
 const UPDATE_YT_DLP_EVERY: Duration = Duration::from_hours(24);
@@ -253,7 +260,9 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let mut conn = db::open(&db_path)?;
             let browser = sniff(browser, &profile);
-            let (listed, added) = sync(platform, browser, &profile, &mut conn, full).await?;
+            let mut pauses = Pauses::default();
+            let (listed, added) =
+                sync(platform, browser, &profile, &mut conn, full, &mut pauses).await?;
             eprintln!(
                 "{}: listed {listed}, added {added} new → {}",
                 platform.name(),
@@ -504,12 +513,13 @@ async fn sync_loop(
     let mut ticks = tokio::time::interval(SYNC_EVERY);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut yt_dlp_updated: Option<tokio::time::Instant> = None;
+    let mut pauses = Pauses::default();
     loop {
         ticks.tick().await;
         if matches!(platform, Platform::Youtube) {
             prepare_yt_dlp(&mut yt_dlp_updated).await;
         }
-        sync_and_report(platform, browser, profile, conn, status).await;
+        sync_and_report(platform, browser, profile, conn, status, &mut pauses).await;
     }
 }
 
@@ -536,22 +546,24 @@ async fn sync_and_report(
     profile: &str,
     conn: &mut rusqlite::Connection,
     status: &tokio::sync::watch::Sender<web::SyncStatus>,
+    pauses: &mut Pauses,
 ) {
     let name = platform.name();
     status.send_modify(|s| s.set(name, web::SyncState::Running));
-    let state = match sync(platform, browser, profile, conn, false).await {
+    let result = sync(platform, browser, profile, conn, false, pauses).await;
+    let at = db::now();
+    let paused = pauses.current(at);
+    let state = match result {
         Ok((listed, added)) => {
             eprintln!("{name}: listed {listed}, added {added} new");
-            web::SyncState::Done {
-                at: db::now(),
-                added,
-            }
+            web::SyncState::Done { at, added, paused }
         }
         Err(e) => {
             eprintln!("{name}: sync failed: {e:#}");
             web::SyncState::Failed {
-                at: db::now(),
+                at,
                 error: format!("{e:#}"),
+                paused,
             }
         }
     };
@@ -606,11 +618,75 @@ async fn sync(
     profile: &str,
     conn: &mut rusqlite::Connection,
     full: bool,
+    pauses: &mut Pauses,
 ) -> Result<(usize, usize)> {
     match platform {
         Platform::Youtube => sync_youtube(browser, profile, conn, full).await,
         Platform::Tiktok => sync_tiktok(browser, profile, conn, full).await,
-        Platform::Instagram => sync_instagram(browser, profile, conn, full).await,
+        Platform::Instagram => sync_instagram(browser, profile, conn, full, pauses).await,
+    }
+}
+
+/// The lists a platform has told us to slow down on, by listing name, each
+/// skipped until its pause is over. They last as long as the run: a restart
+/// asks once more.
+#[derive(Default)]
+struct Pauses(HashMap<&'static str, Pause>);
+
+struct Pause {
+    /// When the list may be read again (unix seconds).
+    until: i64,
+    /// Slow-downs since a read of the list last got through.
+    in_a_row: u32,
+}
+
+impl Pauses {
+    /// When `list` may be read again, if it's sitting out at `now`.
+    fn until(&self, list: &str, now: i64) -> Option<i64> {
+        self.0
+            .get(list)
+            .map(|p| p.until)
+            .filter(|&until| until > now)
+    }
+
+    /// Note how a read of `list` went: being told to slow down starts its
+    /// pause, or a longer one, and a read that gets through ends it.
+    fn record(&mut self, list: &'static str, result: &Result<()>, now: i64) {
+        match result {
+            Ok(()) => {
+                self.0.remove(list);
+            }
+            Err(e) if instagram::is_throttled(e) => {
+                let in_a_row = self.0.get(list).map_or(0, |p| p.in_a_row) + 1;
+                let pause = FIRST_PAUSE
+                    .saturating_mul(2_u32.saturating_pow(in_a_row - 1))
+                    .min(MAX_PAUSE);
+                let until = now.saturating_add(i64::try_from(pause.as_secs()).unwrap_or(i64::MAX));
+                eprintln!(
+                    "{list}: told to slow down, pausing it for {}h",
+                    pause.as_secs() / 3600
+                );
+                self.0.insert(list, Pause { until, in_a_row });
+            }
+            // Other failures say nothing about our pace.
+            Err(_) => {}
+        }
+    }
+
+    /// The lists sitting out at `now`, for the UI.
+    fn current(&self, now: i64) -> Vec<web::Paused> {
+        let mut paused: Vec<web::Paused> = self
+            .0
+            .iter()
+            .filter(|(_, p)| p.until > now)
+            .map(|(&list, p)| web::Paused {
+                // "instagram liked" is the liked list.
+                list: list.split_once(' ').map_or(list, |(_, which)| which),
+                until: p.until,
+            })
+            .collect();
+        paused.sort_by_key(|p| p.list);
+        paused
     }
 }
 
@@ -774,6 +850,7 @@ async fn sync_instagram(
     profile: &str,
     conn: &mut rusqlite::Connection,
     full: bool,
+    pauses: &mut Pauses,
 ) -> Result<(usize, usize)> {
     // Re-read cookies on every sync: the browser rotates them while it runs.
     let cookies = browser::cookies_for(browser, profile, "instagram.com").await?;
@@ -787,6 +864,7 @@ async fn sync_instagram(
         conn,
         full,
         (&mut listed, &mut added),
+        pauses,
     )
     .await;
     let liked = sync_instagram_list(
@@ -796,6 +874,7 @@ async fn sync_instagram(
         conn,
         full,
         (&mut listed, &mut added),
+        pauses,
     )
     .await;
     db::finish_sync(conn, sync_id, added)?;
@@ -810,7 +889,8 @@ async fn sync_instagram(
 }
 
 /// Read one of Instagram's lists into the database, page by page, adding to
-/// `counts` (listed, added) as it goes. A list in `full_syncs_due` is read
+/// `counts` (listed, added) as it goes, unless Instagram told us to slow
+/// down on it and its pause isn't over. A list in `full_syncs_due` is read
 /// in full, and taken off once a read gets to its end.
 async fn sync_instagram_list(
     list: instagram::List,
@@ -819,11 +899,30 @@ async fn sync_instagram_list(
     conn: &mut rusqlite::Connection,
     full: bool,
     counts: (&mut usize, &mut usize),
+    pauses: &mut Pauses,
 ) -> Result<()> {
     let name = match list {
         instagram::List::Saved => INSTAGRAM_SAVED,
         instagram::List::Liked => INSTAGRAM_LIKED,
     };
+    if pauses.until(name, db::now()).is_some() {
+        return Ok(());
+    }
+    let result = read_instagram_list(list, name, browser, cookies, conn, full, counts).await;
+    pauses.record(name, &result, db::now());
+    result
+}
+
+/// Read Instagram's `list` (the listing `name`) into the database.
+async fn read_instagram_list(
+    list: instagram::List,
+    name: &str,
+    browser: Browser,
+    cookies: &[browser::Cookie],
+    conn: &mut rusqlite::Connection,
+    full: bool,
+    counts: (&mut usize, &mut usize),
+) -> Result<()> {
     let due = db::full_sync_due(conn, name)?;
     let mut listing = db::open_listing(conn, name, full || due)?;
     let known = db::video_ids(conn, "instagram")?;
@@ -878,6 +977,34 @@ fn store_instagram_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_list_told_to_slow_down_sits_out_longer_each_time() {
+        let throttled = || -> Result<()> {
+            Err(instagram::slow_down_for_tests().context("reading the liked list"))
+        };
+        let mut pauses = Pauses::default();
+        let hour = 3600;
+        pauses.record(INSTAGRAM_LIKED, &throttled(), 0);
+        assert_eq!(pauses.until(INSTAGRAM_LIKED, 0), Some(3 * hour));
+        assert_eq!(pauses.until(INSTAGRAM_SAVED, 0), None);
+        assert_eq!(pauses.until(INSTAGRAM_LIKED, 3 * hour), None);
+        let paused = pauses.current(hour);
+        assert_eq!(paused.len(), 1);
+        assert_eq!((paused[0].list, paused[0].until), ("liked", 3 * hour));
+        pauses.record(INSTAGRAM_LIKED, &throttled(), 3 * hour);
+        assert_eq!(pauses.until(INSTAGRAM_LIKED, 3 * hour), Some(9 * hour));
+        pauses.record(INSTAGRAM_LIKED, &throttled(), 9 * hour);
+        pauses.record(INSTAGRAM_LIKED, &throttled(), 21 * hour);
+        assert_eq!(pauses.until(INSTAGRAM_LIKED, 21 * hour), Some(45 * hour));
+        // Other failures neither start nor end a pause.
+        pauses.record(INSTAGRAM_LIKED, &Err(anyhow::anyhow!("offline")), 45 * hour);
+        assert_eq!(pauses.0[INSTAGRAM_LIKED].in_a_row, 4);
+        pauses.record(INSTAGRAM_SAVED, &Err(anyhow::anyhow!("offline")), 0);
+        assert!(!pauses.0.contains_key(INSTAGRAM_SAVED));
+        pauses.record(INSTAGRAM_LIKED, &Ok(()), 45 * hour);
+        assert!(pauses.current(0).is_empty());
+    }
 
     #[test]
     fn stops_after_a_run_of_known_videos() {
