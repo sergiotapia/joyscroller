@@ -4,6 +4,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-15
+
 ### Fixed
 
 - Opening more than a handful of Joyscroller tabs no longer leaves the newest ones stuck loading. Each tab kept a live connection to Joyscroller open, and browsers allow only six per site; now only the tab you're looking at keeps one, and a tab you come back to catches up.
@@ -111,7 +113,8 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/sergiotapia/joyscroller/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/sergiotapia/joyscroller/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/sergiotapia/joyscroller/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/sergiotapia/joyscroller/compare/v0.6.0...v0.7.0
