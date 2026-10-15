@@ -55,19 +55,19 @@ pub struct Downloaded<'a> {
 /// broken by a site change, an expired login, an outage) and can last days.
 pub(super) const MAX_RETRY_DELAY: i64 = 7 * 24 * 3600;
 
-/// Which videos are waiting to be downloaded: available, not downloaded, and
-/// not waiting out a retry delay. `?1` is `MAX_RETRY_DELAY`, `?2` now, and
+/// Which videos are waiting to be downloaded: available, not downloaded, not
+/// gone by the platform's word, and not waiting out a retry delay. `?1` is `MAX_RETRY_DELAY`, `?2` now, and
 /// `?3` a platform or NULL for all.
 const PENDING_WHERE: &str = "v.available = 1 AND d.downloaded_at IS NULL \
+     AND d.unavailable_at IS NULL \
      AND (?3 IS NULL OR v.platform = ?3) \
      AND (d.failures IS NULL OR d.failures = 0 \
           OR d.last_attempt_at + MIN(3600 << MIN(d.failures - 1, 20), ?1) <= ?2)";
 
 /// Up to `limit` videos to download next, on `platform` or all of them, most
 /// recently liked first (by `like_order`), so new likes don't wait behind
-/// the backlog. Skips
-/// videos that are unavailable, already downloaded, or waiting out a retry
-/// delay.
+/// the backlog. Skips videos that are unavailable, already downloaded, or
+/// waiting out a retry delay.
 pub fn pending_downloads(
     conn: &Connection,
     platform: Option<&str>,
@@ -120,20 +120,23 @@ pub fn download_item(
     Ok(found)
 }
 
-/// Count a failed download attempt and remember why it failed.
+/// Count a failed download attempt and remember why it failed. `gone` means
+/// the platform said the video is unavailable, so it's never tried again.
 pub fn record_download_failure(
     conn: &Connection,
     platform: &str,
     video_id: &str,
     error: &str,
+    gone: bool,
 ) -> Result<()> {
+    let at = now();
     conn.execute(
-        "INSERT INTO downloads (platform, video_id, failures, last_attempt_at, last_error) \
-         VALUES (?1, ?2, 1, ?3, ?4) \
+        "INSERT INTO downloads (platform, video_id, failures, last_attempt_at, last_error, unavailable_at) \
+         VALUES (?1, ?2, 1, ?3, ?4, ?5) \
          ON CONFLICT (platform, video_id) DO UPDATE SET \
            failures = failures + 1, last_attempt_at = excluded.last_attempt_at, \
-           last_error = excluded.last_error",
-        params![platform, video_id, now(), error],
+           last_error = excluded.last_error, unavailable_at = excluded.unavailable_at",
+        params![platform, video_id, at, error, gone.then_some(at)],
     )?;
     Ok(())
 }
@@ -187,6 +190,8 @@ pub fn record_download(
 pub struct DownloadState {
     pub failures: i64,
     pub last_error: Option<String>,
+    /// When the platform said the video is gone; it's not tried again.
+    pub unavailable_at: Option<i64>,
     pub downloaded_at: Option<i64>,
     pub folder: Option<String>,
     /// The file names in `folder`, sorted; empty until downloaded.
@@ -201,7 +206,8 @@ pub fn download_state(
 ) -> Result<Option<DownloadState>> {
     let found = conn
         .query_row(
-            "SELECT failures, last_error, downloaded_at, folder, size_bytes, files_json FROM downloads \
+            "SELECT failures, last_error, downloaded_at, folder, size_bytes, files_json, unavailable_at \
+             FROM downloads \
              WHERE platform = ?1 AND video_id = ?2",
             [platform, video_id],
             |r| {
@@ -209,6 +215,7 @@ pub fn download_state(
                     DownloadState {
                         failures: r.get(0)?,
                         last_error: r.get(1)?,
+                        unavailable_at: r.get(6)?,
                         downloaded_at: r.get(2)?,
                         folder: r.get(3)?,
                         files: Vec::new(),
@@ -297,16 +304,34 @@ mod tests {
         assert_eq!(ids(Some("tiktok")), ["t2", "t1"]);
         assert_eq!(ids(None), ["t2", "t1", "y"]);
         assert_eq!(pending_count(&conn, "tiktok").unwrap(), 2);
-        record_download_failure(&conn, "tiktok", "t2", "flaky").unwrap();
+        record_download_failure(&conn, "tiktok", "t2", "flaky", false).unwrap();
         assert_eq!(pending_count(&conn, "tiktok").unwrap(), 1);
         assert_eq!(pending_count(&conn, "instagram").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_video_the_platform_says_is_gone_is_never_tried_again() {
+        let mut conn = memory_db();
+        insert_new(&mut conn, "tiktok", &[new_video("a", true)]).unwrap();
+        record_download_failure(&conn, "tiktok", "a", "unavailable", true).unwrap();
+        // Long past any retry delay.
+        conn.execute(
+            "UPDATE downloads SET last_attempt_at = last_attempt_at - ?1",
+            [2 * MAX_RETRY_DELAY],
+        )
+        .unwrap();
+        assert!(pending_ids(&conn).is_empty());
+        // The like stays, with its link and title, and says why.
+        let state = download_state(&conn, "tiktok", "a").unwrap().unwrap();
+        assert!(state.unavailable_at.is_some());
+        assert_eq!(state.last_error.as_deref(), Some("unavailable"));
     }
 
     #[test]
     fn failed_downloads_wait_before_retrying() {
         let mut conn = memory_db();
         insert_new(&mut conn, "youtube", &[new_video("a", true)]).unwrap();
-        record_download_failure(&conn, "youtube", "a", "HTTP 429").unwrap();
+        record_download_failure(&conn, "youtube", "a", "HTTP 429", false).unwrap();
         assert!(pending_ids(&conn).is_empty());
 
         // An hour later it's due again.
@@ -336,7 +361,7 @@ mod tests {
     fn downloaded_videos_leave_the_queue() {
         let mut conn = memory_db();
         insert_new(&mut conn, "youtube", &[new_video("a", true)]).unwrap();
-        record_download_failure(&conn, "youtube", "a", "flaky").unwrap();
+        record_download_failure(&conn, "youtube", "a", "flaky", false).unwrap();
         let files = ["video.webm".to_string()];
         let done = |posted_at| Downloaded {
             folder: "youtube/a",

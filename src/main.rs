@@ -607,7 +607,8 @@ async fn download_batch(
         }
         .await;
         pipeline::record(conn, item, &result, started.elapsed())?;
-        if result.is_ok() {
+        // A video the platform says is gone is no sign of trouble.
+        if result.as_ref().is_ok() || result.as_ref().is_err_and(download::is_unavailable) {
             failures_in_a_row = 0;
             tokio::time::sleep(DOWNLOAD_PAUSE).await;
         } else {

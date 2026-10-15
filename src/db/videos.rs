@@ -267,7 +267,7 @@ mod tests {
         assert!(super::video(&conn, "tiktok", "a").unwrap().is_none());
 
         assert!(download_state(&conn, "youtube", "a").unwrap().is_none());
-        record_download_failure(&conn, "youtube", "a", "HTTP 429").unwrap();
+        record_download_failure(&conn, "youtube", "a", "HTTP 429", false).unwrap();
         let state = download_state(&conn, "youtube", "a").unwrap().unwrap();
         assert_eq!(state.failures, 1);
         assert_eq!(state.last_error.as_deref(), Some("HTTP 429"));
@@ -307,7 +307,7 @@ mod tests {
             &names(&["image-01.jpg", "image-02.jpg", "sound.mp3"]),
         );
         // A failed try has no files, so no picture.
-        record_download_failure(&conn, "tiktok", "f", "HTTP 403").unwrap();
+        record_download_failure(&conn, "tiktok", "f", "HTTP 403", false).unwrap();
 
         let pictures: Vec<(String, Option<String>)> =
             videos_page(&conn, None, &Query::default(), Order::NEWEST, 10, 0)

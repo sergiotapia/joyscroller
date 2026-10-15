@@ -22,6 +22,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0005_full_syncs_due.sql"),
     include_str!("migrations/0006_like_order.sql"),
     include_str!("migrations/0007_listing_read_at.sql"),
+    include_str!("migrations/0008_unavailable_downloads.sql"),
 ];
 
 /// Before `init` changes an existing database, save a copy of it as it is,
@@ -324,6 +325,32 @@ mod tests {
     }
 
     #[test]
+    fn tiktok_videos_already_found_gone_are_marked() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        for step in &MIGRATIONS[..7] {
+            conn.execute_batch(step).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute(
+            "INSERT INTO downloads (platform, video_id, failures, last_attempt_at, last_error) VALUES \
+             ('tiktok', 'gone', 1, 5, 'yt-dlp failed: ERROR: [TikTok] gone: Your IP address is blocked from accessing this post'), \
+             ('tiktok', 'other', 1, 5, 'yt-dlp failed: ERROR: [TikTok] other: HTTP Error 403')",
+            [],
+        )
+        .unwrap();
+        init(&mut conn).unwrap();
+        let marked: Vec<(String, Option<i64>)> = conn
+            .prepare("SELECT video_id, unavailable_at FROM downloads ORDER BY video_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(marked, [("gone".into(), Some(5)), ("other".into(), None)]);
+    }
+
+    #[test]
     fn migrating_indexes_the_videos_already_stored() {
         // A database from before search, as v0.1.0 left it.
         let mut conn = Connection::open_in_memory().unwrap();
@@ -377,7 +404,7 @@ mod tests {
             metadata_json: Some(info),
             posted_at: None,
         };
-        record_download_failure(&conn, "youtube", "b", "HTTP 429").unwrap();
+        record_download_failure(&conn, "youtube", "b", "HTTP 429", false).unwrap();
         record_download(&mut conn, "youtube", "b", &done).unwrap();
         assert_eq!(found(&conn, "dawn"), ["b"]);
         assert_eq!(found(&conn, "bird"), ["b"]);

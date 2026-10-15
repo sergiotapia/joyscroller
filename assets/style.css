@@ -504,6 +504,7 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 .jobs li:nth-child(even) { background: #f6f8fd; }
 .jobs .when { color: var(--muted); margin-right: 6px; }
 .outcome-failed { color: #b3261e; }
+.outcome-unavailable { color: #6b6b6b; }
 .outcome-downloaded { color: #2a7a17; }
 
 /* ---- Taskbar ----------------------------------------------------------- */

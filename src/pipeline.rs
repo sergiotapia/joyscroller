@@ -177,6 +177,9 @@ pub enum Outcome {
         picture: Option<String>,
     },
     Failed(String),
+    /// The platform says the video is gone (`download::Unavailable`, whose
+    /// words these are); it isn't tried again.
+    Unavailable(String),
     /// Its playback copy was made.
     Converted {
         bytes: u64,
@@ -568,7 +571,8 @@ pub fn between(shortest: Duration, longest: Duration) -> Duration {
 }
 
 /// Download a job that's on the board, record how it went, and take it off
-/// the board. True if it was downloaded and recorded.
+/// the board. True if the platform answered: the video was downloaded and
+/// recorded, or the platform said it's gone, which is no sign of trouble.
 async fn download_job(shared: &Shared, conn: &mut Connection, job: &Job) -> bool {
     let started = Instant::now();
     let on_progress = |progress| {
@@ -596,6 +600,10 @@ async fn download_job(shared: &Shared, conn: &mut Connection, job: &Job) -> bool
             seconds: started.elapsed().as_secs(),
             picture: saved.picture().map(Into::into),
         },
+        Err(e) if download::is_unavailable(e) => Outcome::Unavailable(
+            e.downcast_ref::<download::Unavailable>()
+                .map_or_else(|| format!("{e:#}"), ToString::to_string),
+        ),
         Err(e) => Outcome::Failed(format!("{e:#}")),
     };
     if let Err(e) = record(conn, &job.item, &result, started.elapsed()) {
@@ -606,11 +614,12 @@ async fn download_job(shared: &Shared, conn: &mut Connection, job: &Job) -> bool
         outcome = Outcome::Failed(format!("couldn't record it: {e:#}"));
     }
     let downloaded = matches!(outcome, Outcome::Downloaded { .. });
+    let answered = downloaded || matches!(outcome, Outcome::Unavailable(_));
     shared.board.send_modify(|board| board.finish(job, outcome));
     if downloaded {
         shared.wake.notify_one();
     }
-    downloaded
+    answered
 }
 
 /// The converter: make every downloaded video's playback copy, one at a
@@ -807,8 +816,27 @@ pub fn record(
                 took.as_secs()
             );
         }
+        Err(e) if download::is_unavailable(e) => {
+            db::record_download_failure(
+                conn,
+                &item.platform,
+                &item.video_id,
+                &format!("{e:#}"),
+                true,
+            )?;
+            eprintln!(
+                "{name}: {} is unavailable, not trying it again ({e:#})",
+                item.video_id
+            );
+        }
         Err(e) => {
-            db::record_download_failure(conn, &item.platform, &item.video_id, &format!("{e:#}"))?;
+            db::record_download_failure(
+                conn,
+                &item.platform,
+                &item.video_id,
+                &format!("{e:#}"),
+                false,
+            )?;
             eprintln!("{name}: download of {} failed: {e:#}", item.video_id);
         }
     }

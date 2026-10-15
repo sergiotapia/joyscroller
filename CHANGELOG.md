@@ -6,6 +6,7 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ### Changed
 
+- A TikTok video that TikTok no longer shows ("Video currently unavailable") now says so on its page, instead of a scary "Your IP address is blocked" error, and Joyscroller stops trying to download it. It stays in your library with its link and title. Videos already marked this way are picked up when you update.
 - The first full read of your Instagram likes goes more slowly, a page every 5 to 10 seconds, so Instagram is less likely to block it partway. One that Instagram does block now carries on where it stopped however long the block lasts, instead of starting over from your newest like after a day.
 
 ## [0.8.0] - 2026-10-15

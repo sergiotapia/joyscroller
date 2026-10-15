@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
@@ -498,12 +498,44 @@ async fn run_yt_dlp(cmd: &mut Command, progress: &(dyn Fn(Progress) + Sync)) -> 
         tokio::try_join!(read_stdout, read_stderr).context("reading yt-dlp's output")?;
     let status = child.wait().await.context("waiting for yt-dlp")?;
     if !status.success() {
-        bail!(
-            "yt-dlp failed: {}",
-            error_lines(&String::from_utf8_lossy(&errors))
-        );
+        let errors = error_lines(&String::from_utf8_lossy(&errors));
+        let failed = anyhow!("yt-dlp failed: {errors}");
+        if says_unavailable(&errors) {
+            return Err(failed.context(Unavailable("TikTok")));
+        }
+        return Err(failed);
     }
     Ok(printed)
+}
+
+/// The platform says the video is gone, so trying again won't get it: the
+/// pipeline records that and never tries it again.
+#[derive(Debug)]
+pub struct Unavailable(pub &'static str);
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} says this video is unavailable", self.0)
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
+/// Whether `e` is the platform saying the video is gone.
+pub fn is_unavailable(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Unavailable>().is_some()
+}
+
+/// Whether yt-dlp's `errors` say TikTok no longer shows the video. TikTok
+/// keeps such a video in the liked list, and its page says "Video currently
+/// unavailable" (status 10204), which yt-dlp words as "Your IP address is
+/// blocked from accessing this post" though the same address opens TikTok
+/// fine. Other statuses it can't place come out as "Video not available".
+/// Private posts (a login error) aren't counted: they can come back.
+fn says_unavailable(errors: &str) -> bool {
+    errors.contains("[TikTok]")
+        && (errors.contains("Your IP address is blocked from accessing this post")
+            || errors.contains("Video not available, status code"))
 }
 
 /// Save a TikTok photo post's images and sound into `work`. Returns the
@@ -868,6 +900,23 @@ fn error_lines(stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiktok_saying_a_video_is_gone_is_told_apart() {
+        assert!(says_unavailable(
+            "ERROR: [TikTok] 7692044769404521742: Your IP address is blocked from accessing this post"
+        ));
+        assert!(says_unavailable(
+            "ERROR: [TikTok] 1: Video not available, status code 10231"
+        ));
+        assert!(!says_unavailable(
+            "ERROR: [TikTok] 1: You do not have permission to view this post. Log into an account that has access"
+        ));
+        assert!(!says_unavailable("ERROR: [youtube] x: Video unavailable"));
+        let gone = anyhow!("yt-dlp failed").context(Unavailable("TikTok"));
+        assert!(is_unavailable(&gone.context("downloading")));
+        assert!(!is_unavailable(&anyhow!("yt-dlp failed")));
+    }
 
     #[test]
     fn picks_the_thumbnail_or_first_image_as_the_picture() {

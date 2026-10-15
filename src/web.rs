@@ -763,7 +763,7 @@ async fn video_page(
         }
         _ => String::new(),
     };
-    let fields = facts_html(&video);
+    let fields = facts_html(&video, download.as_ref());
     // Fall back to the stored text if it somehow isn't valid JSON.
     let pretty = serde_json::from_str::<serde_json::Value>(&raw_json)
         .and_then(|value| serde_json::to_string_pretty(&value))
@@ -817,8 +817,9 @@ async fn video_page(
     )))
 }
 
-/// The video page's Details: author, length, dates, whether it's still up.
-fn facts_html(video: &db::StoredVideo) -> String {
+/// The video page's Details: author, length, dates, whether it's still up
+/// (by the list, or by what the platform said when it was downloaded).
+fn facts_html(video: &db::StoredVideo, download: Option<&db::DownloadState>) -> String {
     let on_source = format!("On {}", display_name(&video.platform));
     [
         ("Author", author_html(video)),
@@ -844,10 +845,12 @@ fn facts_html(video: &db::StoredVideo) -> String {
         ("Added", time(video.added_at, "datetime")),
         (
             &on_source,
-            if video.available {
-                "available"
-            } else {
+            if !video.available {
                 "private or deleted"
+            } else if download.is_some_and(|d| d.unavailable_at.is_some()) {
+                "unavailable"
+            } else {
+                "available"
             }
             .into(),
         ),
@@ -1733,7 +1736,8 @@ fn author_html(video: &db::StoredVideo) -> String {
 /// Whether the download button makes sense: there's nothing saved yet, and
 /// the platform still has the video.
 fn can_download(video: &db::StoredVideo, download: Option<&db::DownloadState>) -> bool {
-    video.available && download.is_none_or(|d| d.downloaded_at.is_none())
+    video.available
+        && download.is_none_or(|d| d.downloaded_at.is_none() && d.unavailable_at.is_none())
 }
 
 /// The video page's Media field: where its download stands in the pipeline,
@@ -1760,14 +1764,14 @@ fn media_html(
                 "<form method=\"post\" action=\"{}/download\"><button class=\"dome\">Download now</button></form>\n\
                  <span>{}</span>",
                 video_href(video),
-                download_html(download)
+                download_html(&video.platform, download)
             ),
             "",
         ),
         None => (
             format!(
                 "{}{}",
-                download_html(download),
+                download_html(&video.platform, download),
                 playback_html(video, download, playback)
             ),
             "",
@@ -2013,6 +2017,7 @@ fn outcome_html(outcome: &Outcome) -> (&'static str, String) {
             )
         }
         Outcome::Failed(error) => ("failed", format!("failed: {}", one_line(error))),
+        Outcome::Unavailable(said) => ("unavailable", one_line(said)),
         Outcome::Converted {
             bytes,
             seconds,
@@ -2146,7 +2151,7 @@ fn downloads_json(board: &Board) -> String {
     .to_string()
 }
 
-fn download_html(download: Option<&db::DownloadState>) -> String {
+fn download_html(platform: &str, download: Option<&db::DownloadState>) -> String {
     let Some(download) = download else {
         return "not downloaded".into();
     };
@@ -2157,6 +2162,15 @@ fn download_html(download: Option<&db::DownloadState>) -> String {
             "downloaded {}, {megabytes:.1} MB, in <code>{}</code>",
             time(at, "datetime"),
             escape(download.folder.as_deref().unwrap_or(""))
+        );
+    }
+    // yt-dlp's words for it are misleading (TikTok's "Your IP address is
+    // blocked"), so they're left out.
+    if let Some(at) = download.unavailable_at {
+        return format!(
+            "not downloaded: {} says this video is unavailable (as of {}), so it won't be tried again",
+            escape(display_name(platform)),
+            time(at, "date")
         );
     }
     let tries = if download.failures == 1 {
@@ -2490,6 +2504,7 @@ mod tests {
         let failed = db::DownloadState {
             failures: 2,
             last_error: Some("429".into()),
+            unavailable_at: None,
             downloaded_at: None,
             folder: None,
             files: Vec::new(),
@@ -2498,6 +2513,20 @@ mod tests {
         let html = media_html(&fresh, Some(&failed), None, &board);
         assert!(html.contains("2 failed tries, last error: 429"));
         assert!(html.contains("<button"));
+
+        // TikTok said it's gone: no button, and none of yt-dlp's misleading
+        // words for it.
+        let tiktok = video("tiktok", None);
+        let unavailable = db::DownloadState {
+            failures: 1,
+            last_error: Some("yt-dlp failed: ERROR: Your IP address is blocked".into()),
+            unavailable_at: Some(1),
+            ..failed.clone()
+        };
+        let html = media_html(&tiktok, Some(&unavailable), None, &board);
+        assert!(!html.contains("<button"));
+        assert!(html.contains("not downloaded: TikTok says this video is unavailable"));
+        assert!(!html.contains("IP address"));
 
         let saved = db::DownloadState {
             downloaded_at: Some(1),
@@ -2517,6 +2546,7 @@ mod tests {
         db::DownloadState {
             failures: 0,
             last_error: None,
+            unavailable_at: None,
             downloaded_at: Some(1),
             folder: Some("youtube/abc".into()),
             files: vec!["video.webm".into()],
