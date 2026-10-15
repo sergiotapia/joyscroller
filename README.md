@@ -6,8 +6,8 @@ Automatically download the videos you like on TikTok, YouTube and Instagram, and
 
 You've liked thousands of videos. Some get deleted, some go private, and the rest sink to the bottom of a feed you'll never scroll back through. Joyscroller saves a copy of each one to your own computer, so the videos you loved are still yours long after the app moves on.
 
-- **Everything you've liked, in one place.** Your YouTube likes, TikTok likes and Instagram saves, side by side in one library you can browse and watch.
-- **The best quality there is.** Each video is saved at the highest quality the platform offers, with its real sound. TikTok photo slideshows are saved too, images and music included.
+- **Everything you've liked, in one place.** Your YouTube likes, TikTok likes and Instagram likes and saves, side by side in one library you can browse and watch.
+- **The best quality there is.** Each video is saved at the highest quality the platform offers, with its real sound. Photo posts are saved too, images and music included: TikTok slideshows, and Instagram photos and carousels at the size they were posted.
 - **Neatly organized.** Videos land in plain folders, sorted by platform and by the day you liked them, each named after its title. No mystery file names, and nothing locked inside an app.
 - **Nothing to set up.** Joyscroller signs in with the browser you already use. No accounts to connect, no passwords to type, no API keys.
 - **It keeps up on its own.** Leave it running and new likes show up in your library within minutes of tapping the heart.

@@ -18,7 +18,7 @@ pub struct NewVideo<'a> {
     pub duration_seconds: Option<u64>,
     pub available: bool,
     pub listing_json: &'a str,
-    /// `video`, or `photo` for a TikTok slideshow.
+    /// `video`, or `photo` for a TikTok slideshow or an Instagram photo or carousel.
     pub kind: &'a str,
     pub posted_at: Option<i64>,
 }

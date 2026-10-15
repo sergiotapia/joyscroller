@@ -1,8 +1,9 @@
 //! The player on a video's page, once its media is downloaded: Video.js 10's
 //! elements around the saved files. A video gets a screen with a strip of
-//! controls under it; a TikTok photo post gets a slideshow of its pictures
-//! over the same strip, playing the post's sound, which starts by itself and
-//! loops as it does on TikTok. A video with a playback copy (`transcode.rs`)
+//! controls under it; a photo post (TikTok's, or Instagram's photos and
+//! carousels) gets a slideshow of its pictures over the same strip, playing
+//! the post's sound, which starts by itself and loops as it does on TikTok.
+//! A carousel's videos are slides too, and play while they're shown. A video with a playback copy (`transcode.rs`)
 //! names both files, and `assets/player.js` picks the original only where the
 //! browser says it plays it smoothly and power-efficiently; elsewhere, and
 //! whenever the original fails, it plays the copy. Video.js is built into `assets/videojs.js`
@@ -24,7 +25,8 @@ pub enum Playable<'a> {
         copy: Option<PlaybackCopy<'a>>,
     },
     Photos {
-        images: Vec<&'a str>,
+        /// Pictures (`image-NN`) and a carousel's videos (`video-NN`), in order.
+        slides: Vec<&'a str>,
         sound: Option<&'a str>,
     },
 }
@@ -55,17 +57,19 @@ pub fn playable(files: &[String]) -> Option<Playable<'_>> {
             copy: None,
         });
     }
-    // The download names them image-01, image-02, …, and the list is sorted.
-    let images: Vec<&str> = files
+    // The download numbers them image-01, video-02, image-03, …, pictures
+    // and videos together.
+    let mut slides: Vec<&str> = files
         .iter()
         .map(String::as_str)
-        .filter(|file| file.starts_with("image-"))
+        .filter(|file| file.starts_with("image-") || file.starts_with("video-"))
         .collect();
-    if images.is_empty() {
+    if slides.is_empty() {
         return None;
     }
+    slides.sort_by_key(|file| file.split_once('-').map(|(_, number)| number));
     Some(Playable::Photos {
-        images,
+        slides,
         sound: named("sound."),
     })
 }
@@ -119,47 +123,21 @@ pub fn player_html(video_href: &str, playable: &Playable) -> String {
                 controls = CONTROLS,
             )
         }
-        Playable::Photos { images, sound } => {
-            let count = images.len();
-            let mut slides = String::new();
-            let mut dots = String::new();
-            for (i, file) in images.iter().enumerate() {
-                let n = i + 1;
-                // The rest load as the browser gets to them, after the first.
-                let (lazy, current) = if n == 1 {
-                    ("", " aria-current=\"true\"")
-                } else {
-                    (" loading=\"lazy\"", "")
-                };
-                // Writing to a String can't fail.
-                let _ = write!(
-                    slides,
-                    "<img src=\"{}\" alt=\"Photo {n} of {count}\" draggable=\"false\"{lazy}>",
-                    src(file)
-                );
-                let _ = write!(
-                    dots,
-                    "<button class=\"slide-dot\" type=\"button\" aria-label=\"Photo {n}\"{current}></button>"
-                );
-            }
-            let slideshow = format!(
-                "<div class=\"player-screen slideshow\" role=\"region\" aria-roledescription=\"carousel\" aria-label=\"Photos\">\n\
-                 <div class=\"slides\">{slides}</div>\n\
-                 <button class=\"slide-turn slide-prev\" type=\"button\" aria-label=\"Previous photo\" disabled>{ARROW}</button>\n\
-                 <button class=\"slide-turn slide-next\" type=\"button\" aria-label=\"Next photo\"{last}>{ARROW}</button>\n\
-                 <div class=\"slide-count\" aria-live=\"polite\"><span class=\"slide-at\">1</span>/{count}</div>\n\
-                 <div class=\"slide-dots\">{dots}</div>\n\
-                 </div>\n",
-                last = if count == 1 { " disabled" } else { "" },
-            );
+        Playable::Photos {
+            slides: files,
+            sound,
+        } => {
+            let slideshow = slideshow_html(video_href, files, sound.is_some());
             let Some(sound) = sound else {
                 return format!("<div class=\"player\">\n{slideshow}</div>\n");
             };
+            // The audio comes first: Video.js controls the first `<audio>` or
+            // `<video>` in the container, and a carousel's slides can be videos.
             format!(
                 "<audio-player>\n\
                  <media-container class=\"player\">\n\
-                 {slideshow}\
                  <audio src=\"{sound}\" preload=\"auto\" autoplay loop></audio>\n\
+                 {slideshow}\
                  {error}\
                  {hotkeys}\
                  <div class=\"player-strip\">\n{controls}</div>\n\
@@ -171,6 +149,55 @@ pub fn player_html(video_href: &str, playable: &Playable) -> String {
                 controls = CONTROLS,
             )
         }
+    }
+}
+
+/// A photo post's slideshow of `files`, served under `<video_href>/media`.
+/// `has_sound` mutes a carousel's videos under the post's own sound.
+fn slideshow_html(video_href: &str, files: &[&str], has_sound: bool) -> String {
+    let src = |file: &str| format!("{video_href}/media/{}", escape(file));
+    let count = files.len();
+    let mut slides = String::new();
+    let mut dots = String::new();
+    for (i, file) in files.iter().enumerate() {
+        let n = i + 1;
+        // The rest load as the browser gets to them, after the first.
+        let (lazy, current) = if n == 1 {
+            ("", " aria-current=\"true\"")
+        } else {
+            (" loading=\"lazy\"", "")
+        };
+        slides.push_str(&slide_html(&src(file), file, n, count, lazy, has_sound));
+        // Writing to a String can't fail.
+        let _ = write!(
+            dots,
+            "<button class=\"slide-dot\" type=\"button\" aria-label=\"Photo {n}\"{current}></button>"
+        );
+    }
+    format!(
+        "<div class=\"player-screen slideshow\" role=\"region\" aria-roledescription=\"carousel\" aria-label=\"Photos\">\n\
+         <div class=\"slides\">{slides}</div>\n\
+         <button class=\"slide-turn slide-prev\" type=\"button\" aria-label=\"Previous photo\" disabled>{ARROW}</button>\n\
+         <button class=\"slide-turn slide-next\" type=\"button\" aria-label=\"Next photo\"{last}>{ARROW}</button>\n\
+         <div class=\"slide-count\" aria-live=\"polite\"><span class=\"slide-at\">1</span>/{count}</div>\n\
+         <div class=\"slide-dots\">{dots}</div>\n\
+         </div>\n",
+        last = if count == 1 { " disabled" } else { "" },
+    )
+}
+
+/// One slide of a photo post: `file`, served at `src`, the `n`th of
+/// `count`. A carousel's video is a slide too, which `player.js` plays while
+/// it's shown, muted when the post has a sound of its own.
+fn slide_html(src: &str, file: &str, n: usize, count: usize, lazy: &str, muted: bool) -> String {
+    if file.starts_with("video-") {
+        format!(
+            "<video class=\"slide-video\" src=\"{src}\" aria-label=\"Video {n} of {count}\" \
+             preload=\"metadata\" loop playsinline{muted}></video>",
+            muted = if muted { " muted" } else { "" },
+        )
+    } else {
+        format!("<img src=\"{src}\" alt=\"Photo {n} of {count}\" draggable=\"false\"{lazy}>")
     }
 }
 
@@ -266,8 +293,17 @@ mod tests {
         assert_eq!(
             playable(&photos),
             Some(Playable::Photos {
-                images: vec!["image-01.jpg", "image-02.webp"],
+                slides: vec!["image-01.jpg", "image-02.webp"],
                 sound: Some("sound.mp3")
+            })
+        );
+        // A carousel's pictures and videos stay in the post's order.
+        let carousel = names(&["image-01.jpg", "image-03.jpg", "video-02.mp4"]);
+        assert_eq!(
+            playable(&carousel),
+            Some(Playable::Photos {
+                slides: vec!["image-01.jpg", "video-02.mp4", "image-03.jpg"],
+                sound: None
             })
         );
         assert_eq!(playable(&names(&["thumbnail.jpg"])), None);
@@ -321,7 +357,7 @@ mod tests {
         let html = player_html(
             "/videos/tiktok/1",
             &Playable::Photos {
-                images: vec!["image-01.jpg", "image-02.jpg"],
+                slides: vec!["image-01.jpg", "image-02.jpg"],
                 sound: Some("sound.mp3"),
             },
         );
@@ -337,12 +373,38 @@ mod tests {
         let silent = player_html(
             "/m",
             &Playable::Photos {
-                images: vec!["image-01.jpg"],
+                slides: vec!["image-01.jpg"],
                 sound: None,
             },
         );
         assert!(!silent.contains("<audio"));
         assert!(silent.contains("aria-label=\"Next photo\" disabled"));
+    }
+
+    #[test]
+    fn a_carousels_videos_are_slides() {
+        let html = player_html(
+            "/m",
+            &Playable::Photos {
+                slides: vec!["video-01.mp4", "image-02.jpg"],
+                sound: Some("sound.m4a"),
+            },
+        );
+        assert!(html.contains(
+            "<video class=\"slide-video\" src=\"/m/media/video-01.mp4\" aria-label=\"Video 1 of 2\" \
+             preload=\"metadata\" loop playsinline muted></video>"
+        ));
+        // Video.js takes the first media element for the strip's controls.
+        assert!(html.find("<audio").unwrap() < html.find("<video").unwrap());
+
+        let silent = player_html(
+            "/m",
+            &Playable::Photos {
+                slides: vec!["video-01.mp4"],
+                sound: None,
+            },
+        );
+        assert!(silent.contains("playsinline></video>"));
     }
 
     #[test]

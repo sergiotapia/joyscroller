@@ -1,14 +1,16 @@
 // The player's own behavior (src/player.rs builds its markup; Video.js runs
 // the controls): picking between a video's original and its playback copy,
-// the photo slideshow, starting a photo post's sound when the browser held
-// it back, and saying so when a file can't play here.
+// the photo slideshow (with a carousel's videos among its pictures),
+// starting a photo post's sound when the browser held it back, and saying so
+// when a file can't play here.
 
 for (const show of document.querySelectorAll(".slideshow")) slideshow(show);
 
 // The pictures sit side by side in a strip that slides along: the arrows,
 // the dots and the arrow keys turn one picture, and dragging pulls the
 // strip with the pointer, which lets go onto the nearest picture. A quick
-// flick turns the page even when it's short.
+// flick turns the page even when it's short. A video among the pictures (an
+// Instagram carousel's) plays while it's shown and pauses when it isn't.
 function slideshow(show) {
   const strip = show.querySelector(".slides");
   const pictures = [...strip.children];
@@ -27,7 +29,24 @@ function slideshow(show) {
     next.disabled = index === last;
     at.textContent = index + 1;
     dots.forEach((dot, i) => (i === index ? dot.setAttribute("aria-current", "true") : dot.removeAttribute("aria-current")));
+    playShown();
   }
+
+  // With sound, a video held back by the browser's autoplay rules plays
+  // muted rather than not at all.
+  function playShown() {
+    for (const video of pictures.filter((p) => p.localName === "video")) {
+      if (video !== pictures[index]) {
+        video.pause();
+      } else if (video.paused) {
+        video.play().catch(() => {
+          video.muted = true;
+          video.play().catch(() => {});
+        });
+      }
+    }
+  }
+  playShown();
 
   prev.addEventListener("click", () => go(index - 1));
   next.addEventListener("click", () => go(index + 1));
@@ -74,11 +93,19 @@ function slideshow(show) {
   // The screen takes the first picture's shape (TikTok's are mostly 3:4 or
   // 9:16), so it isn't letterboxed. Later ones that differ are fitted inside.
   const first = pictures[0];
-  const fit = () => {
-    if (first.naturalWidth) show.style.aspectRatio = `${first.naturalWidth} / ${first.naturalHeight}`;
-  };
-  if (first.complete) fit();
-  else first.addEventListener("load", fit, { once: true });
+  if (first.localName === "video") {
+    const fit = () => {
+      if (first.videoWidth) show.style.aspectRatio = `${first.videoWidth} / ${first.videoHeight}`;
+    };
+    if (first.readyState >= 1) fit();
+    else first.addEventListener("loadedmetadata", fit, { once: true });
+  } else {
+    const fit = () => {
+      if (first.naturalWidth) show.style.aspectRatio = `${first.naturalWidth} / ${first.naturalHeight}`;
+    };
+    if (first.complete) fit();
+    else first.addEventListener("load", fit, { once: true });
+  }
 }
 
 // A photo post's sound plays by itself, as on TikTok. Browsers allow that
@@ -155,7 +182,8 @@ function use(video, src) {
 // video with a playback copy switches to it. When nothing plays (no copy
 // yet, or its file has gone), the page asks for one and reloads into it
 // once it's made.
-for (const media of document.querySelectorAll(".player video, .player audio")) {
+// A slideshow's videos are left out: a slide that won't play just stays dark.
+for (const media of document.querySelectorAll(".player video:not(.slide-video), .player audio")) {
   const note = media.closest(".player").querySelector(".player-error");
   const failed = () => {
     const copy = media.dataset.copy;

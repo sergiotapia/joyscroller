@@ -68,7 +68,7 @@ enum Command {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
-    /// List the videos you've liked (on Instagram, the ones you've saved).
+    /// List the videos you've liked (on Instagram, the posts you've saved, then the ones you've liked).
     Likes {
         #[arg(long, value_enum, default_value = "youtube")]
         platform: Platform,
@@ -237,7 +237,7 @@ async fn run(cli: Cli) -> Result<()> {
             match platform {
                 Platform::Youtube => print_youtube_likes(browser, &profile, limit).await?,
                 Platform::Tiktok => print_tiktok_likes(browser, &profile, limit).await?,
-                Platform::Instagram => print_instagram_saves(browser, &profile, limit).await?,
+                Platform::Instagram => print_instagram_lists(browser, &profile, limit).await?,
             }
         }
         Command::Sync {
@@ -332,23 +332,35 @@ async fn print_tiktok_likes(browser: Browser, profile: &str, limit: usize) -> Re
     Ok(())
 }
 
-/// The `likes` command for Instagram, where the list is the saved videos.
-async fn print_instagram_saves(browser: Browser, profile: &str, limit: usize) -> Result<()> {
+/// The `likes` command for Instagram, where the lists are the saved posts
+/// and the liked ones, `limit` of each.
+async fn print_instagram_lists(browser: Browser, profile: &str, limit: usize) -> Result<()> {
     let cookies = browser::cookies_for(browser, profile, "instagram.com").await?;
     eprintln!("extracted {} instagram.com cookies", cookies.len());
-    let videos = instagram::saved_videos(browser, &cookies, limit, |_| true).await?;
-    eprintln!("\n{} saved videos:\n", videos.len());
-    for (i, v) in videos.iter().enumerate() {
-        let dur = v
-            .duration_seconds
-            .map_or_else(|| "--:--".into(), |s| format!("{}:{:02}", s / 60, s % 60));
-        let author = v.author_handle.as_deref().unwrap_or("?");
-        // Captions run long with hashtags; the first line is enough here.
-        let caption = v.caption.lines().next().unwrap_or("");
-        println!("{:>3}. [{dur}] @{author} — {caption}", i + 1);
-        println!("     {}", v.url());
-    }
+    let mut saved = Vec::new();
+    instagram::saved_posts(browser, &cookies, limit, |_| true, &mut saved).await?;
+    print_instagram_posts("saved", &saved);
+    let mut liked = Vec::new();
+    instagram::liked_posts(&cookies, limit, |_| true, &mut liked).await?;
+    print_instagram_posts("liked", &liked);
     Ok(())
+}
+
+fn print_instagram_posts(list: &str, posts: &[instagram::Post]) {
+    eprintln!("\n{} {list} posts:\n", posts.len());
+    for (i, p) in posts.iter().enumerate() {
+        let length = if p.is_photo {
+            "photo".into()
+        } else {
+            p.duration_seconds
+                .map_or_else(|| "--:--".into(), |s| format!("{}:{:02}", s / 60, s % 60))
+        };
+        let author = p.author_handle.as_deref().unwrap_or("?");
+        // Captions run long with hashtags; the first line is enough here.
+        let caption = p.caption.lines().next().unwrap_or("");
+        println!("{:>3}. [{length}] @{author} — {caption}", i + 1);
+        println!("     {}", p.url());
+    }
 }
 
 /// The app: serves the web UI and keeps running, syncing new likes every
@@ -648,49 +660,109 @@ async fn sync_tiktok(
     Ok((videos.len(), added))
 }
 
-/// Pull newly saved Instagram videos into the database. Returns (listed, added).
-/// Instagram's "like" for keeping a video is saving it, so saves are what the
-/// archive holds; a liked but unsaved post isn't kept.
+/// Pull newly saved and liked Instagram posts into the database. Returns
+/// (listed, added). Instagram has two ways of keeping a post, saving it and
+/// liking it, and the archive holds both, as one row per post.
+///
+/// The two lists are read one after the other, and each is stored as soon as
+/// it's read, so one failing (the liked list is read from the phone app's
+/// API, which Instagram could close to us) doesn't lose the other.
 async fn sync_instagram(
     browser: Browser,
     profile: &str,
     conn: &mut rusqlite::Connection,
     full: bool,
 ) -> Result<(usize, usize)> {
-    let sync_id = db::start_sync(conn, "instagram")?;
-
     // Re-read cookies on every sync: the browser rotates them while it runs.
     let cookies = browser::cookies_for(browser, profile, "instagram.com").await?;
-    let known = db::video_ids(conn, "instagram")?;
-    let mut keep_going = until_known(&known, full);
-    let videos = instagram::saved_videos(browser, &cookies, 0, |v| keep_going(&v.code)).await?;
+    instagram::check_logged_in(&cookies)?;
+    let sync_id = db::start_sync(conn, "instagram")?;
 
-    let urls: Vec<String> = videos.iter().map(instagram::Video::url).collect();
-    let raws: Vec<String> = videos.iter().map(|v| v.raw.to_string()).collect();
-    // Listed newest save first; insert oldest first so rowid follows save order.
-    let rows: Vec<db::NewVideo> = videos
+    let saved_due = db::full_sync_due(conn, INSTAGRAM_SAVED)?;
+    let known = db::video_ids(conn, "instagram")?;
+    let mut keep_going = until_known(&known, full || saved_due);
+    let mut saved = Vec::new();
+    let saved_read =
+        instagram::saved_posts(browser, &cookies, 0, |p| keep_going(&p.code), &mut saved).await;
+    let mut added =
+        store_instagram_read(conn, INSTAGRAM_SAVED, &saved, &saved_read, full, saved_due)?;
+
+    let liked_due = db::full_sync_due(conn, INSTAGRAM_LIKED)?;
+    let known = db::video_ids(conn, "instagram")?;
+    let mut keep_going = until_known(&known, full || liked_due);
+    let mut liked = Vec::new();
+    let liked_read = instagram::liked_posts(&cookies, 0, |p| keep_going(&p.code), &mut liked).await;
+    added += store_instagram_read(conn, INSTAGRAM_LIKED, &liked, &liked_read, full, liked_due)?;
+
+    db::finish_sync(conn, sync_id, added)?;
+    match (saved_read, liked_read) {
+        (Ok(()), Ok(())) => Ok((saved.len() + liked.len(), added)),
+        (Err(e), Ok(())) => Err(e.context("reading the saved list")),
+        (Ok(()), Err(e)) => Err(e.context("reading the liked list")),
+        (Err(saved), Err(liked)) => Err(saved.context(format!(
+            "reading the saved list (and the liked list: {liked:#})"
+        ))),
+    }
+}
+
+/// Instagram's lists, as `full_syncs_due` names them.
+const INSTAGRAM_SAVED: &str = "instagram saved";
+const INSTAGRAM_LIKED: &str = "instagram liked";
+
+/// Store what a read of one of Instagram's lists found, `read` saying how it
+/// ended. Returns how many posts were new. `due` says the read was the full
+/// one `full_syncs_due` asked for, which a read that went all the way
+/// through settles.
+///
+/// A full read (`full` or `due`) that failed partway keeps what it found,
+/// since the next one starts over from the top and reads past it. An
+/// incremental one doesn't: storing only its newest posts would have the
+/// next read stop at them, above the older new ones this one never reached.
+fn store_instagram_read(
+    conn: &mut rusqlite::Connection,
+    list: &str,
+    posts: &[instagram::Post],
+    read: &Result<()>,
+    full: bool,
+    due: bool,
+) -> Result<usize> {
+    if read.is_err() && !(full || due) {
+        return Ok(0);
+    }
+    let added = store_instagram(conn, posts)?;
+    if read.is_ok() && due {
+        db::full_sync_done(conn, list)?;
+    }
+    Ok(added)
+}
+
+/// Store a list of Instagram posts, as listed (newest first). Returns how
+/// many were new.
+fn store_instagram(conn: &mut rusqlite::Connection, posts: &[instagram::Post]) -> Result<usize> {
+    let urls: Vec<String> = posts.iter().map(instagram::Post::url).collect();
+    let raws: Vec<String> = posts.iter().map(|p| p.raw.to_string()).collect();
+    // Listed newest first; insert oldest first so rowid follows save order.
+    let rows: Vec<db::NewVideo> = posts
         .iter()
         .zip(&urls)
         .zip(&raws)
         .rev()
-        .map(|((v, url), raw)| db::NewVideo {
-            video_id: &v.code,
+        .map(|((p, url), raw)| db::NewVideo {
+            video_id: &p.code,
             url,
-            title: (!v.caption.is_empty()).then_some(v.caption.as_str()),
-            author_id: v.author_id.as_deref(),
-            author_name: v.author_handle.as_deref(),
-            duration_seconds: v.duration_seconds,
+            title: (!p.caption.is_empty()).then_some(p.caption.as_str()),
+            author_id: p.author_id.as_deref(),
+            author_name: p.author_handle.as_deref(),
+            duration_seconds: p.duration_seconds,
             // Like TikTok, Instagram leaves deleted and private posts out of
-            // the saved list.
+            // its lists.
             available: true,
             listing_json: raw,
-            kind: "video",
-            posted_at: v.posted_at,
+            kind: if p.is_photo { "photo" } else { "video" },
+            posted_at: p.posted_at,
         })
         .collect();
-    let added = db::insert_new(conn, "instagram", &rows)?;
-    db::finish_sync(conn, sync_id, added)?;
-    Ok((videos.len(), added))
+    db::insert_new(conn, "instagram", &rows)
 }
 
 #[cfg(test)]

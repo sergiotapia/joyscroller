@@ -6,6 +6,11 @@
 //! - TikTok photo posts, which yt-dlp can't fetch, through `tiktok.rs`:
 //!   `image-01.<ext>`, `image-02.<ext>`, … and `sound.<ext>`. The first image
 //!   is the cover.
+//! - Instagram photo posts and carousels, which yt-dlp can't fetch either,
+//!   through `instagram.rs`: the same, except that a carousel's videos are
+//!   `video-NN.<ext>`, numbered along with its pictures (with the first
+//!   video's cover as `thumbnail.<ext>` when one comes first), and
+//!   `sound.<ext>` is the part of the post's music it plays.
 //!
 //! The metadata goes back to the caller (for the database) rather than being
 //! kept as a file. yt-dlp's progress is passed to a callback as it comes, for
@@ -13,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -22,7 +28,7 @@ use tokio::process::Command;
 use crate::browser::{Browser, Cookie};
 use crate::db::PendingDownload;
 use crate::filename::safe_name;
-use crate::tiktok;
+use crate::{instagram, tiktok};
 
 /// For TikTok: the best video stream, and separately the best file that has
 /// both picture and sound. TikTok's highest qualities are video-only, and the
@@ -263,10 +269,10 @@ pub async fn download(
     }
     std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
-    let result = if item.kind == "photo" {
-        fetch_photo_post(item, login, &work).await
-    } else {
-        fetch(item, login.cookies_txt, &work, progress).await
+    let result = match (item.kind.as_str(), item.platform.as_str()) {
+        ("photo", "instagram") => fetch_instagram_post(item, login, &work).await,
+        ("photo", _) => fetch_photo_post(item, login, &work).await,
+        _ => fetch(item, login.cookies_txt, &work, progress).await,
     };
     let (format, info) = match result {
         Ok(fetched) => fetched,
@@ -526,6 +532,113 @@ async fn fetch_photo_post(
         )?;
     }
     Ok(("photo".to_string(), Some(post.item)))
+}
+
+/// Save an Instagram photo post or carousel into `work`. Returns the format
+/// label and the post as metadata.
+async fn fetch_instagram_post(
+    item: &PendingDownload,
+    login: &Login<'_>,
+    work: &Path,
+) -> Result<(String, Option<Value>)> {
+    let post =
+        instagram::photo_post(login.browser, login.cookies, &item.url, &item.video_id).await?;
+    for (i, slide) in post.slides.iter().enumerate() {
+        let kind = if slide.is_video { "video" } else { "image" };
+        fetch_file(&slide.url, work, &format!("{kind}-{:02}", i + 1)).await?;
+    }
+    if let Some(cover) = &post.cover {
+        fetch_file(cover, work, "thumbnail").await?;
+    }
+    if let Some(sound) = &post.sound {
+        let track = fetch_file(&sound.url, work, "track").await?;
+        keep_clip(&track, sound.clip, work).await?;
+    }
+    Ok(("photo".to_string(), Some(post.item)))
+}
+
+/// Download `url` into `work` as `<stem>.<ext>`, the extension from what the
+/// file turns out to be. Returns its path. For Instagram's media links, which
+/// are signed and need no login.
+async fn fetch_file(url: &str, work: &Path, stem: &str) -> Result<PathBuf> {
+    let url = url.to_string();
+    let work = work.to_path_buf();
+    let stem = stem.to_string();
+    tokio::task::spawn_blocking(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_mins(1)))
+            // Only stops a download that has stalled; a carousel's videos
+            // run to tens of megabytes.
+            .timeout_recv_body(Some(Duration::from_mins(10)))
+            .build()
+            .into();
+        let mut response = agent
+            .get(&url)
+            .call()
+            .with_context(|| format!("downloading {stem}"))?;
+        let mime = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let partial = work.join(format!("{stem}.partial"));
+        let mut file = std::fs::File::create(&partial)
+            .with_context(|| format!("creating {}", partial.display()))?;
+        std::io::copy(&mut response.body_mut().as_reader(), &mut file)
+            .with_context(|| format!("downloading {stem}"))?;
+        drop(file);
+        let mut head = Vec::with_capacity(16);
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(std::fs::File::open(&partial)?, 16),
+            &mut head,
+        )?;
+        let path = work.join(format!("{stem}.{}", extension_for(&head, &mime)));
+        std::fs::rename(&partial, &path)?;
+        Ok(path)
+    })
+    .await
+    .context("the download stopped")?
+}
+
+/// Keep the part of a post's music the post plays, cut from the whole
+/// `track`, as `sound.<ext>`, or the whole track when the post doesn't say.
+/// Instagram plays that part over the pictures, over and over.
+async fn keep_clip(track: &Path, clip: Option<(u64, u64)>, work: &Path) -> Result<()> {
+    // Instagram serves the music as `video/mp4`, but there's no picture in it.
+    let ext = match track.extension().and_then(|e| e.to_str()) {
+        Some("mp4") | None => "m4a",
+        Some(ext) => ext,
+    };
+    let out_path = work.join(format!("sound.{ext}"));
+    let Some((start, length)) = clip else {
+        std::fs::rename(track, &out_path)?;
+        return Ok(());
+    };
+    let seconds = |ms: u64| format!("{}.{:03}", ms / 1000, ms % 1000);
+    let out = crate::tools::ffmpeg()?
+        .args(["-v", "error", "-y", "-ss"])
+        .arg(seconds(start))
+        .arg("-t")
+        .arg(seconds(length))
+        .arg("-i")
+        .arg(track)
+        .args(["-map", "0:a:0", "-c", "copy"])
+        .arg(&out_path)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to run ffmpeg; is it installed?")?;
+    if !out.status.success() {
+        bail!(
+            "ffmpeg couldn't cut the post's music: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    std::fs::remove_file(track)?;
+    Ok(())
 }
 
 /// A file extension for fetched bytes, from their leading magic bytes, or

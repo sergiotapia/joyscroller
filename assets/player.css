@@ -302,7 +302,7 @@ media-fullscreen-button[data-fullscreen] .when-fullscreen { display: inline-flex
   display: flex;
   transition: transform .35s cubic-bezier(.2, .8, .2, 1);
 }
-.slides img {
+.slides > img, .slides > video {
   flex: 0 0 100%;
   width: 100%;
   min-width: 0;

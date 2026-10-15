@@ -35,7 +35,7 @@ pub use playback::{
     pending_playback_count, playback_item, playback_state, record_playback,
     record_playback_failure,
 };
-pub use syncs::{finish_sync, start_sync};
+pub use syncs::{finish_sync, full_sync_done, full_sync_due, start_sync};
 pub use videos::{
     NewVideo, StoredVideo, insert_new, last_rowid, video, video_counts, video_ids, videos_after,
 };
