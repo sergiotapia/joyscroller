@@ -20,6 +20,8 @@
 mod firefox;
 mod safari;
 
+pub use safari::NoFullDiskAccess;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -676,6 +678,20 @@ pub fn to_netscape(cookies: &[Cookie]) -> String {
     }
     out
 }
+
+/// The browser profile isn't logged in to `site` ("TikTok", "Instagram"):
+/// its cookies hold no session, or the site turned the session away. The UI
+/// tells the user to log in there.
+#[derive(Debug)]
+pub struct LoggedOut(pub &'static str);
+
+impl std::fmt::Display for LoggedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "not logged in to {} in this browser profile", self.0)
+    }
+}
+
+impl std::error::Error for LoggedOut {}
 
 #[cfg(test)]
 mod tests {

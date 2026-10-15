@@ -24,7 +24,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::browser::{Browser, Cookie};
+use crate::browser::{Browser, Cookie, LoggedOut};
 use crate::headless::Headless;
 
 /// Any same-origin page will do, since the API needs no page script. This one
@@ -164,7 +164,7 @@ impl AppLogin {
 /// browser launch or request, and a clear message instead of a login error.
 pub fn check_logged_in(cookies: &[Cookie]) -> Result<()> {
     if !cookies.iter().any(|c| c.name == "sessionid") {
-        bail!("not logged in to Instagram in this browser profile");
+        return Err(LoggedOut("Instagram").into());
     }
     Ok(())
 }
@@ -271,23 +271,27 @@ async fn fetch_page(feed: &mut Feed<'_>, max_id: Option<&str>) -> Result<Page> {
 #[derive(Debug)]
 struct Refused {
     message: String,
-    /// Instagram is telling us to slow down, rather than refusing for good.
-    throttled: bool,
+    why: Refusal,
+}
+
+/// Why Instagram turned a request away, for what the UI tells the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The login lapsed: log in again in the browser.
+    LoggedOut,
+    /// Instagram wants the user to confirm it's them, in the browser.
+    Checkpoint,
+    /// Instagram is telling us to slow down (HTTP 429, or its
+    /// `feedback_required` block). Asking again before it lifts only makes
+    /// it last longer, so the list it came from should sit out a while.
+    SlowDown,
+    /// Anything else, such as "useragent mismatch".
+    Other,
 }
 
 impl Refused {
-    fn new(message: String) -> Self {
-        Self {
-            message,
-            throttled: false,
-        }
-    }
-
-    fn throttled(message: String) -> Self {
-        Self {
-            message,
-            throttled: true,
-        }
+    fn new(why: Refusal, message: String) -> Self {
+        Self { message, why }
     }
 }
 
@@ -303,17 +307,24 @@ fn is_final(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Refused>().is_some()
 }
 
-/// Whether `e` is Instagram telling us to slow down (HTTP 429, or its
-/// `feedback_required` block). Asking again before it lifts only makes it
-/// last longer, so the list it came from should sit out a while.
+/// Why Instagram turned away the request `e` came from, if it did.
+pub fn refusal(e: &anyhow::Error) -> Option<Refusal> {
+    e.downcast_ref::<Refused>().map(|r| r.why)
+}
+
+/// Whether `e` is Instagram telling us to slow down.
 pub fn is_throttled(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<Refused>().is_some_and(|r| r.throttled)
+    refusal(e) == Some(Refusal::SlowDown)
 }
 
 /// Instagram telling us to slow down, for other modules' tests.
 #[cfg(test)]
 pub fn slow_down_for_tests() -> anyhow::Error {
-    Refused::throttled("Instagram is rate limiting us (HTTP 429)".into()).into()
+    Refused::new(
+        Refusal::SlowDown,
+        "Instagram is rate limiting us (HTTP 429)".into(),
+    )
+    .into()
 }
 
 /// The page script that fetches one page of the saved list and returns its
@@ -431,41 +442,51 @@ fn parse_response(status: u64, body: &str, what: &str) -> Result<Value> {
     // A lapsed login comes back as a 401 or 403 (`login_required`), or as a
     // redirect to the login page, which fetch follows to an HTML page.
     if matches!(status, 401 | 403) || message == "login_required" {
-        return Err(Refused::new(format!(
+        return Err(Refused::new(
+            Refusal::LoggedOut,
+            format!(
             "Instagram wants a login (HTTP {status}{detail}); log in to Instagram in the browser"
-        ))
+        ),
+        )
         .into());
     }
     // Instagram wants the user to confirm it's them before it answers again.
     if message == "checkpoint_required" || message == "challenge_required" {
-        return Err(Refused::new(format!(
+        return Err(Refused::new(
+            Refusal::Checkpoint,
+            format!(
             "Instagram wants you to confirm it's you (HTTP {status}{detail}); open Instagram in the browser"
-        ))
+        ),
+        )
         .into());
     }
     // "Please wait a few minutes before you try again": more requests now
     // only extend the wait.
     if status == 429 {
-        return Err(Refused::throttled(format!(
-            "Instagram is rate limiting us (HTTP 429{detail})"
-        ))
+        return Err(Refused::new(
+            Refusal::SlowDown,
+            format!("Instagram is rate limiting us (HTTP 429{detail})"),
+        )
         .into());
     }
     // "Try Again Later. We restrict certain activity to protect our
     // community": Instagram's block on what looks automated. It lifts after
     // hours or a day, sooner if left alone.
     if message == "feedback_required" {
-        return Err(Refused::throttled(format!(
-            "Instagram is limiting how fast we read (HTTP {status}{detail})"
-        ))
+        return Err(Refused::new(
+            Refusal::SlowDown,
+            format!("Instagram is limiting how fast we read (HTTP {status}{detail})"),
+        )
         .into());
     }
     // A request Instagram won't take, such as "useragent mismatch" when it
     // stops accepting the app's user agent. Asking again changes nothing.
     if status == 400 {
-        return Err(
-            Refused::new(format!("Instagram refused the request (HTTP 400{detail})")).into(),
-        );
+        return Err(Refused::new(
+            Refusal::Other,
+            format!("Instagram refused the request (HTTP 400{detail})"),
+        )
+        .into());
     }
     if status != 200 {
         bail!("Instagram answered HTTP {status}{detail}");
@@ -906,6 +927,12 @@ mod tests {
         let blocked = parse_page(400, r#"{"message": "feedback_required", "status": "fail"}"#);
         assert!(is_final(&blocked.unwrap_err()));
         let checkpoint = parse_page(400, r#"{"message": "checkpoint_required"}"#).unwrap_err();
+        assert_eq!(refusal(&checkpoint), Some(Refusal::Checkpoint));
+        let lapsed = parse_page(401, r#"{"message": "login_required"}"#).unwrap_err();
+        assert_eq!(
+            refusal(&lapsed.context("reading")),
+            Some(Refusal::LoggedOut)
+        );
         assert!(format!("{checkpoint}").contains("confirm it's you"));
         // Worth another try.
         assert!(!is_final(&parse_page(500, "").unwrap_err()));

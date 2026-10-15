@@ -81,6 +81,9 @@ pub enum SyncState {
     },
     Failed {
         at: i64,
+        /// What happened and what to do, for the user.
+        advice: String,
+        /// The error itself, shown on hover.
         error: String,
         paused: Vec<Paused>,
     },
@@ -1563,46 +1566,53 @@ fn status_html(status: &SyncStatus) -> String {
     PLATFORMS
         .iter()
         .map(|(name, label)| {
-            let (light, state) = match status.get(name) {
-                None => ("waiting", "waiting to sync".into()),
-                Some(SyncState::Running) => ("running", "syncing…".into()),
+            let (light, state, details) = match status.get(name) {
+                None => ("waiting", "waiting to sync".into(), String::new()),
+                Some(SyncState::Running) => ("running", "syncing…".into(), String::new()),
                 Some(SyncState::Done { at, added, paused }) => (
                     "done",
                     format!(
                         "synced at {}, {added} new{}",
                         time(*at, "time"),
-                        paused_html(paused)
+                        paused_html(label, paused)
                     ),
+                    String::new(),
                 ),
-                Some(SyncState::Failed { at, error, paused }) => (
+                Some(SyncState::Failed {
+                    at,
+                    advice,
+                    error,
+                    paused,
+                }) => (
                     "failed",
-                    // The pause goes before the error, which the panel cuts
-                    // short.
                     format!(
-                        "failed at {}{}: {}",
+                        "didn't sync at {}: {}{}",
                         time(*at, "time"),
-                        paused_html(paused),
-                        escape(&error.replace(['\r', '\n'], " "))
+                        escape(advice),
+                        paused_html(label, paused)
                     ),
+                    format!(" title=\"{}\"", escape(error)),
                 ),
             };
             format!(
                 "<li class=\"sync-{light}\"><span class=\"led\"></span><b>{label}</b>\
-                 <span class=\"what\">{state}</span></li>\n"
+                 <span class=\"what\"{details}>{state}</span></li>\n"
             )
         })
         .collect::<Vec<_>>()
         .concat()
 }
 
-/// ", liked list paused until 7:30 PM", for each list sitting out.
-fn paused_html(paused: &[Paused]) -> String {
+/// ". Liked posts wait until 7:30 PM, as Instagram asked us to slow down",
+/// for each of `site`'s lists sitting out.
+fn paused_html(site: &str, paused: &[Paused]) -> String {
     let mut html = String::new();
     for p in paused {
         let _ = write!(
             html,
-            ", {} list paused until {}",
-            escape(p.list),
+            ". {}{} posts wait until {}, as {site} asked us to slow down",
+            p.list[..1].to_uppercase(),
+            escape(&p.list[1..]),
             time(p.until, "time")
         );
     }
@@ -2411,7 +2421,8 @@ mod tests {
             "youtube",
             SyncState::Failed {
                 at: 0,
-                error: "logged\nout".into(),
+                advice: "you're not logged in to YouTube in Brave".into(),
+                error: "cookies: \"no session\"\nhere".into(),
                 paused: Vec::new(),
             },
         );
@@ -2427,8 +2438,10 @@ mod tests {
         assert!(
             html.starts_with("<li class=\"sync-failed\"><span class=\"led\"></span><b>YouTube</b>")
         );
-        assert!(html.contains("failed at"));
-        assert!(html.contains("logged out"));
+        assert!(html.contains("didn't sync at"));
+        assert!(html.contains(": you&#39;re not logged in to YouTube in Brave</span>"));
+        // The error itself is there on hover.
+        assert!(html.contains("title=\"cookies: &quot;no session&quot;\nhere\""));
         let tiktok = html.find("<li class=\"sync-done\"><span class=\"led\"></span><b>TikTok</b>");
         assert!(tiktok.is_some_and(|at| at > 0));
         assert!(html.contains("2 new"));
@@ -2445,7 +2458,8 @@ mod tests {
             },
         );
         assert!(status_html(&status).contains(
-            "0 new, liked list paused until <time data-ts=\"10800\" data-format=\"time\">"
+            "0 new. Liked posts wait until <time data-ts=\"10800\" data-format=\"time\">10800</time>, \
+             as Instagram asked us to slow down</span>"
         ));
     }
 

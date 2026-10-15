@@ -50,6 +50,15 @@ impl Platform {
             Platform::Instagram => "instagram",
         }
     }
+
+    /// The name people know it by.
+    fn label(self) -> &'static str {
+        match self {
+            Platform::Youtube => "YouTube",
+            Platform::Tiktok => "TikTok",
+            Platform::Instagram => "Instagram",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -562,6 +571,7 @@ async fn sync_and_report(
             eprintln!("{name}: sync failed: {e:#}");
             web::SyncState::Failed {
                 at,
+                advice: advice(platform, browser, &e),
                 error: format!("{e:#}"),
                 paused,
             }
@@ -625,6 +635,30 @@ async fn sync(
         Platform::Tiktok => sync_tiktok(browser, profile, conn, full).await,
         Platform::Instagram => sync_instagram(browser, profile, conn, full, pauses).await,
     }
+}
+
+/// What the UI says about a failed sync, in words for the user: what to do
+/// about it where there's something to do, else that it'll try again. The
+/// error itself is there for whoever wants the details.
+fn advice(platform: Platform, browser: Browser, e: &anyhow::Error) -> String {
+    let site = platform.label();
+    let browser = browser.name();
+    if let Some(e) = e.downcast_ref::<browser::NoFullDiskAccess>() {
+        return e.to_string();
+    }
+    if e.downcast_ref::<browser::LoggedOut>().is_some()
+        || instagram::refusal(e) == Some(instagram::Refusal::LoggedOut)
+    {
+        return format!(
+            "you're not logged in to {site} in {browser}. Log in there and the next sync picks it up"
+        );
+    }
+    if instagram::refusal(e) == Some(instagram::Refusal::Checkpoint) {
+        return format!(
+            "Instagram wants to check it's you. Open instagram.com in {browser} and do what it asks"
+        );
+    }
+    format!("trying again in {} minutes", SYNC_EVERY.as_secs() / 60)
 }
 
 /// The lists a platform has told us to slow down on, by listing name, each
@@ -910,7 +944,12 @@ async fn sync_instagram_list(
     }
     let result = read_instagram_list(list, name, browser, cookies, conn, full, counts).await;
     pauses.record(name, &result, db::now());
-    result
+    // Being told to slow down isn't a failure: the list sits out its pause,
+    // which the UI shows, and the sync carries on.
+    match result {
+        Err(e) if instagram::is_throttled(&e) => Ok(()),
+        result => result,
+    }
 }
 
 /// Read Instagram's `list` (the listing `name`) into the database.
@@ -977,6 +1016,20 @@ fn store_instagram_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_syncs_are_explained_in_plain_words() {
+        let logged_out = anyhow::Error::from(browser::LoggedOut("TikTok")).context("listing");
+        assert_eq!(
+            advice(Platform::Tiktok, Browser::Brave, &logged_out),
+            "you're not logged in to TikTok in Brave. Log in there and the next sync picks it up"
+        );
+        let other = anyhow::anyhow!("yt-dlp produced no videos").context("listing");
+        assert_eq!(
+            advice(Platform::Youtube, Browser::Chrome, &other),
+            "trying again in 5 minutes"
+        );
+    }
 
     #[test]
     fn a_list_told_to_slow_down_sits_out_longer_each_time() {

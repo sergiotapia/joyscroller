@@ -17,6 +17,7 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 ### Fixed
 
 - When Instagram blocks Joyscroller for reading your liked posts too fast (its "Try Again Later" block), Joyscroller now stops asking for a few hours instead of every 5 minutes, which only made the block last longer. Your saved posts keep syncing meanwhile, and the sidebar says when it'll try the liked list again.
+- The sidebar explains a failed sync in plain words, and what to do about it where there's something to do (like logging back in), instead of showing the raw error. The error is still there when you hover over it.
 - A tall video, like most of TikTok's, no longer shows a white gap between it and the player's purple frame; the screen stays dark on either side of it.
 
 ## [0.7.0] - 2026-10-15

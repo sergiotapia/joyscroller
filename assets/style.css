@@ -200,13 +200,10 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   color: #d4e4ff;
   overflow-wrap: anywhere;
 }
-.sync-failed .what {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-  color: #ffd3c9;
-}
+/* A failed sync says what to do in a line or two; the error itself is in
+   the tooltip. */
+.sync-failed .what { color: #ffd3c9; }
+.sync .what[title] { cursor: help; }
 .led {
   --led: #9aa3b5;
   width: 11px;

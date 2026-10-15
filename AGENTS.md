@@ -144,7 +144,7 @@ The real archive is `joyscroller.db` and `downloads/` in `data/` at the repo roo
 ## Code conventions
 
 - Errors: functions return `anyhow::Result` and add context with `.context(...)` / `.with_context(...)`. Don't use `unwrap`/`expect` outside tests (clippy denies them). Don't swallow errors with `map_err(|_| ...)`.
-- A failed sync in the app loop is logged and retried on the next tick. It must never kill the process.
+- A failed sync in the app loop is logged and retried on the next tick. It must never kill the process. The sidebar shows `advice` (`main.rs`) for it, in plain words, and the error itself on hover: give an error the user can act on its own type (like `browser::LoggedOut`) and a line in `advice`.
 - Logging is `eprintln!` to stderr, prefixed by area (`youtube: ...`, `warning: ...`). There's no logging framework yet. stdout is for command output.
 - Cookie values are credentials. Never log or print them, except in the `cookies` command's output, and never commit a cookies file.
 - Comments explain *why* (format quirks, ordering constraints, yt-dlp behavior). Every module has a `//!` doc comment saying what it's for. Keep those up to date when a module's job changes.

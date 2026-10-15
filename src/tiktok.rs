@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde_json::Value;
 
-use crate::browser::{Browser, Cookie};
+use crate::browser::{Browser, Cookie, LoggedOut};
 use crate::headless::Headless;
 
 /// Any logged-in page works. This one is light and has no side effects,
@@ -111,7 +111,7 @@ pub async fn liked_videos(
     // Checked up front so a user who doesn't use TikTok costs nothing: no
     // browser launch, and a clear message instead of a page that never loads.
     if !cookies.iter().any(|c| c.name == "sessionid") {
-        bail!("not logged in to TikTok in this browser profile");
+        return Err(LoggedOut("TikTok").into());
     }
     let mut tab = Headless::launch(browser, cookies).await?;
     let result = list_liked(&mut tab, cursor, &mut on_page).await;
@@ -126,7 +126,7 @@ async fn list_liked(
 ) -> Result<()> {
     tab.goto(START_PAGE, PAGE_READY).await?;
     let Value::String(sec_uid) = tab.eval(SEC_UID).await? else {
-        bail!("not logged in to TikTok in this browser profile");
+        return Err(LoggedOut("TikTok").into());
     };
 
     let mut cursor = cursor.unwrap_or("0").to_string();
@@ -149,7 +149,7 @@ async fn list_liked(
 /// from inside the page.
 pub async fn photo_post(browser: Browser, cookies: &[Cookie], url: &str) -> Result<PhotoPost> {
     if !cookies.iter().any(|c| c.name == "sessionid") {
-        bail!("not logged in to TikTok in this browser profile");
+        return Err(LoggedOut("TikTok").into());
     }
     let mut tab = Headless::launch(browser, cookies).await?;
     let result = fetch_photo_post(&mut tab, url).await;
