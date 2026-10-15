@@ -15,7 +15,7 @@ You've liked thousands of videos. Some get deleted, some go private, and the res
 
 ## How to get it and run it
 
-You need a Mac or Linux, and [Brave](https://brave.com) signed in to YouTube, TikTok and Instagram.
+You need a Mac or Linux, and Chrome, Edge, Brave, Chromium or Vivaldi logged in to YouTube, TikTok and Instagram. Joyscroller finds the browser itself each time it starts: if you have more than one, it picks the one logged in to the most of the three.
 
 ### On a Mac
 

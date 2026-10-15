@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Changed
+
+- Joyscroller no longer needs Brave. Each time it starts, it looks for Chrome, Edge, Brave, Chromium and Vivaldi and reads your logins from the one logged in to the most of YouTube, TikTok and Instagram. To switch browsers, log in with the new one and restart Joyscroller.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

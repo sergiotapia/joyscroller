@@ -30,7 +30,8 @@ src/player.rs   The video page's player markup, from Video.js 10's elements: a v
                 autoplays and loops
 src/browser.rs  Finds the browser profile, copies its Cookies SQLite DB, decrypts values
                 (AES-128-CBC; Linux: v10 = fixed key, v11 = key from the keyring; macOS: v10 = key from
-                the Keychain, read once per run), writes Netscape cookies.txt
+                the Keychain, read once per run), writes Netscape cookies.txt. `sniff` picks the browser
+                logged in to the most platforms
 src/youtube.rs  Runs `yt-dlp --flat-playlist --lazy-playlist --dump-json` on the Liked playlist and
                 streams JSON Lines; a callback can stop the listing early
 src/tiktok.rs   Pages through TikTok's liked list (/api/favorite/item_list/) from inside a headless
@@ -107,7 +108,7 @@ cargo run -- cookies --out c.txt  # export cookies.txt (contains live credential
 cargo run -- tools                # fetch the app's yt-dlp, ffmpeg, ffprobe and bun and print their versions
 ```
 
-Runtime needs: Linux or macOS (Windows isn't released yet: the tools and desktop fit work there and CI tests it, but reading browser logins doesn't, see #2), a Chromium-family browser profile signed in to YouTube, TikTok and Instagram (default `--browser brave --profile Default`), and that browser's executable (TikTok and Instagram run it headless): on Linux on `PATH`, on macOS in `/Applications` or `~/Applications`. On Linux, v11 cookies need a Secret Service keyring (gnome-keyring or KWallet). On macOS, the first cookie read of each run asks the user to let Joyscroller use the browser's "Safe Storage" Keychain item, unless they clicked Always Allow.
+Runtime needs: Linux or macOS (Windows isn't released yet: the tools and desktop fit work there and CI tests it, but reading browser logins doesn't, see #2), a Chromium-family browser (Chrome, Edge, Brave, Chromium or Vivaldi) whose `Default` profile is signed in to YouTube, TikTok and Instagram. On each launch `browser::sniff` picks the installed browser logged in to the most of the three, most widely used first on a tie, from cookie names alone (no decryption, so no keyring or Keychain prompt). The subcommands do the same unless given `--browser`, and that browser's executable (TikTok and Instagram run it headless): on Linux on `PATH`, on macOS in `/Applications` or `~/Applications`. On Linux, v11 cookies need a Secret Service keyring (gnome-keyring or KWallet). On macOS, the first cookie read of each run asks the user to let Joyscroller use the browser's "Safe Storage" Keychain item, unless they clicked Always Allow.
 
 A full TikTok listing takes about 2 minutes for 5,000 likes (one request per 30). In testing, TikTok's liked list ended after exactly 200 pages (about 5,100 likes, back to January 2026). That looks like a server-side cap rather than the true end of the list.
 

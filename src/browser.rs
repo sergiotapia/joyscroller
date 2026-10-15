@@ -8,11 +8,14 @@
 //! - macOS: every value is v10, with the password from the login Keychain's
 //!   "<Browser> Safe Storage" item and 1003 PBKDF2 iterations. Reading it makes
 //!   macOS ask the user to allow Joyscroller, so it's read once per run.
+//!
+//! `sniff` picks which browser to read from: the one logged in to the most of
+//! YouTube, TikTok and Instagram.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
 #[cfg(target_os = "linux")]
@@ -33,6 +36,17 @@ pub enum Browser {
 }
 
 impl Browser {
+    /// Every browser Joyscroller can read logins from, the most widely used
+    /// first: Chrome by far, then Edge (on every Windows PC and many Macs),
+    /// Brave, Chromium (the default on many Linux distros) and Vivaldi.
+    const MOST_USED_FIRST: [Browser; 5] = [
+        Browser::Chrome,
+        Browser::Edge,
+        Browser::Brave,
+        Browser::Chromium,
+        Browser::Vivaldi,
+    ];
+
     #[cfg(not(target_os = "macos"))]
     fn config_dir(self) -> Result<PathBuf> {
         let base = dirs::config_dir().context("no XDG config dir")?;
@@ -142,20 +156,7 @@ pub struct Cookie {
 /// All cookies whose host matches `domain` (e.g. "youtube.com" matches
 /// ".youtube.com" and "www.youtube.com").
 pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Result<Vec<Cookie>> {
-    let profile_dir = browser.config_dir()?.join(profile);
-    let db_path = [
-        profile_dir.join("Network/Cookies"),
-        profile_dir.join("Cookies"),
-    ]
-    .into_iter()
-    .find(|p| p.exists())
-    .ok_or_else(|| anyhow!("no cookie database under {}", profile_dir.display()))?;
-
-    // The browser holds a lock on the live DB, so read from a copy.
-    let tmp = tempfile::NamedTempFile::new()?;
-    std::fs::copy(&db_path, tmp.path())
-        .with_context(|| format!("copying {}", db_path.display()))?;
-    let conn = rusqlite::Connection::open(tmp.path())?;
+    let (_copy, conn) = open_copy(&cookie_db(browser, profile)?)?;
 
     let db_version: i64 = conn
         .query_row("SELECT value FROM meta WHERE key = 'version'", [], |r| {
@@ -213,6 +214,114 @@ pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Resul
         eprintln!("warning: could not decrypt {failed} cookie(s) for {domain}");
     }
     Ok(cookies)
+}
+
+/// The profile's cookie database, which moved into `Network/` in Chromium 96.
+fn cookie_db(browser: Browser, profile: &str) -> Result<PathBuf> {
+    let profile_dir = browser.config_dir()?.join(profile);
+    [
+        profile_dir.join("Network/Cookies"),
+        profile_dir.join("Cookies"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+    .ok_or_else(|| anyhow!("no cookie database under {}", profile_dir.display()))
+}
+
+/// Opens a copy of the cookie database at `db_path`, since the browser holds
+/// a lock on the live one. The copy lasts as long as the returned file.
+fn open_copy(db_path: &Path) -> Result<(tempfile::NamedTempFile, rusqlite::Connection)> {
+    let copy = tempfile::NamedTempFile::new()?;
+    std::fs::copy(db_path, copy.path())
+        .with_context(|| format!("copying {}", db_path.display()))?;
+    let conn = rusqlite::Connection::open(copy.path())?;
+    Ok((copy, conn))
+}
+
+/// The sites Joyscroller reads likes from: each one's name, domain and the
+/// cookies it only sets while you're logged in.
+const LOGINS: [(&str, &str, &[&str]); 3] = [
+    (
+        "YouTube",
+        "youtube.com",
+        &["SAPISID", "__Secure-3PAPISID", "LOGIN_INFO"],
+    ),
+    ("TikTok", "tiktok.com", &["sessionid"]),
+    ("Instagram", "instagram.com", &["sessionid"]),
+];
+
+/// The browser to read logins from, picked afresh on every launch: of the
+/// installed browsers with a `profile`, the one logged in to the most of
+/// YouTube, TikTok and Instagram, and on a tie the most widely used. Only
+/// cookie names and expiry dates are read, which Chromium doesn't encrypt,
+/// so this never asks the keyring or the Keychain for anything. With no
+/// browser to be found, it's Chrome, whose errors at least say what's missing.
+pub fn sniff(profile: &str) -> Browser {
+    let found = Browser::MOST_USED_FIRST.into_iter().filter_map(|browser| {
+        // No program means no headless browser for TikTok and Instagram, and
+        // no cookie database means the browser has never been opened.
+        browser.executable().ok()?;
+        let db = cookie_db(browser, profile).ok()?;
+        match open_copy(&db).and_then(|(_copy, conn)| logged_in_sites(&conn)) {
+            Ok(sites) => Some((browser, sites)),
+            Err(e) => {
+                eprintln!("warning: couldn't read {browser:?}'s logins: {e:#}");
+                None
+            }
+        }
+    });
+    let Some((browser, sites)) = most_logged_in(found) else {
+        eprintln!(
+            "warning: found no Chrome, Edge, Brave, Chromium or Vivaldi with a {profile} \
+             profile; install one, log in to YouTube, TikTok or Instagram in it, and \
+             restart Joyscroller"
+        );
+        return Browser::Chrome;
+    };
+    if sites.is_empty() {
+        eprintln!(
+            "warning: using {browser:?}, which isn't logged in to YouTube, TikTok or \
+             Instagram; log in to them in your browser and restart Joyscroller"
+        );
+    } else {
+        eprintln!(
+            "browser: using {browser:?}, logged in to {}",
+            sites.join(", ")
+        );
+    }
+    browser
+}
+
+/// The first of `found` logged in to the most sites. `found` comes most used
+/// first, so that's the tie-break.
+fn most_logged_in(
+    found: impl IntoIterator<Item = (Browser, Vec<&'static str>)>,
+) -> Option<(Browser, Vec<&'static str>)> {
+    found.into_iter().fold(None, |best, candidate| match best {
+        Some(best) if best.1.len() >= candidate.1.len() => Some(best),
+        _ => Some(candidate),
+    })
+}
+
+/// Which of `LOGINS`' sites a cookie database holds an unexpired login for.
+fn logged_in_sites(conn: &rusqlite::Connection) -> Result<Vec<&'static str>> {
+    // Chromium's times are microseconds since 1601; 0 is a session cookie.
+    let mut stmt = conn.prepare(
+        "SELECT EXISTS (SELECT 1 FROM cookies \
+         WHERE (host_key = ?1 OR host_key LIKE '%.' || ?1) AND name = ?2 \
+         AND (expires_utc = 0 \
+              OR expires_utc > (unixepoch() + 11644473600) * 1000000))",
+    )?;
+    let mut sites = Vec::new();
+    for (site, domain, names) in LOGINS {
+        for name in names {
+            if stmt.query_row((domain, name), |r| r.get::<_, bool>(0))? {
+                sites.push(site);
+                break;
+            }
+        }
+    }
+    Ok(sites)
 }
 
 /// The keys for each encryption prefix; `None` where a value with that prefix
@@ -412,6 +521,65 @@ mod tests {
                 ".youtube.com\tTRUE\t/\tTRUE\t42\tSID\tabc",
                 "www.youtube.com\tFALSE\t/\tFALSE\t42\tSID\tabc",
             ]
+        );
+    }
+
+    /// A cookie database holding `cookies` as (`host_key`, `name`, `expires_utc`).
+    fn cookie_store(cookies: &[(&str, &str, i64)]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE cookies (host_key TEXT, name TEXT, expires_utc INTEGER)",
+            [],
+        )
+        .unwrap();
+        for cookie in cookies {
+            conn.execute("INSERT INTO cookies VALUES (?1, ?2, ?3)", *cookie)
+                .unwrap();
+        }
+        conn
+    }
+
+    /// Far in the future, in Chromium's time.
+    const LATER: i64 = 99_000_000_000_000_000;
+
+    #[test]
+    fn finds_logged_in_sites() {
+        let conn = cookie_store(&[
+            (".youtube.com", "LOGIN_INFO", LATER),
+            (".youtube.com", "VISITOR_INFO1_LIVE", LATER),
+            (".tiktok.com", "sessionid", 0),
+            (".instagram.com", "csrftoken", LATER),
+        ]);
+        assert_eq!(logged_in_sites(&conn).unwrap(), ["YouTube", "TikTok"]);
+    }
+
+    #[test]
+    fn ignores_expired_and_lookalike_logins() {
+        let conn = cookie_store(&[
+            (".youtube.com", "SAPISID", 13_000_000_000_000_000),
+            (".nottiktok.com", "sessionid", LATER),
+            ("www.instagram.com", "sessionid", LATER),
+        ]);
+        assert_eq!(logged_in_sites(&conn).unwrap(), ["Instagram"]);
+    }
+
+    #[test]
+    fn prefers_most_logins_then_most_used() {
+        let picked = |found: Vec<(Browser, Vec<&'static str>)>| {
+            most_logged_in(found).map(|(browser, _)| format!("{browser:?}"))
+        };
+        assert_eq!(picked(vec![]), None);
+        assert_eq!(
+            picked(vec![
+                (Browser::Chrome, vec!["YouTube"]),
+                (Browser::Brave, vec!["YouTube", "TikTok"]),
+                (Browser::Vivaldi, vec!["YouTube", "Instagram"]),
+            ]),
+            Some("Brave".into())
+        );
+        assert_eq!(
+            picked(vec![(Browser::Chrome, vec![]), (Browser::Edge, vec![])]),
+            Some("Chrome".into())
         );
     }
 }

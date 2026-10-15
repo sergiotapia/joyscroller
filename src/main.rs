@@ -56,8 +56,10 @@ impl Platform {
 enum Command {
     /// Export the browser's cookies for a domain to a Netscape cookies.txt.
     Cookies {
-        #[arg(long, value_enum, default_value = "brave")]
-        browser: Browser,
+        /// The browser to read logins from (default: the one logged in to the
+        /// most of YouTube, TikTok and Instagram).
+        #[arg(long, value_enum)]
+        browser: Option<Browser>,
         #[arg(long, default_value = "Default")]
         profile: String,
         #[arg(long, default_value = "youtube.com")]
@@ -70,8 +72,10 @@ enum Command {
     Likes {
         #[arg(long, value_enum, default_value = "youtube")]
         platform: Platform,
-        #[arg(long, value_enum, default_value = "brave")]
-        browser: Browser,
+        /// The browser to read logins from (default: the one logged in to the
+        /// most of YouTube, TikTok and Instagram).
+        #[arg(long, value_enum)]
+        browser: Option<Browser>,
         #[arg(long, default_value = "Default")]
         profile: String,
         /// How many to list (0 = all).
@@ -82,8 +86,10 @@ enum Command {
     Sync {
         #[arg(long, value_enum, default_value = "youtube")]
         platform: Platform,
-        #[arg(long, value_enum, default_value = "brave")]
-        browser: Browser,
+        /// The browser to read logins from (default: the one logged in to the
+        /// most of YouTube, TikTok and Instagram).
+        #[arg(long, value_enum)]
+        browser: Option<Browser>,
         #[arg(long, default_value = "Default")]
         profile: String,
         /// Database file (default: joyscroller.db next to this executable, or in
@@ -101,8 +107,10 @@ enum Command {
     Tools,
     /// Download the media of the next few liked videos that don't have it yet.
     Download {
-        #[arg(long, value_enum, default_value = "brave")]
-        browser: Browser,
+        /// The browser to read logins from (default: the one logged in to the
+        /// most of YouTube, TikTok and Instagram).
+        #[arg(long, value_enum)]
+        browser: Option<Browser>,
         #[arg(long, default_value = "Default")]
         profile: String,
         /// Database file (default: joyscroller.db next to this executable, or in
@@ -195,7 +203,11 @@ fn main() -> Result<()> {
 
 async fn run(cli: Cli) -> Result<()> {
     let Some(command) = cli.command else {
-        return run_app(Browser::Brave, "Default", &default_db()?).await;
+        return run_app("Default", &default_db()?).await;
+    };
+    // Only the subcommands that read logins ask for a browser.
+    let sniff = |browser: Option<Browser>, profile: &str| {
+        browser.unwrap_or_else(|| browser::sniff(profile))
     };
     match command {
         Command::Cookies {
@@ -204,6 +216,7 @@ async fn run(cli: Cli) -> Result<()> {
             domain,
             out,
         } => {
+            let browser = sniff(browser, &profile);
             let cookies = browser::cookies_for(browser, &profile, &domain).await?;
             let txt = browser::to_netscape(&cookies);
             match out {
@@ -219,11 +232,14 @@ async fn run(cli: Cli) -> Result<()> {
             browser,
             profile,
             limit,
-        } => match platform {
-            Platform::Youtube => print_youtube_likes(browser, &profile, limit).await?,
-            Platform::Tiktok => print_tiktok_likes(browser, &profile, limit).await?,
-            Platform::Instagram => print_instagram_saves(browser, &profile, limit).await?,
-        },
+        } => {
+            let browser = sniff(browser, &profile);
+            match platform {
+                Platform::Youtube => print_youtube_likes(browser, &profile, limit).await?,
+                Platform::Tiktok => print_tiktok_likes(browser, &profile, limit).await?,
+                Platform::Instagram => print_instagram_saves(browser, &profile, limit).await?,
+            }
+        }
         Command::Sync {
             platform,
             browser,
@@ -236,6 +252,7 @@ async fn run(cli: Cli) -> Result<()> {
                 None => default_db()?,
             };
             let mut conn = db::open(&db_path)?;
+            let browser = sniff(browser, &profile);
             let (listed, added) = sync(platform, browser, &profile, &mut conn, full).await?;
             eprintln!(
                 "{}: listed {listed}, added {added} new → {}",
@@ -264,6 +281,7 @@ async fn run(cli: Cli) -> Result<()> {
                 None => default_media()?,
             };
             let mut conn = db::open(&db_path)?;
+            let browser = sniff(browser, &profile);
             let attempted =
                 download_batch(browser, &profile, &mut conn, &media_root, limit).await?;
             eprintln!("attempted {attempted} → {}", media_root.display());
@@ -335,7 +353,7 @@ async fn print_instagram_saves(browser: Browser, profile: &str, limit: usize) ->
 /// The app: serves the web UI and keeps running, syncing new likes every
 /// `SYNC_EVERY`. The pipeline's lanes download every liked video in the
 /// background, and the UI can ask it for one right away.
-async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> {
+async fn run_app(profile: &str, db_path: &Path) -> Result<()> {
     let url = format!("http://{}", web::ADDR);
     // Bind before anything else: a second copy of the app stops here instead
     // of syncing alongside the first, and shows the first one's UI instead,
@@ -351,6 +369,9 @@ async fn run_app(browser: Browser, profile: &str, db_path: &Path) -> Result<()> 
             return Err(e).with_context(|| format!("listening on {}", web::ADDR));
         }
     };
+    // Picked on every launch, which takes a few milliseconds, so switching
+    // browsers only takes a restart.
+    let browser = browser::sniff(profile);
     let mut conn = db::open(db_path)?;
     let (status, status_rx) = tokio::sync::watch::channel(web::SyncStatus::default());
     // Set by the UI's Turn off button.
