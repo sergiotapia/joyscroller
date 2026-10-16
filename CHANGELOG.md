@@ -4,6 +4,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-16
+
 ### Added
 
 - X: your bookmarks and likes are archived too, the posts with videos, GIFs or pictures, saved at full quality. A post you liked that quotes a video or photos keeps the quoted post's media, and its page shows the quoted post under yours. Text-only posts are left out. X has its own section in the side panel (Videos and Photos), its own TV channel, and its quoted posts are searchable.
@@ -165,7 +167,8 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/sergiotapia/joyscroller/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/sergiotapia/joyscroller/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/sergiotapia/joyscroller/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/sergiotapia/joyscroller/compare/v0.8.2...v0.9.0
