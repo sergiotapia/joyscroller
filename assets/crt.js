@@ -14,7 +14,7 @@
 //    while the set locks on to a new channel, and the set's own on-screen
 //    display (channel, volume), which it adds after decoding.
 // 2. The tube, over the face (see the pass below): a bowed face with
-//    rounded corners, an interlaced, sharp beam whose lines close up as it
+//    rounded corners, 240 lines of a sharp beam whose lines close up as it
 //    brightens, a dot mask and the tube's gamma, and the set's power-off
 //    collapse to a dot and degaussing wobble.
 //
@@ -161,7 +161,9 @@ void main() {
 // is a bell that flattens and widens as it brightens, so bright lines close
 // up and dark ones leave gaps, averaged over each pixel's height so lines
 // finer than the pixels blend rather than shimmer. The 480-line picture is
-// interlaced: each frame draws one field's 240 lines, the next the other's.
+// drawn as 240 lines, each from a pair of the picture's: both fields at
+// once, as the phosphor's glow blended them. (Drawing them a frame each, as
+// the beam did, flickers on a display without that glow.)
 // A magenta and green dot mask, the tube's gamma (2.4) out to the
 // display's (2.2). On top, the set: the power-off collapse to a line and a
 // dot, and the degaussing coil's purity wobble at power-on.
@@ -170,7 +172,6 @@ precision highp float;
 in vec2 uv;
 out vec4 color;
 uniform sampler2D signal;
-uniform int frame;
 uniform float power;     // the beam's strength: 1 on, 0 off (and dips between shows)
 uniform float collapse;  // the power-off collapse, 0 to 1
 uniform float degauss;   // 1 at power-on, fading to 0
@@ -260,13 +261,13 @@ void main() {
   float shown = corners(t);
   if (shown > 0.0) {
     vec2 tc = t * vec2(${RASTER_W}.0, ${RASTER_H}.0);
-    float field = float(frame % 2);
-    float y = (tc.y - 0.5 - field) / 2.0;
+    // Line k is the picture's lines 2k and 2k + 1, centered between them.
+    float y = (tc.y - 1.0) / 2.0;
     float base = floor(y);
     float f = y - base;
-    int row0 = int(base * 2.0 + field);
-    vec3 c0 = line(row0, tc.x);
-    vec3 c1 = line(row0 + 2, tc.x);
+    int row0 = int(base) * 2;
+    vec3 c0 = 0.5 * (line(row0, tc.x) + line(row0 + 1, tc.x));
+    vec3 c1 = 0.5 * (line(row0 + 2, tc.x) + line(row0 + 3, tc.x));
     float reach = (abs(dFdx(tc.y)) + abs(dFdy(tc.y))) / 6.0;
     for (int k = -1; k <= 1; k++) {
       float d = f + float(k) * reach;
@@ -296,6 +297,16 @@ void main() {
     light *= mix(vec3(1.0), tint * 1.6, degauss * 0.55);
   }
   color = vec4(pow(clamp(glass + light, 0.0, 1.0), vec3(1.0 / DISPLAY_GAMMA)), 1.0);
+}`;
+
+// The offscreen tube, drawn onto the face.
+const copy = `#version 300 es
+precision highp float;
+in vec2 uv;
+out vec4 color;
+uniform sampler2D picture;
+void main() {
+  color = texture(picture, uv);
 }`;
 
 function compile(gl, type, source) {
@@ -357,6 +368,7 @@ export class Tube {
     this.fit = program(gl, fitSource);
     this.decode = program(gl, decode);
     this.tube = program(gl, tube);
+    this.copy = program(gl, copy);
     this.yiq = target(gl, false);
     this.signal = target(gl, false);
     this.sourceTex = texture(gl);
@@ -484,18 +496,21 @@ export class Tube {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.signal.t);
     gl.uniform1i(u.signal, 0);
-    gl.uniform1i(u.frame, this.frame);
     gl.uniform1f(u.power, s.power);
     gl.uniform1f(u.collapse, s.collapse || 0);
     gl.uniform1f(u.degauss, s.degauss || 0);
     gl.uniform1f(u.time, time);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (out) {
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, out.fb);
-      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-      const y = this.canvas.height - fy - fh;
-      gl.blitFramebuffer(0, 0, out.w, out.h, fx, y, fx + fw, y + fh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      // Scaled down through mipmaps (trilinear), so the lines and the mask
+      // average out instead of aliasing and crawling as the picture moves.
+      gl.bindTexture(gl.TEXTURE_2D, out.t);
+      gl.generateMipmap(gl.TEXTURE_2D);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(fx, this.canvas.height - fy - fh, fw, fh);
+      gl.useProgram(this.copy.p);
+      gl.uniform1i(this.copy.u.picture, 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
   }
 
@@ -507,7 +522,7 @@ export class Tube {
       gl.deleteTexture(this.spare.t);
       gl.deleteFramebuffer(this.spare.fb);
     }
-    const t = texture(gl);
+    const t = texture(gl, gl.LINEAR_MIPMAP_LINEAR);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     const fb = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);

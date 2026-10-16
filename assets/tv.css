@@ -5,9 +5,9 @@
    front, so it all scales together. Under the render's cut-out glass is
    the tube's face: the two players stacked in one cell (only the one on
    air shown), and over them the canvas the picture is drawn on
-   (assets/crt.js); over the render, the glass's reflections, blended as
-   light. Beside the set (under it, on a narrow window) are the remote's
-   channel buttons and the guide. Uses style.css's colors and fonts. */
+   (assets/crt.js). Beside the set (under it, on a narrow window) are the
+   remote's channel buttons and the guide. Uses style.css's colors and
+   fonts. */
 
 .tv {
   --ears: 0.27;  /* how far the ears rise over the front, of its height */
@@ -28,9 +28,8 @@
   user-select: none;
 }
 .tv-set > * { position: absolute; }
-.tv-body, .tv-glare { max-width: none; pointer-events: none; }
+.tv-body { max-width: none; pointer-events: none; }
 .tv-body { z-index: 2; filter: drop-shadow(0 10px 18px rgba(0, 0, 0, .35)); }
-.tv-glare { z-index: 3; mix-blend-mode: screen; }
 
 /* ---- The tube's face ---------------------------------------------------- */
 

@@ -45,8 +45,6 @@ struct Set {
     front: [f64; 4],
     /// The tube's face, where the picture goes.
     screen: [f64; 4],
-    /// `tv-glass.webp`, the face's reflections.
-    glass: [f64; 4],
     lcd: [f64; 4],
     ch_down: [f64; 4],
     ch_up: [f64; 4],
@@ -154,7 +152,7 @@ fn place(set: &Set, at: [f64; 4]) -> String {
 /// The set: the tube's face (two stages for players, the canvas the tube
 /// draws on, and over the glass the fallback's static and channel number,
 /// what's wrong if nothing can air, and the prompt to turn it on), the
-/// render over it, the glass's reflections, the channel LCD, and its
+/// render over it, the channel LCD, and its
 /// buttons and knob.
 fn set_html(channel: Channel) -> String {
     let screen_inside = format!(
@@ -181,7 +179,6 @@ fn set_html(channel: Channel) -> String {
         "<div class=\"tv-set\" id=\"tv-set\" style=\"--set-ratio:{ratio:.5}\">\n\
          <div class=\"tv-screen\" id=\"tv-screen\" style=\"{screen}\">\n{screen_inside}</div>\n\
          <img class=\"tv-body\" src=\"/assets/tv.webp\" alt=\"\" style=\"{body}\">\n\
-         <img class=\"tv-glare\" src=\"/assets/tv-glass.webp\" alt=\"\" style=\"{glass}\">\n\
          <div class=\"tv-lcd\" style=\"{lcd}\" aria-hidden=\"true\"><span class=\"tv-lcd-unlit\">88</span><span class=\"tv-lcd-lit\"></span></div>\n\
          <button class=\"tv-key tv-ch-down\" type=\"button\" data-step=\"-1\" style=\"{down}\" title=\"Channel down (↓)\"><span>Channel down</span></button>\n\
          <button class=\"tv-key tv-ch-up\" type=\"button\" data-step=\"1\" style=\"{up}\" title=\"Channel up (↑)\"><span>Channel up</span></button>\n\
@@ -194,7 +191,6 @@ fn set_html(channel: Channel) -> String {
         ratio = set.front[2] / set.front[3],
         screen = place(set, set.screen),
         body = place(set, [0.0, 0.0, set.width, set.height]),
-        glass = place(set, set.glass),
         lcd = place(set, set.lcd),
         down = place(set, set.ch_down),
         up = place(set, set.ch_up),
@@ -436,7 +432,6 @@ mod tests {
         for part in [
             set.front,
             set.screen,
-            set.glass,
             set.lcd,
             set.ch_down,
             set.ch_up,

@@ -239,7 +239,7 @@ You can close this tab.</p>\n\
 /// The stylesheets, scripts, fonts and pictures, as (name, type, contents).
 /// They're built into the executable, so the app stays a single file.
 /// `videojs.js` is Video.js 10, bundled by `just videojs`.
-const ASSETS: [(&str, &str, &[u8]); 47] = [
+const ASSETS: [(&str, &str, &[u8]); 46] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -266,11 +266,6 @@ const ASSETS: [(&str, &str, &[u8]); 47] = [
         include_bytes!("../assets/tvsound.js"),
     ),
     ("tv.webp", "image/webp", include_bytes!("../assets/tv.webp")),
-    (
-        "tv-glass.webp",
-        "image/webp",
-        include_bytes!("../assets/tv-glass.webp"),
-    ),
     (
         "tv-power.webp",
         "image/webp",

@@ -57,7 +57,7 @@ radio samples="512":
     cp "$out/motion/motion.json" assets/radio.json
 
 # Render /tv's television set into assets/ with Blender (see
-# assets/blender/tv.py): the set, its glass's reflections, the sprites of
+# assets/blender/tv.py): the set, the sprites of
 # its buttons, knob and power light, and tv.json, which says where they go.
 # Fetches the two fonts the scene sets type in. A few minutes on a recent GPU.
 tv samples="256":
@@ -70,7 +70,7 @@ tv samples="256":
     curl -fsSL -o "$out/fonts/Fredoka.ttf" "https://github.com/google/fonts/raw/main/ofl/fredoka/Fredoka%5Bwdth,wght%5D.ttf"
     blender -b -P assets/blender/tv.py -- "$out/tv" "$out/fonts" {{samples}} > "$out/blender.log" 2>&1 \
       || { tail -30 "$out/blender.log"; exit 1; }
-    for part in tv tv-glass tv-power tv-up tv-down tv-knob tv-led; do
+    for part in tv tv-power tv-up tv-down tv-knob tv-led; do
       cwebp -quiet -q 90 -alpha_q 100 -m 6 "$out/tv/$part.png" -o "assets/$part.webp"
     done
     cp "$out/tv/tv.json" assets/tv.json

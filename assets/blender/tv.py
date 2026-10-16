@@ -9,9 +9,6 @@ right side still show.
 
 - tv.png: the set, with the picture tube's glass cut out (transparent),
   where the page draws the picture (assets/crt.js) under it.
-- tv-glass.png: the glass alone: what it reflects of the studio, on
-  transparency. The page lays it over the picture with `screen` blending,
-  as reflections on a tube's face add to its light.
 - tv-power.png: the red mushroom POWER button, up then pressed.
 - tv-down.png, tv-up.png: the channel buttons, up then pressed.
 - tv-knob.png: the VOLUME knob turned from KNOB_FROM to KNOB_TO degrees in
@@ -449,7 +446,7 @@ frame(
     bev=0.25,
 )
 # The tube's face behind it, bowed out a little, as tubes were. It's cut
-# out of the still (a holdout); tv-glass.png is its reflections.
+# out of the still (a holdout), where the page draws the picture.
 GLASS_Y = YF - 0.05  # the face's edge, inside the gasket, in front of the body
 BULGE = 2.4  # a 20-inch tube's face bows out about this much
 bpy.ops.mesh.primitive_grid_add(x_subdivisions=160, y_subdivisions=120, size=1, location=(SX, GLASS_Y, SZ), rotation=(math.radians(90), 0, 0))
@@ -686,57 +683,6 @@ area("fill", (45, -40, 15), 22000, 40, color=(0.9, 0.95, 1.0))
 area("rim", (25, 30, 60), 90000, 25, color=(1.0, 0.97, 0.92), target=(0, 0, 14))
 area("violet", (-30, 40, 30), 40000, 20, color=(0.55, 0.3, 1.0), target=(0, 0, 8))
 
-# Softboxes in front of the set, seen only in the glass: a window of light
-# up and to the left, tall and leaning, and a dim wide one overhead, the
-# soft reflections a tube's face catches in a product shot. They light
-# nothing else. Where on the glass each lands comes from where the bowed
-# face mirrors the space in front of it (aimed by tracing rays from the
-# camera off it).
-
-
-def softbox(name, loc, size, lean, strength):
-    bpy.ops.mesh.primitive_plane_add(size=1, location=loc)
-    ob = bpy.context.active_object
-    ob.name = name
-    ob.scale = (*size, 1)
-    aim = (Vector((SX, YF, SZ + PLINTH)) - ob.location).to_track_quat("Z", "Y")
-    ob.rotation_euler = (aim @ Matrix.Rotation(math.radians(lean), 4, "Z").to_quaternion()).to_euler()
-    m = bpy.data.materials.new(name)
-    try:
-        m.use_nodes = True
-    except AttributeError:
-        pass
-    nt = m.node_tree
-    nt.nodes.remove(nt.nodes["Principled BSDF"])
-    emit = nt.nodes.new("ShaderNodeEmission")
-    # Brightest in the middle, falling off smoothly to its edges, as light
-    # through a diffuser does.
-    coords = nt.nodes.new("ShaderNodeTexCoord")
-    grad = nt.nodes.new("ShaderNodeTexGradient")
-    grad.gradient_type = "SPHERICAL"
-    nt.links.new(coords.outputs["Object"], grad.inputs["Vector"])
-    ramp = nt.nodes.new("ShaderNodeMapRange")
-    ramp.interpolation_type = "SMOOTHSTEP"
-    ramp.inputs["From Min"].default_value = 0.5
-    ramp.inputs["From Max"].default_value = 0.9
-    ramp.inputs["To Max"].default_value = strength
-    nt.links.new(grad.outputs["Fac"], ramp.inputs["Value"])
-    nt.links.new(ramp.outputs["Result"], emit.inputs["Strength"])
-    nt.links.new(emit.outputs["Emission"], nt.nodes["Material Output"].inputs["Surface"])
-    ob.data.materials.append(m)
-    ob.visible_camera = False
-    ob.visible_diffuse = False
-    ob.visible_shadow = False
-    ob.visible_transmission = False
-    ob.visible_volume_scatter = False
-    return ob
-
-
-SOFTBOXES = [
-    softbox("window", (-55.0, -170.0, 44.0), (16.0, 44.0), -24, 2.4),
-    softbox("overhead", (-15.0, -170.0, 66.0), (130.0, 26.0), 0, 0.09),
-]
-
 # Looking straight along +y, from above and to the right: the camera isn't
 # turned, the lens is shifted, so every plane facing the camera (the front
 # and its screen) keeps its right angles.
@@ -754,7 +700,7 @@ bpy.context.view_layer.update()
 deps = bpy.context.evaluated_depsgraph_get()
 corners = []
 for ob in scene.objects:
-    if ob.type in {"MESH", "CURVE", "FONT"} and ob is not floor and ob not in SOFTBOXES:
+    if ob.type in {"MESH", "CURVE", "FONT"} and ob is not floor:
         ev = ob.evaluated_get(deps)
         corners += [ev.matrix_world @ Vector(c) for c in ev.bound_box]
 uv = [world_to_camera_view(scene, cam, c) for c in corners]
@@ -998,31 +944,6 @@ region = box(LED_X, LED_Z, 1.0, 1.0, YP - 0.3)
 sprite("tv-led", region, [light("led-off"), light("led-red"), light("led-green")])
 light("led-off")()
 layout["led"] = region
-
-# ---- The glass's reflections ------------------------------------------------------------
-
-# Everything but the glass is held out, so only the glass shows, and only
-# where it isn't behind the gasket; it still reflects the set's own parts
-# near its edges, and the studio.
-glass.is_holdout = False
-for ob in scene.objects:
-    if ob.type in {"MESH", "CURVE", "FONT"} and ob not in (glass, floor, *SOFTBOXES):
-        ob.is_holdout = True
-floor.hide_render = True
-# The studio's lamps and its bright ceiling would show in the glass as a
-# hard white crescent where the face curves up; in their place, a dim even
-# room, so only the softboxes, placed for it, catch the eye.
-for ob in scene.objects:
-    if ob.type == "LIGHT":
-        ob.hide_render = True
-for link_ in list(bg.inputs["Color"].links):
-    world.node_tree.links.remove(link_)
-bg.inputs["Color"].default_value = (0.03, 0.03, 0.036, 1)
-bg.inputs["Strength"].default_value = 1.0
-x, y, w, h = layout["screen"]
-region = [math.floor(x) - 4, math.floor(y) - 4, math.ceil(w) + 8, math.ceil(h) + 8]
-render(os.path.join(OUT_DIR, "tv-glass.png"), region)
-layout["glass"] = region
 
 with open(os.path.join(OUT_DIR, "tv.json"), "w") as f:
     json.dump(layout, f)
