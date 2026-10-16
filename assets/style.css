@@ -449,6 +449,7 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 .badge-youtube { background: #e62117; }
 .badge-tiktok { background: #111; box-shadow: -1px 0 #25f4ee, 1px 0 #fe2c55; }
 .badge-instagram { background: linear-gradient(45deg, #fa7e1e, #d62976 45%, #962fbf 75%, #4f5bd5); }
+.badge-x { background: #000; }
 
 /* ---- A video's page ---------------------------------------------------- */
 
@@ -470,6 +471,17 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 .preview .nothumb::before { font-size: 72px; }
 .video-title { margin: 0 0 8px !important; border: 0 !important; font-size: 21px !important; line-height: 1.25; }
 .caption { margin: 0 0 12px; color: #333; }
+/* The post an X post quotes, under its text, as X shows it. */
+.quote {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--beige-line);
+  border-radius: 8px;
+  color: #333;
+}
+.quote .quote-author { margin: 0 0 4px; font-weight: 600; }
+.quote .quote-author a { color: inherit; }
+.quote p { margin: 0; }
 .group {
   margin: 14px 0;
   padding: 6px 14px 12px;

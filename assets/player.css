@@ -112,6 +112,9 @@ video-player, audio-player, media-controls { display: contents; }
 
 /* The strip lines up with the casing's tray: 8px below the screen, 54px
    tall, 10px above the casing's bottom edge. */
+/* A photo post with no sound has no strip, but the casing is drawn round
+   one: keep its place empty, or the picture runs over the casing's foot. */
+.player.silent { padding-bottom: 72px; }
 .player-strip {
   display: flex;
   align-items: center;

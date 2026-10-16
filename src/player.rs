@@ -129,7 +129,9 @@ pub fn player_html(video_href: &str, playable: &Playable) -> String {
         } => {
             let slideshow = slideshow_html(video_href, files, sound.is_some());
             let Some(sound) = sound else {
-                return format!("<div class=\"player\">\n{slideshow}</div>\n");
+                // No controls, but the casing keeps the strip's place, so
+                // the picture stays inside its frame.
+                return format!("<div class=\"player silent\">\n{slideshow}</div>\n");
             };
             // The audio comes first: Video.js controls the first `<audio>` or
             // `<video>` in the container, and a carousel's slides can be videos.
@@ -378,6 +380,7 @@ mod tests {
             },
         );
         assert!(!silent.contains("<audio"));
+        assert!(silent.starts_with("<div class=\"player silent\">"));
         assert!(silent.contains("aria-label=\"Next photo\" disabled"));
     }
 

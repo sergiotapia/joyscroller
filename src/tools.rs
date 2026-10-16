@@ -16,7 +16,7 @@
 //! before it finishes, so nothing a tool started outlives it.
 //!
 //! Chrome's headless shell is fetched only when it's needed: when the user's
-//! browser can't run TikTok and Instagram headless (Firefox, Arc) and no
+//! browser can't run TikTok, Instagram and X headless (Firefox, Arc) and no
 //! other installed browser can either (`headless_chrome`).
 
 use std::ffi::OsStr;
@@ -397,7 +397,7 @@ pub async fn ensure_helpers() -> Result<()> {
 }
 
 /// Chrome's headless shell, fetched the first time it's asked for: it runs
-/// TikTok and Instagram when no installed browser can
+/// TikTok, Instagram and X when no installed browser can
 /// (`Browser::installed_headless`). About 110-125 MB.
 pub async fn headless_chrome() -> Result<PathBuf> {
     // TikTok's sync and a photo post's download can ask at once; one fetches.

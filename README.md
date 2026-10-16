@@ -2,12 +2,12 @@
 
 https://github.com/user-attachments/assets/e23a3a30-3098-4132-9f6b-e0f4a6a12575
 
-Automatically download the videos you like on TikTok, YouTube and Instagram, and keep them forever.
+Automatically download the videos you like on TikTok, YouTube, Instagram and X, and keep them forever.
 
 You've liked thousands of videos. Some get deleted, some go private, and the rest sink to the bottom of a feed you'll never scroll back through. Joyscroller saves a copy of each one to your own computer, so the videos you loved are still yours long after the app moves on.
 
-- **Everything you've liked, in one place.** Your YouTube likes, TikTok likes and Instagram likes and saves, side by side in one library you can browse and watch.
-- **The best quality there is.** Each video is saved at the highest quality the platform offers, with its real sound. Photo posts are saved too, images and music included: TikTok slideshows, and Instagram photos and carousels at the size they were posted.
+- **Everything you've liked, in one place.** Your YouTube likes, TikTok likes, Instagram likes and saves, and X likes and bookmarks, side by side in one library you can browse and watch.
+- **The best quality there is.** Each video is saved at the highest quality the platform offers, with its real sound. Photo posts are saved too, images and music included: TikTok slideshows, Instagram photos and carousels, and X posts' pictures at the size they were posted. On X, a post you liked that quotes a video or photos keeps the quoted post's media too.
 - **Neatly organized.** Videos land in plain folders, sorted by platform and by the day you liked them, each named after its title. No mystery file names, and nothing locked inside an app.
 - **Nothing to set up.** Joyscroller signs in with the browser you already use. No accounts to connect, no passwords to type, no API keys.
 - **It keeps up on its own.** Leave it running and new likes show up in your library within minutes of tapping the heart.
@@ -15,7 +15,7 @@ You've liked thousands of videos. Some get deleted, some go private, and the res
 
 ## How to get it and run it
 
-You need a Mac or Linux, and Chrome, Safari, Edge, Firefox, Opera, Brave, Opera GX, Arc, Chromium or Vivaldi logged in to YouTube, TikTok and Instagram. Joyscroller finds the browser itself each time it starts: if you have more than one, it picks the one logged in to the most of the three. TikTok and Instagram have to be opened in a browser running unseen in the background, which Firefox, Safari and Arc can't do. So with those, Joyscroller uses another browser you have installed, or downloads its own hidden copy of Chrome (about 125 MB) the first time.
+You need a Mac or Linux, and Chrome, Safari, Edge, Firefox, Opera, Brave, Opera GX, Arc, Chromium or Vivaldi logged in to YouTube, TikTok, Instagram and X. Joyscroller finds the browser itself each time it starts: if you have more than one, it picks the one logged in to the most of the four. TikTok, Instagram and X have to be opened in a browser running unseen in the background, which Firefox, Safari and Arc can't do. So with those, Joyscroller uses another browser you have installed, or downloads its own hidden copy of Chrome (about 125 MB) the first time.
 
 ### On a Mac
 

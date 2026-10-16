@@ -12,7 +12,7 @@
 //!   macOS ask the user to allow Joyscroller, so it's read once per run.
 //!
 //! `sniff` picks which browser to read from: the one logged in to the most of
-//! YouTube, TikTok and Instagram. TikTok and Instagram also run a browser
+//! YouTube, TikTok, Instagram and X. TikTok, Instagram and X also run a browser
 //! headless (`headless.rs`): the same one, or for a browser that can't run
 //! headless (Firefox, Safari, Arc), another installed one, or failing that a copy of
 //! Chrome's headless shell that `tools.rs` downloads.
@@ -87,7 +87,7 @@ impl Browser {
         }
     }
 
-    /// Whether the browser can run headless for TikTok and Instagram over the
+    /// Whether the browser can run headless for TikTok, Instagram and X over the
     /// Chrome DevTools Protocol. Firefox dropped its support for it, and Safari
     /// never had it. Arc only
     /// takes a DevTools connection when no other copy of it is running, and
@@ -102,13 +102,36 @@ impl Browser {
     /// either way, so any of them will do. `None` leaves Chrome's headless
     /// shell, which `tools::headless_chrome` downloads.
     pub fn installed_headless(self) -> Option<PathBuf> {
+        self.headless_runner().map(|(_, exe)| exe)
+    }
+
+    /// `installed_headless`, along with which browser that program is.
+    pub fn headless_runner(self) -> Option<(Browser, PathBuf)> {
         if self.runs_headless() {
-            return self.executable().ok();
+            return self.executable().ok().map(|exe| (self, exe));
         }
         Browser::MOST_USED_FIRST
             .into_iter()
             .filter(|browser| browser.runs_headless())
-            .find_map(|browser| browser.executable().ok())
+            .find_map(|browser| browser.executable().ok().map(|exe| (browser, exe)))
+    }
+
+    /// The brand a desktop copy of this Chromium browser names in its
+    /// user-agent client hints (`sec-ch-ua`) next to Chromium, as sites see
+    /// it. Chromium itself and Vivaldi name none.
+    pub fn client_hints_brand(self) -> Option<&'static str> {
+        match self {
+            Browser::Chrome => Some("Google Chrome"),
+            Browser::Edge => Some("Microsoft Edge"),
+            Browser::Brave => Some("Brave"),
+            Browser::Opera => Some("Opera"),
+            Browser::OperaGx => Some("Opera GX"),
+            Browser::Chromium
+            | Browser::Vivaldi
+            | Browser::Arc
+            | Browser::Firefox
+            | Browser::Safari => None,
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -269,6 +292,10 @@ pub struct Cookie {
     pub value: String,
 }
 
+/// A Chromium cookie's host matches domain `?1`: "x.com" matches ".x.com"
+/// and "api.x.com", but not "stockx.com", which a bare suffix would.
+const ON_DOMAIN: &str = "(host_key = ?1 OR host_key LIKE '%.' || ?1)";
+
 /// All cookies whose host matches `domain` (e.g. "youtube.com" matches
 /// ".youtube.com" and "www.youtube.com").
 /// Firefox and Safari have no profiles named like Chromium's, so they read
@@ -289,11 +316,11 @@ pub async fn cookies_for(browser: Browser, profile: &str, domain: &str) -> Resul
 
     let Keys { v10, v11 } = keys(browser).await?;
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT host_key, path, is_secure, expires_utc, name, value, encrypted_value \
-         FROM cookies WHERE host_key LIKE ?1",
-    )?;
-    let rows = stmt.query_map([format!("%{domain}")], |r| {
+         FROM cookies WHERE {ON_DOMAIN}"
+    ))?;
+    let rows = stmt.query_map([domain], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -386,7 +413,7 @@ fn open_copy(db_path: &Path) -> Result<(tempfile::TempDir, rusqlite::Connection)
 
 /// The sites Joyscroller reads likes from: each one's name, domain and the
 /// cookies it only sets while you're logged in.
-const LOGINS: [(&str, &str, &[&str]); 3] = [
+const LOGINS: [(&str, &str, &[&str]); 4] = [
     (
         "YouTube",
         "youtube.com",
@@ -394,11 +421,12 @@ const LOGINS: [(&str, &str, &[&str]); 3] = [
     ),
     ("TikTok", "tiktok.com", &["sessionid"]),
     ("Instagram", "instagram.com", &["sessionid"]),
+    ("X", "x.com", &["auth_token"]),
 ];
 
 /// The browser to read logins from, picked afresh on every launch: of the
 /// installed browsers with a `profile`, the one logged in to the most of
-/// YouTube, TikTok and Instagram, and on a tie the most widely used. Only
+/// YouTube, TikTok, Instagram and X, and on a tie the most widely used. Only
 /// cookie names and expiry dates are read, which Chromium doesn't encrypt,
 /// so this never asks the keyring or the Keychain for anything. Safari's
 /// logins can't be read without Full Disk Access, so then it's picked only
@@ -426,7 +454,7 @@ pub fn sniff(profile: &str) -> Browser {
         let names: Vec<&str> = Browser::MOST_USED_FIRST.iter().map(|b| b.name()).collect();
         eprintln!(
             "warning: found none of {} with a {profile} profile; install one, log in to \
-             YouTube, TikTok or Instagram in it, and restart Joyscroller",
+             YouTube, TikTok, Instagram or X in it, and restart Joyscroller",
             names.join(", ")
         );
         return Browser::Chrome;
@@ -438,7 +466,7 @@ pub fn sniff(profile: &str) -> Browser {
     };
     if sites.is_empty() {
         eprintln!(
-            "warning: using {name}, which isn't logged in to YouTube, TikTok or Instagram; \
+            "warning: using {name}, which isn't logged in to YouTube, TikTok, Instagram or X; \
              log in to them in your browser and restart Joyscroller"
         );
     } else {
@@ -446,7 +474,7 @@ pub fn sniff(profile: &str) -> Browser {
     }
     if browser.installed_headless().is_none() {
         eprintln!(
-            "browser: {name} can't run TikTok and Instagram in the background, so \
+            "browser: {name} can't run TikTok, Instagram and X in the background, so \
              Joyscroller runs its own copy of Chrome's headless shell for them"
         );
     }
@@ -500,11 +528,12 @@ fn logged_in_sites(conn: &rusqlite::Connection, browser: Browser) -> Result<Vec<
     // Chromium's times are microseconds since 1601; 0 is a session cookie.
     let sql = match browser {
         Browser::Firefox => firefox::has_login_sql(),
-        _ => "SELECT EXISTS (SELECT 1 FROM cookies \
-              WHERE (host_key = ?1 OR host_key LIKE '%.' || ?1) AND name = ?2 \
-              AND (expires_utc = 0 \
-                   OR expires_utc > (unixepoch() + 11644473600) * 1000000))"
-            .to_owned(),
+        _ => format!(
+            "SELECT EXISTS (SELECT 1 FROM cookies \
+             WHERE {ON_DOMAIN} AND name = ?2 \
+             AND (expires_utc = 0 \
+                  OR expires_utc > (unixepoch() + 11644473600) * 1000000))"
+        ),
     };
     let mut stmt = conn.prepare(&sql)?;
     let mut sites = Vec::new();
@@ -777,6 +806,25 @@ mod tests {
         conn
     }
 
+    #[test]
+    fn matches_only_the_domain_and_its_subdomains() {
+        let conn = cookie_store(&[
+            (".x.com", "a", 0),
+            ("x.com", "b", 0),
+            ("api.x.com", "c", 0),
+            (".stockx.com", "d", 0),
+            ("x.com.evil", "e", 0),
+        ]);
+        let names: Vec<String> = conn
+            .prepare(&format!("SELECT name FROM cookies WHERE {ON_DOMAIN}"))
+            .unwrap()
+            .query_map(["x.com"], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
     /// Far in the future, in Chromium's time.
     const LATER: i64 = 99_000_000_000_000_000;
 
@@ -787,10 +835,11 @@ mod tests {
             (".youtube.com", "VISITOR_INFO1_LIVE", LATER),
             (".tiktok.com", "sessionid", 0),
             (".instagram.com", "csrftoken", LATER),
+            (".x.com", "auth_token", LATER),
         ]);
         assert_eq!(
             logged_in_sites(&conn, Browser::Chrome).unwrap(),
-            ["YouTube", "TikTok"]
+            ["YouTube", "TikTok", "X"]
         );
     }
 

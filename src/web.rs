@@ -37,6 +37,7 @@ use crate::db;
 use crate::pipeline::{Active, Board, Converter, Converting, Job, Lane, Outcome, Pipeline, Wait};
 use crate::player;
 use crate::tv::Tv;
+use crate::x;
 
 mod tv;
 
@@ -58,21 +59,24 @@ const VERSION: &str = concat!(
 );
 
 /// The sidebar's platforms, as (stored name, display name).
-const PLATFORMS: [(&str, &str); 3] = [
+const PLATFORMS: [(&str, &str); 4] = [
     ("youtube", "YouTube"),
     ("tiktok", "TikTok"),
     ("instagram", "Instagram"),
+    ("x", "X"),
 ];
 
 /// The kinds of post the side panel lists under each platform, as
 /// (platform, post type as `db::Filter` names it, label). YouTube's are all
 /// videos, so it has none.
-const POST_TYPES: [(&str, &str, &str); 5] = [
+const POST_TYPES: [(&str, &str, &str); 7] = [
     ("tiktok", "video", "Videos"),
     ("tiktok", "slideshow", "Slideshows"),
     ("instagram", "video", "Videos"),
     ("instagram", "photo", "Photos"),
     ("instagram", "carousel", "Carousels"),
+    ("x", "video", "Videos"),
+    ("x", "photo", "Photos"),
 ];
 
 /// The label of `platform`'s `post_type`, e.g. "Slideshows".
@@ -241,7 +245,7 @@ You can close this tab.</p>\n\
 /// The stylesheets, scripts, fonts and pictures, as (name, type, contents).
 /// They're built into the executable, so the app stays a single file.
 /// `videojs.js` is Video.js 10, bundled by `just videojs`.
-const ASSETS: [(&str, &str, &[u8]); 46] = [
+const ASSETS: [(&str, &str, &[u8]); 47] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -383,6 +387,11 @@ const ASSETS: [(&str, &str, &[u8]); 46] = [
         "icon-instagram.webp",
         "image/webp",
         include_bytes!("../assets/icon-instagram.webp"),
+    ),
+    (
+        "icon-x.webp",
+        "image/webp",
+        include_bytes!("../assets/icon-x.webp"),
     ),
     (
         "icon-downloading.webp",
@@ -987,6 +996,13 @@ async fn video_page(
         }
         _ => String::new(),
     };
+    let quote = if video.platform == "x" {
+        x::quoted(&raw_json)
+            .map(|q| quote_html(&q))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let fields = facts_html(&video, download.as_ref());
     // Fall back to the stored text if it somehow isn't valid JSON.
     let pretty = serde_json::from_str::<serde_json::Value>(&raw_json)
@@ -1003,7 +1019,7 @@ async fn video_page(
          </div>\n\
          <div>\n\
          <h2 class=\"video-title\">{heading}</h2>\n\
-         {caption}\
+         {caption}{quote}\
          <fieldset class=\"group\"><legend>Media</legend>{media}</fieldset>\n\
          <fieldset class=\"group\"><legend>Details</legend><dl class=\"facts\">\n{fields}</dl></fieldset>\n\
          <details class=\"raw\"><summary>Raw JSON</summary><pre>{json}</pre></details>\n\
@@ -1039,6 +1055,27 @@ async fn video_page(
         },
         &main,
     )))
+}
+
+/// The post an X post quotes, under its text: its author, linked to the
+/// post, and its text.
+fn quote_html(quoted: &x::Quoted) -> String {
+    let author = match (&quoted.author_name, &quoted.author_handle) {
+        (Some(name), Some(handle)) => format!("{name} @{handle}"),
+        (None, Some(handle)) => format!("@{handle}"),
+        (Some(name), None) => name.clone(),
+        (None, None) => "A post".into(),
+    };
+    let text = if quoted.text.is_empty() {
+        String::new()
+    } else {
+        format!("<p>{}</p>", escape(&quoted.text).replace('\n', "<br>\n"))
+    };
+    format!(
+        "<blockquote class=\"quote\"><p class=\"quote-author\"><a href=\"{}\">{}</a></p>{text}</blockquote>\n",
+        escape(&quoted.url()),
+        escape(&author)
+    )
 }
 
 /// The video page's Details: author, length, dates, whether it's still up
@@ -1249,10 +1286,10 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
         "Videos download when you click Download now on their page, right away, \
          several at a time if you like."
     } else {
-        "YouTube, TikTok and Instagram each have a lane that downloads every liked \
+        "YouTube, TikTok, Instagram and X each have a lane that downloads every liked \
          video not downloaded yet, newest first, one at a time: YouTube waits 30 seconds \
-         between videos, TikTok 15 to 30, Instagram 30 to 60. A video's Download now \
-         button downloads it right away, alongside the lanes."
+         between videos, TikTok 15 to 30, Instagram 30 to 60, X 10 to 20. A video's \
+         Download now button downloads it right away, alongside the lanes."
     };
     let about = format!(
         "{about} Videos that won't play in every browser (most of them: YouTube's AV1, \
@@ -1967,6 +2004,7 @@ fn icon(section: Section) -> &'static str {
         Section::Likes(Some("instagram")) => {
             "<img class=\"icon\" src=\"/assets/icon-instagram.webp\" alt=\"\">"
         }
+        Section::Likes(Some("x")) => "<img class=\"icon\" src=\"/assets/icon-x.webp\" alt=\"\">",
         Section::Likes(_) => "<img class=\"icon\" src=\"/assets/icon-likes.webp\" alt=\"\">",
         Section::Downloading | Section::Stats => {
             "<img class=\"icon\" src=\"/assets/icon-downloading.webp\" alt=\"\">"
@@ -2392,17 +2430,19 @@ fn short_title(video: &db::StoredVideo) -> String {
     match first_line {
         Some(line) => line.into(),
         None if !video.available => "(unavailable)".into(),
-        None if matches!(video.platform.as_str(), "tiktok" | "instagram") => "(no caption)".into(),
+        None if matches!(video.platform.as_str(), "tiktok" | "instagram" | "x") => {
+            "(no caption)".into()
+        }
         None => "(no title)".into(),
     }
 }
 
-/// The author as the platform shows them: a channel name, or a TikTok or
-/// Instagram @handle.
+/// The author as the platform shows them: a channel name, or a TikTok,
+/// Instagram or X @handle.
 fn author_label(video: &db::StoredVideo) -> String {
     match (video.platform.as_str(), video.author_name.as_deref()) {
         (_, None) => String::new(),
-        ("tiktok" | "instagram", Some(handle)) => format!("@{handle}"),
+        ("tiktok" | "instagram" | "x", Some(handle)) => format!("@{handle}"),
         (_, Some(name)) => name.into(),
     }
 }
@@ -2423,6 +2463,10 @@ fn author_html(video: &db::StoredVideo) -> String {
             .author_name
             .as_deref()
             .map(|handle| format!("https://www.instagram.com/{handle}/")),
+        "x" => video
+            .author_name
+            .as_deref()
+            .map(|handle| format!("https://x.com/{handle}")),
         _ => None,
     };
     match href {
@@ -2930,6 +2974,22 @@ pub fn escape(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shows_the_post_an_x_post_quotes() {
+        let quoted = x::Quoted {
+            id: "9".into(),
+            author_handle: Some("konami".into()),
+            author_name: Some("Konami <JP>".into()),
+            text: "out\nnow".into(),
+        };
+        assert_eq!(
+            quote_html(&quoted),
+            "<blockquote class=\"quote\"><p class=\"quote-author\">\
+             <a href=\"https://x.com/konami/status/9\">Konami &lt;JP&gt; @konami</a></p>\
+             <p>out<br>\nnow</p></blockquote>\n"
+        );
+    }
+
     fn video(platform: &str, title: Option<&str>) -> db::StoredVideo {
         db::StoredVideo {
             rowid: 1,
@@ -3135,7 +3195,7 @@ mod tests {
         assert_eq!(count_of(&counts, Some("instagram"), None), 0);
         assert_eq!(
             counts_json(&counts),
-            r#"{"all":6,"instagram":0,"instagram/carousel":0,"instagram/photo":0,"instagram/video":0,"tiktok":3,"tiktok/slideshow":1,"tiktok/video":2,"youtube":3}"#
+            r#"{"all":6,"instagram":0,"instagram/carousel":0,"instagram/photo":0,"instagram/video":0,"tiktok":3,"tiktok/slideshow":1,"tiktok/video":2,"x":0,"x/photo":0,"x/video":0,"youtube":3}"#
         );
     }
 
@@ -3182,6 +3242,9 @@ mod tests {
                 ("Videos", true),
                 ("Photos", true),
                 ("Carousels", true),
+                ("X", false),
+                ("Videos", true),
+                ("Photos", true),
                 ("TV", false),
                 ("Downloading", false),
                 ("Stats", true),
@@ -3264,6 +3327,7 @@ mod tests {
                 title: video.title.clone(),
                 author_name: video.author_name.clone(),
                 added_on: "2026-10-12".into(),
+                listing_json: "{}".into(),
             },
             title: "<b>".into(),
         }

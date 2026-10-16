@@ -39,7 +39,7 @@ const PLAYBACK_COLUMNS: &str = "d.folder, d.files_json, d.downloaded_at";
 fn pending_playback_from_row(
     r: &rusqlite::Row,
 ) -> rusqlite::Result<(PendingDownload, String, String, i64)> {
-    Ok((pending_from_row(r)?, r.get(7)?, r.get(8)?, r.get(9)?))
+    Ok((pending_from_row(r)?, r.get(8)?, r.get(9)?, r.get(10)?))
 }
 
 fn pending_playback_from(

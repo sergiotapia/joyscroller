@@ -6,11 +6,18 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ### Added
 
+- X: your bookmarks and likes are archived too, the posts with videos, GIFs or pictures, saved at full quality. A post you liked that quotes a video or photos keeps the quoted post's media, and its page shows the quoted post under yours. Text-only posts are left out. X has its own section in the side panel (Videos and Photos), its own TV channel, and its quoted posts are searchable.
 - Stats, under Downloading in the side panel: for each platform, how many likes were found, how many are downloaded and how many are transcoded to play in every browser, with progress bars and percentages, so you can see how close the archive is to caught up. It updates as downloads finish.
 
 ### Changed
 
+- The hidden browser Joyscroller runs for TikTok, Instagram and X now tells sites exactly what your own browser would about itself, instead of leaving part of that out.
 - The search box no longer pops up a list of your past searches as you type.
+
+### Fixed
+
+- A photo post with no sound no longer runs over the bottom of the player's frame.
+- Reading your logins for a site no longer also picks up cookies from unrelated sites whose names end the same way (reading x.com's took stockx.com's too).
 
 ## [0.11.0] - 2026-10-15
 

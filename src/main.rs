@@ -14,6 +14,7 @@ mod tools;
 mod transcode;
 mod tv;
 mod web;
+mod x;
 mod youtube;
 
 use std::collections::{HashMap, HashSet};
@@ -41,6 +42,7 @@ enum Platform {
     Youtube,
     Tiktok,
     Instagram,
+    X,
 }
 
 impl Platform {
@@ -50,6 +52,7 @@ impl Platform {
             Platform::Youtube => "youtube",
             Platform::Tiktok => "tiktok",
             Platform::Instagram => "instagram",
+            Platform::X => "x",
         }
     }
 
@@ -59,6 +62,7 @@ impl Platform {
             Platform::Youtube => "YouTube",
             Platform::Tiktok => "TikTok",
             Platform::Instagram => "Instagram",
+            Platform::X => "X",
         }
     }
 }
@@ -68,7 +72,7 @@ enum Command {
     /// Export the browser's cookies for a domain to a Netscape cookies.txt.
     Cookies {
         /// The browser to read logins from (default: the one logged in to the
-        /// most of YouTube, TikTok and Instagram).
+        /// most of YouTube, TikTok, Instagram and X).
         #[arg(long, value_enum)]
         browser: Option<Browser>,
         #[arg(long, default_value = "Default")]
@@ -79,12 +83,13 @@ enum Command {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
-    /// List the videos you've liked (on Instagram, the posts you've saved, then the ones you've liked).
+    /// List the videos you've liked (on Instagram, the posts you've saved, then the ones you've
+    /// liked; on X, the posts with media you've bookmarked, then the ones you've liked).
     Likes {
         #[arg(long, value_enum, default_value = "youtube")]
         platform: Platform,
         /// The browser to read logins from (default: the one logged in to the
-        /// most of YouTube, TikTok and Instagram).
+        /// most of YouTube, TikTok, Instagram and X).
         #[arg(long, value_enum)]
         browser: Option<Browser>,
         #[arg(long, default_value = "Default")]
@@ -98,7 +103,7 @@ enum Command {
         #[arg(long, value_enum, default_value = "youtube")]
         platform: Platform,
         /// The browser to read logins from (default: the one logged in to the
-        /// most of YouTube, TikTok and Instagram).
+        /// most of YouTube, TikTok, Instagram and X).
         #[arg(long, value_enum)]
         browser: Option<Browser>,
         #[arg(long, default_value = "Default")]
@@ -119,7 +124,7 @@ enum Command {
     /// Download the media of the next few liked videos that don't have it yet.
     Download {
         /// The browser to read logins from (default: the one logged in to the
-        /// most of YouTube, TikTok and Instagram).
+        /// most of YouTube, TikTok, Instagram and X).
         #[arg(long, value_enum)]
         browser: Option<Browser>,
         #[arg(long, default_value = "Default")]
@@ -148,6 +153,8 @@ const SYNC_EVERY: Duration = Duration::from_mins(5);
 /// `MAX_PAUSE`: Instagram's blocks last hours to a day, and asking during
 /// one only makes it last longer, or gets the account flagged.
 const FIRST_PAUSE: Duration = Duration::from_hours(3);
+/// X's rate limits reset every 15 minutes, so its lists start shorter.
+const FIRST_X_PAUSE: Duration = Duration::from_mins(15);
 const MAX_PAUSE: Duration = Duration::from_hours(24);
 
 /// How often the app updates its own yt-dlp. Fixes for site changes ship in
@@ -304,6 +311,7 @@ async fn run(cli: Cli) -> Result<()> {
                 Platform::Youtube => print_youtube_likes(browser, &profile, limit).await?,
                 Platform::Tiktok => print_tiktok_likes(browser, &profile, limit).await?,
                 Platform::Instagram => print_instagram_lists(browser, &profile, limit).await?,
+                Platform::X => print_x_lists(browser, &profile, limit).await?,
             }
         }
         Command::Sync {
@@ -423,6 +431,44 @@ async fn print_instagram_lists(browser: Browser, profile: &str, limit: usize) ->
     Ok(())
 }
 
+/// The `likes` command for X, where the lists are the bookmarked posts and
+/// the liked ones with media, `limit` of each.
+async fn print_x_lists(browser: Browser, profile: &str, limit: usize) -> Result<()> {
+    let cookies = browser::cookies_for(browser, profile, "x.com").await?;
+    eprintln!("extracted {} x.com cookies", cookies.len());
+    let mut session = x::Session::open(browser, &cookies).await?;
+    let result = async {
+        for (name, list) in [
+            ("bookmarked", x::List::Bookmarks),
+            ("liked", x::List::Likes),
+        ] {
+            let mut posts = Vec::new();
+            session
+                .posts(list, None, |page, _| {
+                    Ok(collect_up_to(&mut posts, page, limit))
+                })
+                .await?;
+            eprintln!("\n{} {name} posts with media:\n", posts.len());
+            for (i, p) in posts.iter().enumerate() {
+                let length = if p.is_photo {
+                    "photo".into()
+                } else {
+                    p.duration_seconds
+                        .map_or_else(|| "--:--".into(), |s| format!("{}:{:02}", s / 60, s % 60))
+                };
+                let author = p.author_handle.as_deref().unwrap_or("?");
+                let text = p.text.lines().next().unwrap_or("");
+                println!("{:>3}. [{length}] @{author} — {text}", i + 1);
+                println!("     {}", p.url());
+            }
+        }
+        Ok(())
+    }
+    .await;
+    session.close().await;
+    result
+}
+
 /// Add a listed page to `items`, up to `limit` of them (0 for no limit).
 /// Returns whether to list more.
 fn collect_up_to<T>(items: &mut Vec<T>, page: Vec<T>, limit: usize) -> bool {
@@ -486,6 +532,7 @@ async fn run_app(profile: &str, db_path: &Path) -> Result<()> {
             Platform::Youtube.name(),
             Platform::Tiktok.name(),
             Platform::Instagram.name(),
+            Platform::X.name(),
         ],
         browser,
         profile,
@@ -522,11 +569,12 @@ async fn run_app(profile: &str, db_path: &Path) -> Result<()> {
     // a long list, doesn't hold up the others.
     let mut tiktok_conn = db::open(db_path)?;
     let mut instagram_conn = db::open(db_path)?;
+    let mut x_conn = db::open(db_path)?;
     // Turning off from the UI ends the loops at once, mid-sync too: dropping
     // a sync stops its yt-dlp or headless browser, and the next launch syncs
     // again from where the database left off.
     let run = async {
-        // Boxed: each sync's future holds a whole listing's state, and three
+        // Boxed: each sync's future holds a whole listing's state, and four
         // side by side would make this function's future very large.
         let youtube = Box::pin(sync_loop(
             Platform::Youtube,
@@ -549,7 +597,14 @@ async fn run_app(profile: &str, db_path: &Path) -> Result<()> {
             &mut instagram_conn,
             &status,
         ));
-        tokio::join!(youtube, tiktok, instagram);
+        let x = Box::pin(sync_loop(
+            Platform::X,
+            browser,
+            profile,
+            &mut x_conn,
+            &status,
+        ));
+        tokio::join!(youtube, tiktok, instagram, x);
     };
     tokio::select! {
         () = run => {}
@@ -685,6 +740,7 @@ async fn sync(
         Platform::Youtube => sync_youtube(browser, profile, conn, full).await,
         Platform::Tiktok => sync_tiktok(browser, profile, conn, full).await,
         Platform::Instagram => sync_instagram(browser, profile, conn, full, pauses).await,
+        Platform::X => sync_x(browser, profile, conn, full, pauses).await,
     }
 }
 
@@ -741,15 +797,20 @@ impl Pauses {
             Ok(()) => {
                 self.0.remove(list);
             }
-            Err(e) if instagram::is_throttled(e) => {
+            Err(e) if instagram::is_throttled(e) || x::is_throttled(e) => {
                 let in_a_row = self.0.get(list).map_or(0, |p| p.in_a_row) + 1;
-                let pause = FIRST_PAUSE
+                let first = if x::is_throttled(e) {
+                    FIRST_X_PAUSE
+                } else {
+                    FIRST_PAUSE
+                };
+                let pause = first
                     .saturating_mul(2_u32.saturating_pow(in_a_row - 1))
                     .min(MAX_PAUSE);
                 let until = now.saturating_add(i64::try_from(pause.as_secs()).unwrap_or(i64::MAX));
                 eprintln!(
-                    "{list}: told to slow down, pausing it for {}h",
-                    pause.as_secs() / 3600
+                    "{list}: told to slow down, pausing it for {} min",
+                    pause.as_secs() / 60
                 );
                 self.0.insert(list, Pause { until, in_a_row });
             }
@@ -843,6 +904,8 @@ async fn sync_youtube(
 const TIKTOK_LIKED: &str = "tiktok liked";
 const INSTAGRAM_SAVED: &str = "instagram saved";
 const INSTAGRAM_LIKED: &str = "instagram liked";
+const X_BOOKMARKED: &str = "x bookmarked";
+const X_LIKED: &str = "x liked";
 
 /// The part of a listed page to store: up to and including the item where
 /// `keep_going` says to stop. Also returns whether to go on.
@@ -1064,6 +1127,141 @@ fn store_instagram_page(
     db::store_page(conn, "instagram", listing, &rows, next)
 }
 
+/// Pull newly bookmarked and liked X posts with media into the database.
+/// Returns (listed, added). Like Instagram's, the two lists are one row per
+/// post, read one after the other, each stored page by page, so one failing
+/// doesn't hold up the other. They're read from the same x.com tab.
+async fn sync_x(
+    browser: Browser,
+    profile: &str,
+    conn: &mut rusqlite::Connection,
+    full: bool,
+    pauses: &mut Pauses,
+) -> Result<(usize, usize)> {
+    // Re-read cookies on every sync: the browser rotates them while it runs.
+    let cookies = browser::cookies_for(browser, profile, "x.com").await?;
+    x::check_logged_in(&cookies)?;
+    let sync_id = db::start_sync(conn, "x")?;
+    let (mut listed, mut added) = (0, 0);
+    let read = async {
+        let mut session = x::Session::open(browser, &cookies).await?;
+        let mut counts = (&mut listed, &mut added);
+        let bookmarks = sync_x_list(
+            &mut session,
+            x::List::Bookmarks,
+            conn,
+            full,
+            &mut counts,
+            pauses,
+        )
+        .await;
+        let liked = sync_x_list(
+            &mut session,
+            x::List::Likes,
+            conn,
+            full,
+            &mut counts,
+            pauses,
+        )
+        .await;
+        session.close().await;
+        match (bookmarks, liked) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), Ok(())) => Err(e.context("reading the bookmarks")),
+            (Ok(()), Err(e)) => Err(e.context("reading the likes")),
+            (Err(bookmarks), Err(liked)) => {
+                Err(bookmarks.context(format!("reading the bookmarks (and the likes: {liked:#})")))
+            }
+        }
+    }
+    .await;
+    db::finish_sync(conn, sync_id, added)?;
+    read?;
+    Ok((listed, added))
+}
+
+/// Read one of X's lists into the database, page by page, adding to
+/// `counts` (listed, added) as it goes, unless X told us to slow down on it
+/// and its pause isn't over. X's limits reset every 15 minutes, but asking
+/// while limited only extends them, so it sits out like Instagram's lists.
+async fn sync_x_list(
+    session: &mut x::Session,
+    list: x::List,
+    conn: &mut rusqlite::Connection,
+    full: bool,
+    counts: &mut (&mut usize, &mut usize),
+    pauses: &mut Pauses,
+) -> Result<()> {
+    let name = match list {
+        x::List::Bookmarks => X_BOOKMARKED,
+        x::List::Likes => X_LIKED,
+    };
+    if pauses.until(name, db::now()).is_some() {
+        return Ok(());
+    }
+    let result = read_x_list(session, list, name, conn, full, counts).await;
+    pauses.record(name, &result, db::now());
+    match result {
+        Err(e) if x::is_throttled(&e) => Ok(()),
+        result => result,
+    }
+}
+
+/// Read X's `list` (the listing `name`) into the database.
+async fn read_x_list(
+    session: &mut x::Session,
+    list: x::List,
+    name: &str,
+    conn: &mut rusqlite::Connection,
+    full: bool,
+    counts: &mut (&mut usize, &mut usize),
+) -> Result<()> {
+    let mut listing = db::open_listing(conn, name, full)?;
+    let known = db::video_ids(conn, "x")?;
+    let mut keep_going = until_known(&known, listing.full);
+    let cursor = listing.cursor.clone();
+    session
+        .posts(list, cursor.as_deref(), |posts, next| {
+            let (posts, go_on) = until_stop(posts, |p| keep_going(&p.id));
+            *counts.0 += posts.len();
+            *counts.1 += store_x_page(conn, &mut listing, &posts, next)?;
+            Ok(go_on)
+        })
+        .await?;
+    db::finish_listing(conn, &listing)?;
+    Ok(())
+}
+
+/// Store a page of X posts through `listing`. Returns how many were new.
+fn store_x_page(
+    conn: &mut rusqlite::Connection,
+    listing: &mut db::Listing,
+    posts: &[x::Post],
+    next: Option<&str>,
+) -> Result<usize> {
+    let urls: Vec<String> = posts.iter().map(x::Post::url).collect();
+    let raws: Vec<String> = posts.iter().map(|p| p.raw.to_string()).collect();
+    let rows: Vec<db::NewVideo> = posts
+        .iter()
+        .zip(&urls)
+        .zip(&raws)
+        .map(|((p, url), raw)| db::NewVideo {
+            video_id: &p.id,
+            url,
+            title: (!p.text.is_empty()).then_some(p.text.as_str()),
+            author_id: p.author_id.as_deref(),
+            author_name: p.author_handle.as_deref(),
+            duration_seconds: p.duration_seconds,
+            // X lists a deleted post as a tombstone, which isn't kept.
+            available: true,
+            listing_json: raw,
+            kind: if p.is_photo { "photo" } else { "video" },
+            posted_at: p.posted_at,
+        })
+        .collect();
+    db::store_page(conn, "x", listing, &rows, next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1108,6 +1306,19 @@ mod tests {
         assert!(!pauses.0.contains_key(INSTAGRAM_SAVED));
         pauses.record(INSTAGRAM_LIKED, &Ok(()), 45 * hour);
         assert!(pauses.current(0).is_empty());
+    }
+
+    #[test]
+    fn an_x_list_told_to_slow_down_sits_out_from_15_minutes() {
+        let throttled =
+            || -> Result<()> { Err(x::slow_down_for_tests().context("reading the likes")) };
+        let mut pauses = Pauses::default();
+        pauses.record(X_LIKED, &throttled(), 0);
+        assert_eq!(pauses.until(X_LIKED, 0), Some(15 * 60));
+        pauses.record(X_LIKED, &throttled(), 15 * 60);
+        assert_eq!(pauses.until(X_LIKED, 15 * 60), Some(45 * 60));
+        assert_eq!(pauses.until(X_BOOKMARKED, 0), None);
+        assert_eq!(pauses.current(0)[0].list, "liked");
     }
 
     #[test]

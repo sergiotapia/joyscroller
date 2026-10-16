@@ -11,6 +11,10 @@
 //!   `video-NN.<ext>`, numbered along with its pictures (with the first
 //!   video's cover as `thumbnail.<ext>` when one comes first), and
 //!   `sound.<ext>` is the part of the post's music it plays.
+//! - X posts, from the media links in the post as listed (`x.rs`), which
+//!   need no login: one video (yt-dlp fetches the file, for its progress)
+//!   as `video.mp4` and `thumbnail.<ext>`, or pictures and videos, the
+//!   post's own then its quoted post's, named like a carousel's.
 //!
 //! The metadata goes back to the caller (for the database) rather than being
 //! kept as a file. yt-dlp's progress is passed to a callback as it comes, for
@@ -28,7 +32,7 @@ use tokio::process::Command;
 use crate::browser::{Browser, Cookie};
 use crate::db::PendingDownload;
 use crate::filename::safe_name;
-use crate::{instagram, tiktok};
+use crate::{instagram, tiktok, x};
 
 /// For TikTok: the best video stream, and separately the best file that has
 /// both picture and sound. TikTok's highest qualities are video-only, and the
@@ -211,9 +215,15 @@ impl Credentials {
             "youtube" => "youtube.com",
             "tiktok" => "tiktok.com",
             "instagram" => "instagram.com",
+            // X's media servers need no login, so it isn't read.
+            "x" => "",
             other => bail!("can't download from platform {other}"),
         };
-        let cookies = crate::browser::cookies_for(browser, profile, domain).await?;
+        let cookies = if domain.is_empty() {
+            Vec::new()
+        } else {
+            crate::browser::cookies_for(browser, profile, domain).await?
+        };
         let cookies_txt = tempfile::Builder::new().suffix(".txt").tempfile()?;
         std::fs::write(cookies_txt.path(), crate::browser::to_netscape(&cookies))?;
         Ok(Credentials {
@@ -270,6 +280,7 @@ pub async fn download(
     std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
     let result = match (item.kind.as_str(), item.platform.as_str()) {
+        (_, "x") => fetch_x_post(item, &work, progress).await,
         ("photo", "instagram") => fetch_instagram_post(item, login, &work).await,
         ("photo", _) => fetch_photo_post(item, login, &work).await,
         _ => fetch(item, login.cookies_txt, &work, progress).await,
@@ -343,7 +354,7 @@ fn folder_name(item: &PendingDownload) -> String {
         .and_then(|title| title.lines().map(str::trim).find(|line| !line.is_empty()));
     let label = match (title, item.author_name.as_deref()) {
         (Some(title), _) => safe_name(title, TITLE_BYTES),
-        (None, Some(handle)) if matches!(item.platform.as_str(), "tiktok" | "instagram") => {
+        (None, Some(handle)) if matches!(item.platform.as_str(), "tiktok" | "instagram" | "x") => {
             safe_name(&format!("@{handle}"), TITLE_BYTES)
         }
         (None, Some(author)) => safe_name(author, TITLE_BYTES),
@@ -367,23 +378,9 @@ async fn fetch(
     let tiktok = item.platform == "tiktok";
     let media_name = if tiktok { "%(format_id)s" } else { "video" };
     let mut cmd = crate::tools::yt_dlp()?;
-    cmd.arg("--cookies")
-        .arg(cookies_txt)
-        .arg("--no-playlist")
-        // --print below makes yt-dlp quiet, which hides progress unless asked
-        // for. It goes to stdout, one line per update, at most once a second.
-        .arg("--progress")
-        .arg("--newline")
-        .arg("--progress-delta")
-        .arg("1")
-        .arg("--progress-template")
-        .arg(format!(
-            "download:{PROGRESS_MARK}\t%(progress.downloaded_bytes)s\t%(progress.total_bytes)s\t\
-             %(progress.total_bytes_estimate)s\t%(progress.speed)s\t%(progress.eta)s\t%(info.format_id)s"
-        ))
-        .arg("--socket-timeout")
-        .arg("30")
-        .arg("-f")
+    cmd.arg("--cookies").arg(cookies_txt).arg("--no-playlist");
+    report_progress(&mut cmd);
+    cmd.arg("-f")
         .arg(if tiktok {
             TIKTOK_FORMATS
         } else {
@@ -411,7 +408,7 @@ async fn fetch(
         // One line per file written, once it's in its final place. --print
         // normally implies --simulate, but not for this late stage.
         .arg("--print")
-        .arg("after_move:%(format_id)s\t%(acodec)s\t%(height)s\t%(filepath)s")
+        .arg(PRINT_WRITTEN)
         .arg(&item.url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -457,6 +454,28 @@ async fn fetch(
         None
     };
     Ok((format, info))
+}
+
+/// yt-dlp's `--print` for each file written, once it's in its final place
+/// (`parse_written` reads them). --print normally implies --simulate, but
+/// not for this late stage.
+const PRINT_WRITTEN: &str = "after_move:%(format_id)s\t%(acodec)s\t%(height)s\t%(filepath)s";
+
+/// Have yt-dlp report its progress to `run_yt_dlp`. --print makes yt-dlp
+/// quiet, which hides progress unless asked for. It goes to stdout, one
+/// line per update, at most once a second.
+fn report_progress(cmd: &mut Command) {
+    cmd.arg("--progress")
+        .arg("--newline")
+        .arg("--progress-delta")
+        .arg("1")
+        .arg("--progress-template")
+        .arg(format!(
+            "download:{PROGRESS_MARK}\t%(progress.downloaded_bytes)s\t%(progress.total_bytes)s\t\
+             %(progress.total_bytes_estimate)s\t%(progress.speed)s\t%(progress.eta)s\t%(info.format_id)s"
+        ))
+        .arg("--socket-timeout")
+        .arg("30");
 }
 
 /// Run yt-dlp, passing its progress lines to `progress` as they come.
@@ -586,9 +605,140 @@ async fn fetch_instagram_post(
     Ok(("photo".to_string(), Some(post.item)))
 }
 
+/// Save an X post's media into `work`, from the links in the post as listed:
+/// one video as `video.mp4` with its still as `thumbnail.<ext>`, or else
+/// every picture and video as `image-NN` and `video-NN`, with the first
+/// video's still as the thumbnail when one comes first. Returns the format
+/// label (the video's size, or `photo`) and the links as metadata.
+///
+/// X takes a deleted post's media down too, so a post none of whose media is
+/// there any more is gone. One picture of several gone is left out, and a
+/// missing still only leaves the post without one.
+async fn fetch_x_post(
+    item: &PendingDownload,
+    work: &Path,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<(String, Option<Value>)> {
+    let media = x::stored_media(&item.listing_json)?;
+    let gone = |e: anyhow::Error| {
+        if is_not_found(&e) {
+            e.context(Unavailable("X"))
+        } else {
+            e
+        }
+    };
+    let format = if let [only] = media.as_slice()
+        && only.is_video
+        && item.kind == "video"
+    {
+        fetch_video_file(&only.url, work, progress)
+            .await
+            .map_err(gone)?;
+        fetch_still(&only.poster, work).await;
+        video_size(&only.url).unwrap_or("video").to_string()
+    } else {
+        let mut saved = 0;
+        let mut missing = None;
+        for (i, file) in media.iter().enumerate() {
+            let kind = if file.is_video { "video" } else { "image" };
+            let stem = format!("{kind}-{:02}", i + 1);
+            match fetch_file(&file.url, work, &stem).await {
+                Ok(_) => saved += 1,
+                Err(e) if is_not_found(&e) => {
+                    eprintln!(
+                        "x: {} has no {stem} any more ({e:#}); leaving it out",
+                        item.video_id
+                    );
+                    missing = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if saved == 0 {
+            return Err(gone(
+                missing.unwrap_or_else(|| anyhow!("the post has no media")),
+            ));
+        }
+        if let Some(first) = media.first().filter(|first| first.is_video) {
+            fetch_still(&first.poster, work).await;
+        }
+        "photo".to_string()
+    };
+    let links: Vec<&str> = media.iter().map(|m| m.url.as_str()).collect();
+    Ok((format, Some(serde_json::json!({ "media": links }))))
+}
+
+/// Save a video's still as `thumbnail.<ext>`, the first of `urls` that
+/// works. The video plays without one, so failing only gets a warning.
+async fn fetch_still(urls: &[String], work: &Path) {
+    if let Err(e) = fetch_any(urls, work, "thumbnail").await {
+        eprintln!("warning: x: no still for the video: {e:#}");
+    }
+}
+
+/// A video's size as X's link names it (`.../vid/avc1/1920x1080/<id>.mp4`).
+fn video_size(url: &str) -> Option<&str> {
+    let number = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    url.split(['/', '?']).find(|part| {
+        part.split_once('x')
+            .is_some_and(|(w, h)| number(w) && number(h))
+    })
+}
+
+/// Download the video file at `url` into `work` as `video.<ext>` with
+/// yt-dlp, which reports its progress as it goes.
+async fn fetch_video_file(
+    url: &str,
+    work: &Path,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<()> {
+    let mut cmd = crate::tools::yt_dlp()?;
+    cmd.arg("--no-playlist");
+    report_progress(&mut cmd);
+    cmd.arg("-o")
+        .arg(work.join("video.%(ext)s"))
+        .arg("--print")
+        .arg(PRINT_WRITTEN)
+        .arg(url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let printed = run_yt_dlp(&mut cmd, progress).await?;
+    match parse_written(&printed).as_slice() {
+        [] => bail!("yt-dlp reported no downloaded file"),
+        [only] => rename_to_video(&only.path, work),
+        written => bail!("yt-dlp wrote {} files; expected one", written.len()),
+    }
+}
+
+/// Download the first of `urls` that works into `work` as `<stem>.<ext>`:
+/// the same picture at different sizes, the largest first.
+async fn fetch_any(urls: &[String], work: &Path, stem: &str) -> Result<PathBuf> {
+    let mut failed = anyhow!("no link to the {stem}");
+    for url in urls {
+        match fetch_file(url, work, stem).await {
+            Ok(path) => return Ok(path),
+            Err(e) => failed = e,
+        }
+    }
+    Err(failed)
+}
+
+/// Whether `e` came from a server saying there's no such file (HTTP 404 or
+/// 410), from yt-dlp or from `fetch_file`.
+fn is_not_found(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<ureq::Error>(),
+            Some(ureq::Error::StatusCode(404 | 410))
+        )
+    }) || ["HTTP Error 404", "HTTP Error 410"]
+        .iter()
+        .any(|code| format!("{e:#}").contains(code))
+}
+
 /// Download `url` into `work` as `<stem>.<ext>`, the extension from what the
 /// file turns out to be. Returns its path. For Instagram's media links, which
-/// are signed and need no login.
+/// are signed and need no login, and X's, which need none either.
 async fn fetch_file(url: &str, work: &Path, stem: &str) -> Result<PathBuf> {
     let url = url.to_string();
     let work = work.to_path_buf();
@@ -1011,6 +1161,7 @@ mod tests {
             title: title.map(Into::into),
             author_name: author_name.map(Into::into),
             added_on: "2026-10-12".into(),
+            listing_json: "{}".into(),
         }
     }
 
@@ -1078,6 +1229,29 @@ mod tests {
         );
         assert_eq!(parse_progress("395+251\topus\t240\t/w/video.webm"), None);
         assert_eq!(parse_progress("joyscroller-progress\tNA\tNA"), None);
+    }
+
+    #[test]
+    fn reads_the_size_from_an_x_video_link() {
+        assert_eq!(
+            video_size("https://video.twimg.com/amplify_video/1/vid/avc1/1920x1080/a.mp4?tag=29"),
+            Some("1920x1080")
+        );
+        assert_eq!(
+            video_size("https://video.twimg.com/tweet_video/HUnSYd.mp4"),
+            None
+        );
+    }
+
+    #[test]
+    fn tells_a_missing_file_apart() {
+        let missing =
+            anyhow!("yt-dlp failed: ERROR: Unable to download webpage: HTTP Error 404: Not Found");
+        assert!(is_not_found(&missing.context("downloading")));
+        assert!(!is_not_found(&anyhow!("yt-dlp failed: HTTP Error 503")));
+        let gone =
+            anyhow::Error::from(ureq::Error::StatusCode(404)).context("downloading image-01");
+        assert!(is_not_found(&gone));
     }
 
     #[test]

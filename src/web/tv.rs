@@ -246,13 +246,14 @@ fn tv_html(channel: Channel) -> String {
          <dt>Now</dt><dd class=\"tv-now\">…</dd>\n\
          <dt>Next</dt><dd class=\"tv-next\">…</dd>\n\
          </dl>\n\
-         <p class=\"tv-keys\">↑ ↓ or 1–4 change the channel · + − turn the volume · M mutes · \
+         <p class=\"tv-keys\">↑ ↓ or 1–{last} change the channel · + − turn the volume · M mutes · \
          P switches the set off and on · F fills the screen</p>\n\
          </div>\n\
          </div>\n\
          <script type=\"module\" src=\"/assets/tv.js\"></script>\n",
         set = set_html(channel),
         slug = channel.slug(),
+        last = Channel::ALL.len(),
         down = href(step(Channel::ALL.len() - 1)),
         up = href(step(1)),
     )
@@ -420,7 +421,7 @@ mod tests {
         assert!(html.contains("href=\"/tv/youtube\" data-step=\"-1\""));
         assert!(html.contains("href=\"/tv/instagram\" data-step=\"1\""));
         let all = tv_html(Channel::All);
-        assert!(all.contains("href=\"/tv/instagram\" data-step=\"-1\""));
+        assert!(all.contains("href=\"/tv/x\" data-step=\"-1\""));
     }
 
     #[test]

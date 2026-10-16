@@ -68,15 +68,17 @@ pub enum Channel {
     YouTube,
     TikTok,
     Instagram,
+    X,
 }
 
 impl Channel {
     /// In the order of their numbers, from 1.
-    pub const ALL: [Channel; 4] = [
+    pub const ALL: [Channel; 5] = [
         Channel::All,
         Channel::YouTube,
         Channel::TikTok,
         Channel::Instagram,
+        Channel::X,
     ];
 
     /// Its name in URLs: `/tv/<slug>`.
@@ -86,6 +88,7 @@ impl Channel {
             Channel::YouTube => "youtube",
             Channel::TikTok => "tiktok",
             Channel::Instagram => "instagram",
+            Channel::X => "x",
         }
     }
 
@@ -95,6 +98,7 @@ impl Channel {
             Channel::YouTube => "YouTube",
             Channel::TikTok => "TikTok",
             Channel::Instagram => "Instagram",
+            Channel::X => "X",
         }
     }
 

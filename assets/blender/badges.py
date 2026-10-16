@@ -4,10 +4,10 @@ light (radio.py), all facing the camera:
 - splat.png: the top bar's orange splat, a soft molded badge on the outline
   splat.svg has (a little fuller), with its two droplets, a little in front of the bar so it
   casts a shadow on it. The lettering stays live text on the page.
-- icon-likes, icon-youtube, icon-tiktok, icon-instagram, icon-downloading
-  (.png): the section icons. A pink heart, a red play tile, a black tile
-  with TikTok's offset note, Instagram's gradient tile with its camera, and
-  a green download button.
+- icon-likes, icon-youtube, icon-tiktok, icon-instagram, icon-x,
+  icon-downloading (.png): the section icons. A pink heart, a red play
+  tile, a black tile with TikTok's offset note, Instagram's gradient tile
+  with its camera, a black tile with X's letter, and a green download button.
 
     blender -b -P assets/blender/badges.py -- /tmp/r [samples]
     for f in /tmp/r/*.png; do cwebp -q 90 -alpha_q 100 -m 6 $f -o assets/$(basename ${f%.png}).webp; done
@@ -372,6 +372,14 @@ lens = [(0.55 * math.cos(2 * math.pi * k / 48), -0.74, 0.55 * math.sin(2 * math.
 stroke("lens", lens, 0.17, M["white"], INSTAGRAM)
 ball("flash", (0.6, -0.74, 0.6), 0.16, M["white"], INSTAGRAM)
 
+X = group("x")
+pillow("tile", rrect(0, 0, 3.7, 3.7, 0.95), 0.55, 0.5, 0.06, M["black"], X)
+# X's letter in white rods: the falling stroke is drawn as an outline, as
+# in the logo, and the rising one stops either side of it.
+stroke("fall", [(x, -0.74, z) for x, z in ((-1.05, 1.1), (-0.6, 1.1), (1.05, -1.1), (0.6, -1.1), (-1.05, 1.1))], 0.12, M["white"], X)
+stroke("rise-low", [(-0.95, -0.74, -1.1), (-0.24, -0.74, -0.28)], 0.12, M["white"], X)
+stroke("rise-high", [(0.24, -0.74, 0.28), (0.95, -0.74, 1.1)], 0.12, M["white"], X)
+
 DOWNLOAD = group("downloading")
 circle = [(1.95 * math.cos(2 * math.pi * k / 160), 1.95 * math.sin(2 * math.pi * k / 160)) for k in range(160)]
 pillow("button", circle, 0.75, 1.3, 0.06, M["green"], DOWNLOAD)
@@ -481,5 +489,5 @@ img.filepath_raw = out
 img.file_format = "PNG"
 img.save()
 
-for g in (LIKES, YOUTUBE, TIKTOK, INSTAGRAM, DOWNLOAD):
+for g in (LIKES, YOUTUBE, TIKTOK, INSTAGRAM, X, DOWNLOAD):
     render(g, f"icon-{g.name}", 160, 160, 4.2, exposure=-0.15)

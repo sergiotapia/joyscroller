@@ -686,3 +686,40 @@ fn glob_characters_in_a_pattern_are_punctuation() {
     // As a GLOB class, "[a-z]" would match the "q" of "Question".
     assert!(found(&conn, "[a-z]uestion*").is_empty());
 }
+
+#[test]
+fn finds_x_posts_by_display_name_and_quoted_post() {
+    let mut conn = memory_db();
+    let quoting = r#"{"core": {"user_results": {"result": {"core": {"name": "Poster Person"}}}},
+        "quoted_status_result": {"result": {
+            "core": {"user_results": {"result": {"core": {"screen_name": "konami", "name": "Konami"}}}},
+            "legacy": {"full_text": "Castlevania out now"}}}}"#;
+    let long = r#"{"quoted_status_result": {"result": {
+        "note_tweet": {"note_tweet_results": {"result": {"text": "a long post about turtles"}}},
+        "legacy": {"full_text": "a long post about…"}}}}"#;
+    insert_new(
+        &mut conn,
+        "x",
+        &[
+            NewVideo {
+                title: Some("look at this"),
+                author_name: Some("poster"),
+                listing_json: quoting,
+                ..new_video("1", true)
+            },
+            NewVideo {
+                title: Some("wow"),
+                listing_json: long,
+                ..new_video("2", true)
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(found(&conn, "\"poster person\""), ["1"]);
+    assert_eq!(found(&conn, "castlevania"), ["1"]);
+    assert_eq!(found(&conn, "konami"), ["1"]);
+    assert_eq!(found(&conn, "turtles"), ["2"]);
+    // A download changes nothing: an X post's description is its quote.
+    download(&mut conn, "x", "1");
+    assert_eq!(found(&conn, "castlevania"), ["1"]);
+}

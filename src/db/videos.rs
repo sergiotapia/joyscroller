@@ -18,7 +18,8 @@ pub struct NewVideo<'a> {
     pub duration_seconds: Option<u64>,
     pub available: bool,
     pub listing_json: &'a str,
-    /// `video`, or `photo` for a TikTok slideshow or an Instagram photo or carousel.
+    /// `video`, or `photo` for a TikTok slideshow, an Instagram photo or
+    /// carousel, or an X post with pictures or more than one video.
     pub kind: &'a str,
     pub posted_at: Option<i64>,
 }
@@ -104,7 +105,7 @@ pub struct StoredVideo {
     pub available: bool,
     pub kind: String,
     /// What sort of post it is, finer than `kind` (`POST_TYPE`): `video`,
-    /// `slideshow` (TikTok), `photo` or `carousel` (Instagram).
+    /// `slideshow` (TikTok), `photo` (Instagram, X) or `carousel` (Instagram).
     pub post_type: String,
     pub posted_at: Option<i64>,
     pub added_at: i64,
@@ -115,14 +116,15 @@ pub struct StoredVideo {
 
 /// What sort of post a row of `videos v` is, for the sidebar's types: a
 /// `video`, or one of the kinds of `photo` post, which `kind` lumps
-/// together because they play the same way: a TikTok `slideshow`, or an
-/// Instagram `photo` or `carousel` (its `media_type`, 1 or 8, from the list).
+/// together because they play the same way: a TikTok `slideshow`, an
+/// Instagram `photo` or `carousel` (its `media_type`, 1 or 8, from the list),
+/// or an X post's pictures (or more than one picture or video).
 macro_rules! post_type_sql {
     () => {
         "CASE WHEN v.kind = 'video' THEN 'video' \
            WHEN v.platform = 'instagram' AND json_extract(v.listing_json, '$.media_type') = 8 \
              THEN 'carousel' \
-           WHEN v.platform = 'instagram' THEN 'photo' \
+           WHEN v.platform IN ('instagram', 'x') THEN 'photo' \
            ELSE 'slideshow' END"
     };
 }

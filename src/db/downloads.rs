@@ -18,12 +18,14 @@ pub struct PendingDownload {
     pub author_name: Option<String>,
     /// The local calendar date of `added_at`, as `YYYY-MM-DD`.
     pub added_on: String,
+    /// The entry from the liked list, which for X holds the media's links.
+    pub listing_json: String,
 }
 
 /// `PendingDownload`'s columns, for `pending_from_row`. SQLite turns
 /// `added_at` into a date in the system's time zone, the user's own.
 pub(super) const PENDING_COLUMNS: &str = "v.platform, v.video_id, v.url, v.kind, v.title, v.author_name, \
-     date(v.added_at, 'unixepoch', 'localtime')";
+     date(v.added_at, 'unixepoch', 'localtime'), v.listing_json";
 
 pub(super) fn pending_from_row(r: &rusqlite::Row) -> rusqlite::Result<PendingDownload> {
     Ok(PendingDownload {
@@ -34,6 +36,7 @@ pub(super) fn pending_from_row(r: &rusqlite::Row) -> rusqlite::Result<PendingDow
         title: r.get(4)?,
         author_name: r.get(5)?,
         added_on: r.get(6)?,
+        listing_json: r.get(7)?,
     })
 }
 
