@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Changed
+
+- The search box no longer pops up a list of your past searches as you type.
+
 ## [0.11.0] - 2026-10-15
 
 ### Added

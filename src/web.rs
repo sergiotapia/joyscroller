@@ -920,7 +920,7 @@ fn search_html(view: &ListView) -> String {
     format!(
         "<form class=\"search\" method=\"get\" action=\"/\" role=\"search\">\
          <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search titles, descriptions, authors\" \
-         aria-label=\"Search likes\">{platform}\
+         aria-label=\"Search likes\" autocomplete=\"off\">{platform}\
          <button class=\"button\" type=\"submit\">Search</button>{extra}</form>\n",
         escape(&view.q),
     )
