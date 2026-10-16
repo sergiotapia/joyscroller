@@ -3,15 +3,27 @@
 // the photo slideshow (with a carousel's videos among its pictures),
 // starting a photo post's sound when the browser held it back, and saying so
 // when a file can't play here.
+//
+// A video's page has one player, set up as it loads. /tv (tv.js) puts
+// players in and takes them out as shows come and go: it sets each up with
+// `setUp`, and aborting `signal` takes away the listeners it added outside
+// the player. A player that gives up on its file fires `player-failed`.
 
-for (const show of document.querySelectorAll(".slideshow")) slideshow(show);
+setUp(document);
+
+export function setUp(root, signal) {
+  for (const show of root.querySelectorAll(".slideshow")) slideshow(show, signal);
+  for (const audio of root.querySelectorAll("audio[autoplay]")) startWhenAllowed(audio, signal);
+  for (const video of root.querySelectorAll(".player video[data-copy]")) pick(video);
+  for (const media of root.querySelectorAll(".player video:not(.slide-video), .player audio")) watchFailure(media);
+}
 
 // The pictures sit side by side in a strip that slides along: the arrows,
 // the dots and the arrow keys turn one picture, and dragging pulls the
 // strip with the pointer, which lets go onto the nearest picture. A quick
 // flick turns the page even when it's short. A video among the pictures (an
 // Instagram carousel's) plays while it's shown and pauses when it isn't.
-function slideshow(show) {
+function slideshow(show, signal) {
   const strip = show.querySelector(".slides");
   const pictures = [...strip.children];
   const dots = [...show.querySelectorAll(".slide-dot")];
@@ -53,13 +65,15 @@ function slideshow(show) {
   dots.forEach((dot, i) => dot.addEventListener("click", () => go(i)));
   addEventListener("keydown", (e) => {
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    // A player waiting off screen, as /tv's next show does, isn't turned.
+    if (show.closest("[inert]")) return;
     // The seek and volume sliders use the arrow keys themselves.
     if (e.target.closest?.("[role=slider], input, textarea")) return;
     const step = { ArrowLeft: -1, ArrowRight: 1 }[e.key];
     if (!step) return;
     e.preventDefault();
     go(index + step);
-  });
+  }, { signal });
 
   let drag = null;
   strip.addEventListener("pointerdown", (e) => {
@@ -113,7 +127,7 @@ function slideshow(show) {
 // counts), so when it's held back, the first click or arrow key on the page
 // starts it. A click on the strip's own controls is left to them: starting
 // the sound there would have the play button pause it straight away.
-for (const audio of document.querySelectorAll("audio[autoplay]")) {
+function startWhenAllowed(audio, signal) {
   const start = (e) => {
     if (e.type === "keydown" && !["ArrowLeft", "ArrowRight"].includes(e.key)) return;
     stop();
@@ -124,8 +138,8 @@ for (const audio of document.querySelectorAll("audio[autoplay]")) {
     removeEventListener("pointerdown", start, true);
     removeEventListener("keydown", start, true);
   };
-  addEventListener("pointerdown", start, true);
-  addEventListener("keydown", start, true);
+  addEventListener("pointerdown", start, { capture: true, signal });
+  addEventListener("keydown", start, { capture: true, signal });
   audio.addEventListener("playing", stop, { once: true });
 }
 
@@ -134,7 +148,6 @@ for (const audio of document.querySelectorAll("audio[autoplay]")) {
 // says it decodes it smoothly and power-efficiently, which in practice means
 // in hardware. "Can play" isn't enough: a Tesla or an older phone can decode
 // AV1 in software and stutters through it, draining the battery.
-for (const video of document.querySelectorAll(".player video[data-copy]")) pick(video);
 
 async function pick(video) {
   let original = false;
@@ -183,13 +196,14 @@ function use(video, src) {
 // yet, or its file has gone), the page asks for one and reloads into it
 // once it's made.
 // A slideshow's videos are left out: a slide that won't play just stays dark.
-for (const media of document.querySelectorAll(".player video:not(.slide-video), .player audio")) {
+function watchFailure(media) {
   const note = media.closest(".player").querySelector(".player-error");
   const failed = () => {
     const copy = media.dataset.copy;
     if (copy && media.getAttribute("src") !== copy) return use(media, copy);
     if (!note.hidden) return;
     note.hidden = false;
+    media.dispatchEvent(new Event("player-failed", { bubbles: true }));
     if (media.dataset.convert) {
       fetch(media.dataset.convert, { method: "POST" })
         .then((response) => {

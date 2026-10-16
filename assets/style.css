@@ -65,6 +65,8 @@ body {
 a { color: var(--luna-link); }
 code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap: anywhere; }
 .icon { width: 20px; height: 20px; flex: none; vertical-align: middle; }
+/* TV's icon: the player's red play dome, the top frame of its sprite. */
+.icon-tv { display: inline-block; background: url("/assets/dome-play.webp") 0 0 / 100% 200% no-repeat; }
 
 /* ---- Top bar ---------------------------------------------------------- */
 
@@ -142,6 +144,13 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
   margin: 0 auto;
   padding: 26px 22px 30px;
 }
+
+/* TV is just the set on the desktop: no side panel, and no window around
+   it, only its contents (room left for the casing's bumper). */
+.shell.bare { grid-template-columns: minmax(0, 1fr); }
+.shell.bare > .panel, .shell.bare .titlebar, .shell.bare .statusbar { display: none; }
+.shell.bare > .window { overflow: visible; background: none; border: 0; box-shadow: none; }
+.shell.bare .window-body { margin: 0; padding: 28px 28px 0; background: none; border: 0; }
 
 /* ---- MSN side panel ---------------------------------------------------- */
 

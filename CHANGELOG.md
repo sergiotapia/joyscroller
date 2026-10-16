@@ -4,6 +4,14 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- TV: a new page that plays your downloaded likes like television, in shuffled order, on four channels: everything, YouTube, TikTok and Instagram. Like real TV, a channel keeps going whether you watch or not, so you join a show partway through, and flipping away and back finds it further along. Nothing repeats until everything on the channel has aired, the same creator doesn't come up twice in a row, and every show plays at the same volume, however loud or quiet it was posted. Change channels with the remote under the screen, the ↑ and ↓ keys or 1–4. Videos over 10 minutes air a 10-minute stretch, and the guide under the screen links to each show's page.
+
+### Fixed
+
+- A download could occasionally fail to be recorded with "database is locked" when something else wrote to the archive at the same moment. It now waits its turn.
+
 ## [0.10.0] - 2026-10-15
 
 ### Added

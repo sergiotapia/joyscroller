@@ -1,0 +1,188 @@
+/* /tv (src/web/tv.rs, assets/tv.js): the video page's player as a TV.
+   Two players sit in one grid cell; only the one on air is shown, and the
+   other loads the next show behind it. Every show gets the same 16:9
+   screen, so a portrait TikTok after a widescreen YouTube video gets bars
+   at its sides rather than the set changing shape. Over the screen's glass
+   go the static shown while tuning, the channel's number in the corner,
+   and the power button. Uses style.css's colors and fonts and player.css's
+   casing. */
+
+.tv { display: grid; justify-items: center; gap: 12px; }
+
+/* As wide as the window allows, and short enough that the remote and the
+   guide fit under it in a window as tall as player.css allows a screen:
+   the casing adds 18px a side and the 72px strip below. */
+.tv-screen {
+  position: relative;
+  display: grid;
+  width: min(100%, calc((var(--screen-height) - 180px) * 16 / 9 + 36px));
+  margin: 0 0 30px;
+}
+.tv-stage { grid-area: 1 / 1; min-width: 0; }
+.tv-stage:not(.on-air) { visibility: hidden; }
+.tv .player { grid-template-columns: minmax(0, 1fr); width: 100%; min-width: 0; margin: 0; }
+.tv .player-screen { width: 100%; aspect-ratio: 16 / 9; }
+.tv .player-screen > video { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; object-fit: contain; }
+/* tv.js tells the slideshow when to turn; its own shape is the screen's. */
+.tv .slideshow { height: auto; aspect-ratio: 16 / 9 !important; }
+.tv .player-start { display: none; }
+
+/* ---- Over the glass ------------------------------------------------------ */
+
+.tv-glass {
+  position: relative;
+  z-index: 1;
+  grid-area: 1 / 1;
+  margin: 18px 18px 72px;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: 14px;
+}
+
+/* Snow: noise drawn by an SVG filter, jumping about a few times a frame. */
+.tv-static {
+  position: absolute;
+  inset: -50%;
+  opacity: 0;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .5 0 0 0 0 .5 0 0 0 0 .5 0 0 0 1.6 -.3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E"),
+    #222;
+  transition: opacity .12s;
+  animation: snow .24s steps(6) infinite;
+}
+.tv.tuning .tv-static { opacity: 1; transition: none; }
+@keyframes snow {
+  0% { transform: translate(0, 0); }
+  20% { transform: translate(-7%, 4%); }
+  40% { transform: translate(5%, -9%); }
+  60% { transform: translate(-3%, 8%); }
+  80% { transform: translate(9%, 2%); }
+  100% { transform: translate(-6%, -5%); }
+}
+
+/* The channel's number, lit up in the corner for a few seconds after
+   tuning, in the clock radio's LCD digits. Top left: a photo post counts
+   its pictures in the top right. */
+.tv-bug {
+  position: absolute;
+  top: 14px;
+  left: 18px;
+  display: grid;
+  justify-items: start;
+  color: var(--slime);
+  text-shadow: 0 0 8px rgba(166, 229, 43, .7), 2px 2px 0 rgba(0, 0, 0, .7);
+  opacity: 0;
+}
+.tv-bug b { font: 44px/1 "DSEG7", monospace; }
+.tv-bug span { font: 600 15px/1.4 "Fredoka", sans-serif; letter-spacing: .06em; text-transform: uppercase; }
+.tv-bug.shown { animation: bug 3.2s forwards; }
+.tv.tuning .tv-bug { opacity: 1; animation: none; }
+@keyframes bug { 0%, 80% { opacity: 1; } 100% { opacity: 0; } }
+
+.tv-off {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 24px;
+  color: #fff;
+  font: 600 18px/1.4 "Fredoka", sans-serif;
+  text-align: center;
+  background: rgba(7, 4, 15, .82);
+}
+.tv-off[hidden] { display: none; }
+
+/* The player's red dome, as the power button: a click is what lets the
+   browser play sound. */
+.tv-power {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 0;
+  color: #fff;
+  font: 26px/1 "Luckiest Guy", sans-serif;
+  letter-spacing: .04em;
+  text-shadow: 2px 3px 0 var(--purple-dark);
+  cursor: pointer;
+  pointer-events: auto;
+  background: rgba(7, 4, 15, .45);
+  border: 0;
+}
+.tv-power[hidden] { display: none; }
+.tv-power::before {
+  content: "";
+  width: 128px;
+  height: 128px;
+  background: url("/assets/dome-play.webp") 0 0 / 100% 200% no-repeat;
+}
+.tv-power:hover::before { filter: brightness(1.06); }
+.tv-power:active::before { background-position: 0 100%; }
+
+/* ---- The remote and the guide -------------------------------------------- */
+
+.tv-remote { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.tv-remote a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 6px 8px;
+  color: #fff;
+  font: 600 15px/1.2 "Fredoka", sans-serif;
+  text-decoration: none;
+  background: linear-gradient(var(--violet), var(--purple));
+  border: 2px solid var(--purple-dark);
+  border-radius: 999px;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, .3), 0 3px 0 var(--purple-dark);
+}
+.tv-remote a:hover { filter: brightness(1.1); }
+.tv-remote a:active { transform: translateY(2px); box-shadow: inset 0 2px 0 rgba(255, 255, 255, .3), 0 1px 0 var(--purple-dark); }
+.tv-remote b {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--purple-dark);
+  font: 15px/1 "DSEG7", monospace;
+  background: #3b4a1d;
+  border-radius: 6px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .6);
+}
+.tv-remote a[aria-current] b { color: var(--slime); text-shadow: 0 0 6px rgba(166, 229, 43, .8); }
+.tv-remote a[aria-current] { background: linear-gradient(#b48cff, var(--violet)); }
+.tv-remote .tv-step { padding: 6px 14px; background: linear-gradient(#ff5b52, var(--dome)); border-color: #8a1410; box-shadow: inset 0 2px 0 rgba(255, 255, 255, .3), 0 3px 0 #8a1410; }
+
+.tv-guide {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  width: min(100%, 760px);
+  margin: 4px 0 0;
+}
+/* Straight on the desktop's dark backdrop, so light text with a shadow. */
+.tv-guide, .tv-keys { color: #fff; text-shadow: 1px 1px 2px rgba(0, 0, 0, .9), 0 0 6px rgba(0, 0, 0, .6); }
+.tv-guide dt { color: var(--slime); font-weight: bold; text-transform: uppercase; font-size: 11px; line-height: 20px; }
+.tv-guide dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv-guide a { color: #fff; }
+.tv-who, .tv-left { color: rgba(255, 255, 255, .72); }
+.tv-left { margin-left: 8px; font-variant-numeric: tabular-nums; }
+.tv-keys { margin: 0; font-size: 11px; text-align: center; color: rgba(255, 255, 255, .72); }
+
+/* ---- Fullscreen: the whole screen, both players, no casing ------------- */
+
+.tv-screen:fullscreen { width: 100%; height: 100%; margin: 0; background: #000; }
+.tv-screen:fullscreen .player { display: block; height: 100%; padding: 0; border-image: none; }
+.tv-screen:fullscreen .player-screen { height: 100%; aspect-ratio: auto !important; border-radius: 0; }
+.tv-screen:fullscreen .player-screen::before { display: none; }
+.tv-screen:fullscreen .player-strip { display: none; }
+.tv-screen:fullscreen .tv-glass { margin: 0; border-radius: 0; }
+.tv-screen:fullscreen { cursor: none; }
+
+/* A phone's strip has no room for the time as well; the guide says how
+   long the show has left. */
+@media (max-width: 480px) {
+  .tv .player-lcd { display: none; }
+}

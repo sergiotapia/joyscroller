@@ -5,12 +5,14 @@ mod download;
 mod filename;
 mod headless;
 mod instagram;
+mod loudness;
 mod pipeline;
 mod player;
 mod query;
 mod tiktok;
 mod tools;
 mod transcode;
+mod tv;
 mod web;
 mod youtube;
 

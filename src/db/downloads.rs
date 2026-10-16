@@ -150,7 +150,9 @@ pub fn record_download(
     done: &Downloaded,
 ) -> Result<()> {
     let at = now();
-    let tx = conn.transaction()?;
+    // Immediate: a deferred transaction that has to wait for another
+    // connection's write fails with "database is locked" instead of waiting.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         "INSERT INTO downloads \
            (platform, video_id, last_attempt_at, downloaded_at, folder, files_json, size_bytes, formats, metadata_json) \
@@ -176,11 +178,14 @@ pub fn record_download(
          WHERE platform = ?2 AND video_id = ?3 AND posted_at IS NULL",
         params![done.posted_at, platform, video_id],
     )?;
-    // A playback copy belongs to the files it was made from.
-    tx.execute(
-        "DELETE FROM playback_copies WHERE platform = ?1 AND video_id = ?2",
-        params![platform, video_id],
-    )?;
+    // A playback copy and a loudness measurement belong to the files they
+    // were made from.
+    for table in ["playback_copies", "loudness"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE platform = ?1 AND video_id = ?2"),
+            params![platform, video_id],
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }

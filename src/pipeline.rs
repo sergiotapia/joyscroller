@@ -12,6 +12,10 @@
 //! sluggish. A page that can't play a video's original asks for its copy,
 //! which puts it at the front.
 //!
+//! The meter measures each download's loudness (`loudness.rs`) for /tv, one
+//! at a time at low priority, newest first. It's quick (only the sound is
+//! decoded) and nobody waits on it, so it stays off the board.
+//!
 //! What the lanes, tracks and converter are doing is kept on a `Board`, which
 //! the web UI watches. Nothing about the pipeline is stored: the lanes and
 //! the converter pick up from the database when the app starts again, and a
@@ -27,9 +31,9 @@ use rusqlite::Connection;
 use tokio::sync::{Notify, watch};
 
 use crate::browser::Browser;
-use crate::db::{self, PendingDownload, PendingPlayback};
+use crate::db::{self, PendingDownload, PendingLoudness, PendingPlayback};
 use crate::download::{self, Credentials, Progress, Saved};
-use crate::transcode;
+use crate::{loudness, transcode};
 
 /// Whether the lanes download the backlog, every liked video (thousands of
 /// them) with the user's logins. When off, videos download only when asked
@@ -313,6 +317,8 @@ struct Shared {
     board: watch::Sender<Board>,
     /// Wakes the converter when there's a new download to convert.
     wake: Notify,
+    /// Wakes the meter when there's a new download to measure.
+    meter_wake: Notify,
     /// Videos whose copies pages asked for, to convert before the backlog.
     asked: Mutex<VecDeque<(String, String)>>,
 }
@@ -326,6 +332,7 @@ impl Shared {
             media_root: media_root.to_owned(),
             board: watch::Sender::new(Board::default()),
             wake: Notify::new(),
+            meter_wake: Notify::new(),
             asked: Mutex::new(VecDeque::new()),
         }
     }
@@ -365,6 +372,7 @@ impl Pipeline {
         // Copies are made on this computer from files already here, so the
         // converter runs whether or not the lanes do.
         tokio::spawn(run_converter(Arc::clone(&pipeline.shared)));
+        tokio::spawn(run_meter(Arc::clone(&pipeline.shared)));
         pipeline
     }
 
@@ -618,6 +626,7 @@ async fn download_job(shared: &Shared, conn: &mut Connection, job: &Job) -> bool
     shared.board.send_modify(|board| board.finish(job, outcome));
     if downloaded {
         shared.wake.notify_one();
+        shared.meter_wake.notify_one();
     }
     answered
 }
@@ -779,6 +788,65 @@ async fn convert_job(
         .board
         .send_modify(|board| board.finish_converting(job, outcome));
     ok
+}
+
+/// The meter: measure every download's loudness, one at a time, forever.
+/// Failures are recorded and logged; nothing stops it.
+async fn run_meter(shared: Arc<Shared>) {
+    let mut conn = loop {
+        match db::open(&shared.db_path) {
+            Ok(conn) => break conn,
+            Err(e) => {
+                eprintln!("loudness: can't open the database: {e:#}");
+                tokio::time::sleep(DB_RETRY).await;
+            }
+        }
+    };
+    loop {
+        match crate::tools::ffmpeg_ready() {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(e) => eprintln!("loudness: can't check for ffmpeg: {e:#}"),
+        }
+        tokio::time::sleep(TOOLS_RETRY).await;
+    }
+    loop {
+        match db::pending_loudness(&conn, 1).map(|mut next| next.pop()) {
+            Ok(Some(pending)) => {
+                if !measure_one(&shared, &mut conn, &pending).await {
+                    tokio::time::sleep(CONVERT_FAILURE_PAUSE).await;
+                }
+            }
+            Ok(None) => {
+                tokio::select! {
+                    () = shared.meter_wake.notified() => {}
+                    () = tokio::time::sleep(IDLE) => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("loudness: can't read the queue: {e:#}");
+                tokio::time::sleep(DB_RETRY).await;
+            }
+        }
+    }
+}
+
+/// Measure one download's loudness and record it. True unless it failed.
+async fn measure_one(shared: &Shared, conn: &mut Connection, pending: &PendingLoudness) -> bool {
+    let (platform, video_id) = (&pending.platform, &pending.video_id);
+    let measured =
+        loudness::measure(&shared.media_root.join(&pending.folder), &pending.files).await;
+    let recorded = match &measured {
+        Ok(found) => db::record_loudness(conn, pending, *found).map(|_| ()),
+        Err(e) => db::record_loudness_failure(conn, pending, &format!("{e:#}")),
+    };
+    if let Err(e) = &measured {
+        eprintln!("loudness: measuring {platform} video {video_id} failed: {e:#}");
+    }
+    if let Err(e) = &recorded {
+        eprintln!("loudness: couldn't record {platform} video {video_id}'s loudness: {e:#}");
+    }
+    measured.is_ok() && recorded.is_ok()
 }
 
 /// Store how a download went and log it. A failure counts as an attempt, so

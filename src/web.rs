@@ -2,7 +2,8 @@
 //! through the liked videos, newest first, on all platforms or one, sorted by
 //! any column or narrowed by a search, all kept in the URL; each video
 //! has its own page, with a button that has the download pipeline download it
-//! right away, and `/downloading` shows what the pipeline is doing. Every open page
+//! right away, `/downloading` shows what the pipeline is doing, and `/tv`
+//! plays what's downloaded as television (`web/tv.rs`). Every open page
 //! keeps a Server-Sent Events connection, over which newly stored videos, the
 //! per-platform counts, what each sync is doing and the pipeline's progress
 //! arrive as soon as they change. Once a video is downloaded, its page plays
@@ -34,6 +35,9 @@ use tower_http::services::ServeFile;
 use crate::db;
 use crate::pipeline::{Active, Board, Converter, Converting, Job, Lane, Outcome, Pipeline, Wait};
 use crate::player;
+use crate::tv::Tv;
+
+mod tv;
 
 /// Where the UI listens. Localhost only: the archive is the user's own.
 pub const ADDR: &str = "127.0.0.1:4774";
@@ -143,6 +147,8 @@ struct App {
     media_root: PathBuf,
     /// Set to true by the Turn off button; the app loop and the server stop.
     quit: Arc<watch::Sender<bool>>,
+    /// The TV channels' schedules.
+    tv: Arc<Tv>,
 }
 
 impl App {
@@ -171,6 +177,7 @@ pub async fn serve(
         pipeline,
         media_root,
         quit: Arc::new(quit),
+        tv: Arc::new(Tv::new(crate::tv::seed())),
     };
     let router = Router::new()
         .route("/", get(list_page))
@@ -188,6 +195,9 @@ pub async fn serve(
             get(media_file),
         )
         .route("/downloading", get(downloading_page))
+        .route("/tv", get(tv::all_page))
+        .route("/tv/{channel}", get(tv::channel_page))
+        .route("/tv/{channel}/lineup", get(tv::lineup))
         .route("/events", get(events))
         .route("/assets/{name}", get(asset))
         .route("/quit", post(turn_off))
@@ -229,11 +239,21 @@ You can close this tab.</p>\n\
 /// The stylesheets, scripts, fonts and pictures, as (name, type, contents).
 /// They're built into the executable, so the app stays a single file.
 /// `videojs.js` is Video.js 10, bundled by `just videojs`.
-const ASSETS: [(&str, &str, &[u8]); 33] = [
+const ASSETS: [(&str, &str, &[u8]); 35] = [
     (
         "style.css",
         "text/css; charset=utf-8",
         include_bytes!("../assets/style.css"),
+    ),
+    (
+        "tv.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../assets/tv.css"),
+    ),
+    (
+        "tv.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../assets/tv.js"),
     ),
     (
         "player.css",
@@ -1262,6 +1282,7 @@ enum Section<'a> {
     Likes(Option<&'a str>),
     /// One platform's posts of one type, e.g. TikTok's slideshows.
     PostType(&'a str, &'a str),
+    Tv,
     Downloading,
 }
 
@@ -1298,13 +1319,14 @@ struct NavEntry {
     label: &'static str,
     /// A post type under its platform: only in the side panel, indented.
     sub: bool,
-    /// What its `data-count` element is called in the live updates.
+    /// What its `data-count` element is called in the live updates, and
+    /// the count, if it has one.
     count_name: String,
-    count: usize,
+    count: Option<usize>,
 }
 
-/// The lists of likes, each platform followed by its post types, then the
-/// downloads. From a list, the links keep its search and order.
+/// The lists of likes, each platform followed by its post types, then TV
+/// and the downloads. From a list, the links keep its search and order.
 fn nav_entries(frame: &Frame) -> Vec<NavEntry> {
     let entry = |name: Option<&'static str>, post_type: Option<&'static str>, label| {
         let href = frame.list.map_or_else(
@@ -1325,7 +1347,7 @@ fn nav_entries(frame: &Frame) -> Vec<NavEntry> {
             label,
             sub: post_type.is_some(),
             count_name: count_name(name, post_type),
-            count: count_of(frame.counts, name, post_type),
+            count: Some(count_of(frame.counts, name, post_type)),
         }
     };
     let mut entries = vec![entry(None, None, "All likes")];
@@ -1336,12 +1358,20 @@ fn nav_entries(frame: &Frame) -> Vec<NavEntry> {
         }
     }
     entries.push(NavEntry {
+        section: Section::Tv,
+        href: "/tv".into(),
+        label: "TV",
+        sub: false,
+        count_name: String::new(),
+        count: None,
+    });
+    entries.push(NavEntry {
         section: Section::Downloading,
         href: "/downloading".into(),
         label: "Downloading",
         sub: false,
         count_name: "downloading".into(),
-        count: busy_count(frame.board),
+        count: Some(busy_count(frame.board)),
     });
     entries
 }
@@ -1363,33 +1393,42 @@ fn panel_html(frame: &Frame, entries: &[NavEntry]) -> String {
         entries
             .iter()
             .map(|entry| {
+                let count = entry
+                    .count
+                    .map(|count| {
+                        format!(
+                            "<span class=\"count\" data-count=\"{}\">{count}</span>",
+                            entry.count_name
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "<li{}><a href=\"{}\"{}>{}{}\
-                     <span class=\"count\" data-count=\"{}\">{}</span></a></li>\n",
+                    "<li{}><a href=\"{}\"{}>{}{}{count}</a></li>\n",
                     if entry.sub { " class=\"sub\"" } else { "" },
                     entry.href,
                     current(frame, entry.section),
                     if entry.sub { "" } else { icon(entry.section) },
                     entry.label,
-                    entry.count_name,
-                    entry.count
                 )
             })
             .collect::<Vec<_>>()
             .concat()
     };
-    let (likes, downloads) = entries.split_at(entries.len() - 1);
+    let (likes, rest) = entries.split_at(entries.len() - 2);
+    let (watch, downloads) = rest.split_at(1);
     format!(
         "<aside class=\"panel\">\n\
          {radio}\
          <nav>\n\
          <h2>Likes</h2>\n<ul class=\"menu\">\n{likes}</ul>\n\
+         <h2>Watch</h2>\n<ul class=\"menu\">\n{watch}</ul>\n\
          <h2>Downloads</h2>\n<ul class=\"menu\">\n{downloads}</ul>\n\
          </nav>\n\
          <h2>Sync</h2>\n<ul class=\"sync\" id=\"status\">\n{status}</ul>\n\
          </aside>\n",
         radio = radio_html(),
         likes = menu(likes),
+        watch = menu(watch),
         downloads = menu(downloads),
         status = status_html(frame.status),
     )
@@ -1432,7 +1471,7 @@ fn layout(frame: &Frame, main: &str) -> String {
          <span class=\"edition\">Archive Edition</span></a>\n\
          <nav class=\"quick\">\n{quick}</nav>\n\
          </header>\n\
-         <div class=\"shell\">\n\
+         <div class=\"shell{bare}\">\n\
          {panel}\
          <main class=\"window\">\n\
          <div class=\"titlebar\">{icon}<h1>{title}</h1>\
@@ -1463,7 +1502,7 @@ fn layout(frame: &Frame, main: &str) -> String {
         platform = match frame.current {
             Section::Likes(platform) => platform.unwrap_or(""),
             Section::PostType(platform, _) => platform,
-            Section::Downloading => "",
+            Section::Tv | Section::Downloading => "",
         },
         post_type = match frame.current {
             Section::PostType(_, post_type) => post_type,
@@ -1472,6 +1511,14 @@ fn layout(frame: &Frame, main: &str) -> String {
         live = u8::from(frame.live),
         player = if frame.player { PLAYER_HEAD } else { "" },
         panel = panel_html(frame, &entries),
+        // TV is just the set on the desktop: no side panel, no window
+        // around it. They stay in the page, hidden: the page script keeps
+        // the panel's clock and sync list up to date.
+        bare = if frame.current == Section::Tv {
+            " bare"
+        } else {
+            ""
+        },
         icon = icon(frame.current),
         footer = frame.footer,
         turn_off_dialog = turn_off_dialog(),
@@ -1631,6 +1678,8 @@ fn icon(section: Section) -> &'static str {
         Section::Downloading => {
             "<img class=\"icon\" src=\"/assets/icon-downloading.webp\" alt=\"\">"
         }
+        // The player's red play dome, the top frame of its sprite.
+        Section::Tv => "<span class=\"icon icon-tv\" aria-hidden=\"true\"></span>",
     }
 }
 
@@ -2824,6 +2873,7 @@ mod tests {
                 ("Videos", true),
                 ("Photos", true),
                 ("Carousels", true),
+                ("TV", false),
                 ("Downloading", false),
             ]
         );

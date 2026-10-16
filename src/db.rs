@@ -5,7 +5,8 @@
 //! Every query lives in this module and the ones under it, one per concern:
 //! `migrate` (the schema and its migrations), `videos`, `listings` (like
 //! order, and listings under way), `syncs`, `downloads`,
-//! `playback` (playback copies), `list` (the UI's pages and sorts) and
+//! `playback` (playback copies), `loudness` (how loud each download is),
+//! `tv` (what /tv can air), `list` (the UI's pages and sorts) and
 //! `search` (two FTS5 indexes over each video's text, queried with what
 //! `query.rs` parses). Callers use what's re-exported here.
 
@@ -17,12 +18,14 @@ use rusqlite::Connection;
 mod downloads;
 mod list;
 mod listings;
+mod loudness;
 mod migrate;
 mod playback;
 mod search;
 mod syncs;
 #[cfg(test)]
 mod test_support;
+mod tv;
 mod videos;
 
 pub use downloads::{
@@ -31,6 +34,9 @@ pub use downloads::{
 };
 pub use list::{Dir, Filter, Order, Sort, videos_count, videos_page};
 pub use listings::{Listing, finish_listing, open_listing, store_page};
+pub use loudness::{
+    Loudness, PendingLoudness, pending_loudness, record_loudness, record_loudness_failure,
+};
 pub use migrate::init;
 use migrate::{back_up_before_migrating, refuse_newer};
 pub use playback::{
@@ -39,6 +45,7 @@ pub use playback::{
     record_playback_failure,
 };
 pub use syncs::{finish_sync, full_sync_done, full_sync_due, start_sync};
+pub use tv::{Airable, airable};
 pub use videos::{
     NewVideo, StoredVideo, VideoCount, insert_new, last_rowid, video, video_counts, video_ids,
     videos_after,
