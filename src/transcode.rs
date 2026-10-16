@@ -15,6 +15,11 @@
 //! One whose picture is H.264 but whose container or sound isn't (YouTube's
 //! H.264 with Opus in `.mkv`) gets its picture copied as it is and only its
 //! sound converted.
+//!
+//! Only the app's pipeline runs this, so to try it, run a scratch copy of the
+//! app (AGENTS.md, "Trying the whole app") and watch /downloading. To try an
+//! encode setting by hand, use a clip of a few seconds (`ffmpeg -t 5`), not a
+//! whole video: encodes run on the user's own machine.
 
 use std::ffi::OsString;
 use std::path::Path;

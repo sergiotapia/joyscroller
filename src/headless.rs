@@ -8,6 +8,11 @@
 //!
 //! The browser gets a throwaway profile: it never opens or touches the user's
 //! real one, so it's safe to run while the user's browser is open.
+//!
+//! The `likes` subcommand for TikTok, Instagram or X runs it end to end
+//! (`cargo run -- likes --platform tiktok --limit 5`). It runs on the user's
+//! desktop: one at a time, muted (`--mute-audio`, set below), and gone
+//! afterwards, which `Running` sees to when a read is dropped partway.
 
 use std::process::Stdio;
 use std::time::Duration;

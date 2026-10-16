@@ -1,3 +1,10 @@
+//! The entry point. Plain `joyscroller` runs the app (`run_app`): the web UI,
+//! the download pipeline, and a sync of every platform right away and then
+//! every 5 minutes, each failure logged and retried on the next one. The
+//! subcommands are developer tools. Also the syncs themselves (`sync_youtube`,
+//! `sync_tiktok`, `sync_instagram`, `sync_x`), which tie each platform's
+//! listing to the database, and what the sidebar says when one fails (`advice`).
+
 mod browser;
 mod db;
 mod desktop;
@@ -37,6 +44,15 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// A platform we archive. Past this file, the rest of the app knows a
+/// platform by its stored name (`name`), so the compiler can't point out
+/// what a new one has to touch. Besides its own module and the matches here,
+/// that's `pace` in `pipeline.rs` (its `_` arm gives an unknown platform
+/// YouTube's pace), `Credentials::read`, the dispatch in `download` and
+/// `folder_name` in `download.rs`, `PLATFORMS`, `POST_TYPES`, `icon`,
+/// `short_title`, `author_label` and `author_html` in `web.rs`,
+/// `post_type_sql!` in `db/videos.rs`, `Channel` in `tv.rs`, `LOGINS` in
+/// `browser.rs`, and an icon rendered by `assets/blender/badges.py`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Platform {
     Youtube,

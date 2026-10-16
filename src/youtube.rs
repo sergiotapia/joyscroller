@@ -1,6 +1,8 @@
 //! Lists a user's liked YouTube videos by driving `yt-dlp` with cookies that
 //! `browser.rs` exported. We don't speak YouTube's API ourselves — yt-dlp is
 //! the maintained engine for that, and we just parse its JSON output.
+//!
+//! To try it against YouTube: `cargo run -- likes --limit 5`.
 
 use std::path::Path;
 use std::process::Stdio;

@@ -10,14 +10,21 @@
 //!   the request comes from a real browser with the user's cookies, like the
 //!   web app's.
 //! - The liked list only exists in the phone app's API: with a browser's user
-//!   agent it answers "useragent mismatch", and the web shows likes only in a
-//!   Bloks screen with no links to read. So it's asked for directly, with the
+//!   agent it answers "useragent mismatch" (seen 2026-10-15), and the web
+//!   shows likes only in a Bloks screen with no links to read. So it's asked for directly, with the
 //!   browser's cookies and the Android app's user agent, which a page's
 //!   `fetch` can't set.
 //!
 //! Photo posts and carousels are kept as `photo` posts. yt-dlp can't fetch
-//! their pictures, and both lists only offer them at 720 or 1080 pixels wide,
-//! so `photo_post` reads the full-size ones from the post's own page.
+//! their pictures, and both lists only offer them at 720 or 1080 pixels wide
+//! (seen 2026-10-15), so `photo_post` reads the full-size ones from the
+//! post's own page.
+//!
+//! The tests can't show this works against Instagram. To try it:
+//! `cargo run -- likes --platform instagram --limit 5` (no database), or
+//! `cargo run -- sync --platform instagram --db <scratch>.db`. A full read
+//! of the liked list is slow on purpose (`LIKED_PAGE_PAUSE`), and repeating
+//! one risks the account being flagged, so don't loop it.
 
 use std::time::Duration;
 
@@ -55,7 +62,8 @@ const PAGE_PAUSE: Duration = Duration::from_secs(1);
 
 /// The liked list's pause between pages, as the shortest and longest: a
 /// random length in between. At a page a second, a first full read got
-/// Instagram's "Try Again Later" block after about 1,300 posts. An ordinary
+/// Instagram's "Try Again Later" block after about 1,300 posts (seen
+/// 2026-10-15). An ordinary
 /// sync reads a page or two, so only a full read takes long at this pace.
 const LIKED_PAGE_PAUSE: (Duration, Duration) = (Duration::from_secs(5), Duration::from_secs(10));
 
@@ -834,6 +842,10 @@ fn is_cdn_url(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    // Built by hand in the shape of the saved list's answer: only the fields
+    // the parser reads, with made-up values. A live read
+    // (`likes --platform instagram`) went through the same parser on
+    // 2026-10-16.
     const PAGE: &str = r#"{
         "num_results": 5, "more_available": true, "next_max_id": "QVFC==", "status": "ok",
         "items": [
@@ -880,7 +892,9 @@ mod tests {
 
     #[test]
     fn parses_a_page_of_liked_posts() {
-        // Unwrapped items, and a numeric cursor.
+        // Unwrapped items, and a numeric cursor. Built by hand in the shape of
+        // the phone API's answer, like `PAGE`. It was last read live on
+        // 2026-10-15; a read on 2026-10-16 met Instagram's block instead.
         let body = r#"{
             "num_results": 2, "more_available": true, "next_max_id": 4007916203002916272, "status": "ok",
             "items": [

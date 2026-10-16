@@ -270,6 +270,10 @@ pub fn ffprobe() -> Result<Command> {
 pub struct Running(Child);
 
 impl Running {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one place tools start; everything else comes through here"
+    )]
     pub fn spawn(cmd: &mut Command) -> std::io::Result<Running> {
         #[cfg(unix)]
         cmd.process_group(0);

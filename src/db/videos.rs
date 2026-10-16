@@ -118,7 +118,9 @@ pub struct StoredVideo {
 /// `video`, or one of the kinds of `photo` post, which `kind` lumps
 /// together because they play the same way: a TikTok `slideshow`, an
 /// Instagram `photo` or `carousel` (its `media_type`, 1 or 8, from the list),
-/// or an X post's pictures (or more than one picture or video).
+/// or an X post's pictures (or more than one picture or video). The sidebar
+/// lists these names under each platform (`POST_TYPES` in `web.rs`), so a new
+/// one goes there too.
 macro_rules! post_type_sql {
     () => {
         "CASE WHEN v.kind = 'video' THEN 'video' \

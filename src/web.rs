@@ -68,7 +68,8 @@ const PLATFORMS: [(&str, &str); 4] = [
 
 /// The kinds of post the side panel lists under each platform, as
 /// (platform, post type as `db::Filter` names it, label). YouTube's are all
-/// videos, so it has none.
+/// videos, so it has none. The post types are the names `post_type_sql!` in
+/// `db/videos.rs` gives; one it never gives lists nothing, with no error.
 const POST_TYPES: [(&str, &str, &str); 7] = [
     ("tiktok", "video", "Videos"),
     ("tiktok", "slideshow", "Slideshows"),

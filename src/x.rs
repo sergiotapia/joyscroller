@@ -5,7 +5,7 @@
 //! cookies, and parse the posts ourselves.
 //!
 //! X's own page signs each API request (`x-client-transaction-id`), but the
-//! bookmark and like lists answer without it. The query ids and the long
+//! bookmark and like lists answer without it (seen 2026-10-16). The query ids and the long
 //! list of feature flags each request carries change whenever X deploys, so
 //! they're read from X's page rather than written down here: the page's own
 //! request for the bookmarks (`Session::open` loads it once a run, with
@@ -15,6 +15,11 @@
 //! The media links (`pbs.twimg.com`, `video.twimg.com`) aren't signed and
 //! don't expire, so unlike TikTok's and Instagram's they stay in the stored
 //! post, and the download reads them from there without asking X again.
+//!
+//! The tests can't show this works against X. To try it:
+//! `cargo run -- likes --platform x --limit 5` (no database), or
+//! `cargo run -- sync --platform x --db <scratch>.db`. Each run learns X's
+//! query ids afresh, so either one also checks that the learning still works.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -48,7 +53,8 @@ const LIKES_REFERRER: &str = "https://x.com/i/history/likes";
 const PAGE_SIZE: u32 = 20;
 
 /// The pause between pages, as the shortest and longest: a random length in
-/// between. X allows 500 requests per list every 15 minutes; this is about a
+/// between. X allows 500 requests per list every 15 minutes (as of
+/// 2026-10-16); this is about a
 /// page every few seconds, like someone scrolling.
 const PAGE_PAUSE: (Duration, Duration) = (Duration::from_secs(2), Duration::from_secs(4));
 
@@ -564,7 +570,7 @@ fn parse_page(status: u64, body: &str) -> Result<Page> {
             .into());
         }
         // "Query not found" for an id X has retired, and a 400 naming the
-        // flags it now wants.
+        // flags it now wants (both seen 2026-10-16).
         400 | 404 => {
             return Err(Refused {
                 why: Refusal::Outdated,
@@ -916,6 +922,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    // Built by hand in the shape of the `Bookmarks` and `Likes` answers: only
+    // the fields the parser reads, with made-up values. A live read
+    // (`likes --platform x`) went through the same parser on 2026-10-16, so
+    // when one fails, check X's answer against these paths before the code.
 
     fn video(id: &str, variants: &Value) -> Value {
         json!({"type": "video", "media_url_https": format!("https://pbs.twimg.com/amplify_video_thumb/{id}/img/t.jpg"),

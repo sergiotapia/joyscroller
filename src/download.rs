@@ -37,8 +37,8 @@ use crate::{instagram, tiktok, x};
 /// For TikTok: the best video stream, and separately the best file that has
 /// both picture and sound. TikTok's highest qualities are video-only, and the
 /// audio-only format yt-dlp would pair them with is the post's *sound* (the
-/// song as a standalone track), not the video's own audio, so the real audio
-/// has to come from a combined file. yt-dlp can't merge two files that both
+/// song as a standalone track; seen 2026-10-12), not the video's own audio,
+/// so the real audio has to come from a combined file. yt-dlp can't merge two files that both
 /// have video (it drops the second one silently), so `mux` does it instead.
 const TIKTOK_FORMATS: &str = "bv*,b";
 
@@ -544,7 +544,7 @@ pub fn is_unavailable(e: &anyhow::Error) -> bool {
 
 /// Whether yt-dlp's `errors` say TikTok no longer shows the video. TikTok
 /// keeps such a video in the liked list, and its page says "Video currently
-/// unavailable" (status 10204), which yt-dlp words as "Your IP address is
+/// unavailable" (status 10204, seen 2026-10-15), which yt-dlp words as "Your IP address is
 /// blocked from accessing this post" though the same address opens TikTok
 /// fine. Other statuses it can't place come out as "Video not available".
 /// Private posts (a login error) aren't counted: they can come back.

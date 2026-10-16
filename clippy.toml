@@ -2,3 +2,13 @@
 doc-valid-idents = ["YouTube", "TikTok", "DevTools", "KWallet", ".."]
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# Tools start through tools::Running::spawn or tools::output, which put the
+# tool in a process group of its own and kill the group if it's dropped
+# unfinished (yt-dlp's standalone build is a launcher whose child outlives
+# kill_on_drop alone).
+disallowed-methods = [
+    { path = "tokio::process::Command::spawn", reason = "use tools::Running::spawn" },
+    { path = "tokio::process::Command::output", reason = "use tools::output" },
+    { path = "tokio::process::Command::status", reason = "use tools::Running::spawn and wait" },
+]

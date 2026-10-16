@@ -7,7 +7,7 @@ rustup toolchain install stable
 cargo install just cargo-machete cargo-deny cargo-nextest antislop --locked
 ```
 
-To run the app you also need `yt-dlp` and `ffmpeg` on your `PATH` and a Chromium-family browser signed in to YouTube and TikTok. See `AGENTS.md` for the details and the developer subcommands.
+To run the app you need a supported browser (Chrome, Firefox, Safari, Edge, Brave and others; see `AGENTS.md`) signed in to the platforms you want archived. The app fetches its own yt-dlp, ffmpeg and bun on launch. `AGENTS.md` has the developer subcommands and how to try the app without touching your real archive.
 
 ## The one rule: `just precommit` passes
 
@@ -33,9 +33,10 @@ To catch another OS's compile errors before pushing, you can type-check for it l
 ## Writing code
 
 - **Fix lints, don't silence them.** If a lint really is wrong for one spot, put `#[expect(clippy::name, reason = "...")]` on that item. Don't add a crate-wide `allow` without a good reason, written as a comment in `Cargo.toml`.
+- **Start tools through `tools.rs`.** `tools::Running::spawn` and `tools::output` run yt-dlp, ffmpeg and the rest in a process group that's killed if dropped; clippy rejects tokio's `spawn` and `output` elsewhere.
 - **No panics in app code.** Return `anyhow::Result`, add `.context()` saying what was being attempted, and let the caller decide. `unwrap` and `expect` are only allowed in tests.
 - **Test what you add.** Pure logic (parsing, decoding, formatting, SQL) gets unit tests in the same file. Tests can't touch the network, your browser, the keyring or your real database. Use in-memory SQLite.
-- **Keep modules to one job.** SQL lives in `db.rs` and the modules under `db/` (one per table or concern), browser and cookie handling in `browser.rs`, driving a headless browser in `headless.rs`, listing YouTube likes with yt-dlp in `youtube.rs`, TikTok's API in `tiktok.rs`, downloading media in `download.rs`, the web UI in `web.rs` and its player in `player.rs`. A new platform gets its own module next to `youtube.rs`.
+- **Keep modules to one job.** SQL lives in `db.rs` and the modules under `db/` (one per table or concern), browser and cookie handling in `browser.rs`, driving a headless browser in `headless.rs`, each platform's listing in its own module (`youtube.rs`, `tiktok.rs`, `instagram.rs`, `x.rs`), downloading media in `download.rs`, the web UI in `web.rs` and its player in `player.rs`. A new platform gets its own module next to those. `AGENTS.md` has the full map.
 - **Comments say why, not what.** Write down the non-obvious constraint: a file-format quirk, an ordering requirement, a yt-dlp flag's side effect.
 
 ## Adding a dependency

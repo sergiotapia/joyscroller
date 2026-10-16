@@ -1,9 +1,13 @@
 //! Lists a user's liked TikTok videos. TikTok's web API wants every request
 //! signed by its page script, and answers an unsigned one with an empty
-//! 200 response. So we open tiktok.com in a headless browser (`headless.rs`)
+//! 200 response (seen 2026-10-12). So we open tiktok.com in a headless browser (`headless.rs`)
 //! logged in with the user's cookies, and call the API with `fetch` from inside
 //! the page, where TikTok's script signs it. yt-dlp has no extractor for
 //! liked videos, so here we parse TikTok's JSON ourselves.
+//!
+//! The tests can't show this works against TikTok. To try it:
+//! `cargo run -- likes --platform tiktok --limit 5` (no database), or
+//! `cargo run -- sync --platform tiktok --db <scratch>.db`.
 
 use std::time::Duration;
 
@@ -28,7 +32,10 @@ const SEC_UID: &str = "JSON.parse(document.getElementById('__UNIVERSAL_DATA_FOR_
      .textContent).__DEFAULT_SCOPE__?.['webapp.app-context']?.user?.secUid ?? null";
 
 /// What the web app asks for. Pages often come back a few videos short of
-/// it, which doesn't mean the list has ended; `hasMore` says that.
+/// it, which doesn't mean the list has ended; `hasMore` says that. A full
+/// read ended after exactly 200 pages (about 5,100 likes, back to January
+/// 2026; seen 2026-10-12), which looks like a cap on TikTok's side rather
+/// than the true end of the list.
 const PAGE_SIZE: usize = 30;
 
 /// Now and then TikTok rejects a page (status 100001, or an empty body) that
@@ -355,7 +362,8 @@ const FORMAT_LISTS: [&str; 2] = ["bitrateInfo", "bitrateAudioInfo"];
 
 /// The item as we store it. About three quarters of a raw item (~23 KB) is
 /// links to TikTok's CDN: every quality of the video, several sizes of each
-/// cover and avatar, caption files. They expire within about two days, and
+/// cover and avatar, caption files. They expire within about two days (seen
+/// 2026-10-12), and
 /// the media itself is downloaded separately at the best quality, so they're
 /// dropped. Everything else is kept, which leaves ~5 KB.
 fn without_media_links(item: &Value) -> Value {
@@ -425,6 +433,9 @@ fn is_tiktok_url(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    // Built by hand in the shape of `/api/favorite/item_list/`'s answer: only
+    // the fields the parser reads, with made-up values. A live read
+    // (`likes --platform tiktok`) went through the same parser on 2026-10-16.
     const PAGE: &str = r#"{
         "statusCode": 0, "cursor": "1791665073097", "hasMore": true,
         "itemList": [
