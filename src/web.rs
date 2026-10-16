@@ -2,7 +2,8 @@
 //! through the liked videos, newest first, on all platforms or one, sorted by
 //! any column or narrowed by a search, all kept in the URL; each video
 //! has its own page, with a button that has the download pipeline download it
-//! right away, `/downloading` shows what the pipeline is doing, and `/tv`
+//! right away, `/downloading` shows what the pipeline is doing, `/stats`
+//! how close each platform's downloads are to caught up, and `/tv`
 //! plays what's downloaded as television (`web/tv.rs`). Every open page
 //! keeps a Server-Sent Events connection, over which newly stored videos, the
 //! per-platform counts, what each sync is doing and the pipeline's progress
@@ -195,6 +196,7 @@ pub async fn serve(
             get(media_file),
         )
         .route("/downloading", get(downloading_page))
+        .route("/stats", get(stats_page))
         .route("/tv", get(tv::all_page))
         .route("/tv/{channel}", get(tv::channel_page))
         .route("/tv/{channel}/lineup", get(tv::lineup))
@@ -1282,6 +1284,185 @@ async fn downloading_page(State(app): State<App>) -> Result<Html<String>, Failur
     )))
 }
 
+/// How close each platform is to caught up: likes found, downloaded, and
+/// given a playback copy where needed. The page's script fetches it again
+/// as downloads finish.
+async fn stats_page(State(app): State<App>) -> Result<Html<String>, Failure> {
+    let (counts, after, catch_up) = app.db(|conn| {
+        Ok((
+            db::video_counts(conn)?,
+            db::last_rowid(conn)?,
+            db::catch_up(conn)?,
+        ))
+    })?;
+    let status = app.status.borrow().clone();
+    let board = app.pipeline.board();
+    let main = format!(
+        "<p class=\"intro\">How close the archive is to caught up: of the likes found on \
+         each platform, how many are downloaded, and of the downloaded videos, how many \
+         have been checked for a playback copy and given one where needed.</p>\n\
+         <div id=\"stats\" class=\"stats\">\n{}</div>\n",
+        stats_html(&catch_up)
+    );
+    Ok(Html(layout(
+        &Frame {
+            title: "Stats",
+            current: Section::Stats,
+            list: None,
+            status: &status,
+            counts: &counts,
+            board: &board,
+            footer: "Updates as downloads finish".into(),
+            after,
+            live: false,
+            player: false,
+        },
+        &main,
+    )))
+}
+
+/// The stats page's cards: all platforms together, when there's more than
+/// one, then each platform's.
+fn stats_html(catch_up: &[db::CatchUp]) -> String {
+    if catch_up.is_empty() {
+        return "<p class=\"empty\">No likes found yet. They show up here after the first sync.</p>\n"
+            .into();
+    }
+    let mut html = String::new();
+    if catch_up.len() > 1 {
+        let all = catch_up
+            .iter()
+            .fold(db::CatchUp::default(), |all, c| db::CatchUp {
+                liked: all.liked + c.liked,
+                gone: all.gone + c.gone,
+                downloaded: all.downloaded + c.downloaded,
+                failing: all.failing + c.failing,
+                videos: all.videos + c.videos,
+                checked: all.checked + c.checked,
+                copies: all.copies + c.copies,
+                copy_failing: all.copy_failing + c.copy_failing,
+                ..all
+            });
+        html.push_str(&catch_up_html(
+            "stat stat-all",
+            icon(Section::Likes(None)),
+            "All platforms",
+            "their platform",
+            &all,
+        ));
+    }
+    for (name, label) in PLATFORMS {
+        if let Some(c) = catch_up.iter().find(|c| c.platform == name) {
+            html.push_str(&catch_up_html(
+                "stat",
+                icon(Section::Likes(Some(name))),
+                label,
+                label,
+                c,
+            ));
+        }
+    }
+    html
+}
+
+/// One card of the stats page: how many likes were found, then a meter for
+/// the downloads and one for the playback copies.
+fn catch_up_html(class: &str, icon: &str, label: &str, gone_from: &str, c: &db::CatchUp) -> String {
+    let gone = if c.gone > 0 {
+        format!(
+            " <span class=\"stat-gone\">· {} gone from {gone_from}, so they can't be downloaded</span>",
+            thousands(c.gone)
+        )
+    } else {
+        String::new()
+    };
+    let downloadable = c.downloadable();
+    let mut downloads = vec![if c.downloaded >= downloadable {
+        "All downloaded".to_string()
+    } else {
+        format!(
+            "{} of {} · {} to go",
+            thousands(c.downloaded),
+            thousands(downloadable),
+            thousands(downloadable - c.downloaded)
+        )
+    }];
+    if c.failing > 0 {
+        downloads.push(format!(
+            "{} failed, trying again later",
+            thousands(c.failing)
+        ));
+    }
+    let mut copies = vec![if c.videos == 0 {
+        "Nothing to check until videos are downloaded".to_string()
+    } else {
+        format!(
+            "{} of {} downloaded videos checked · {} needed a copy",
+            thousands(c.checked),
+            thousands(c.videos),
+            thousands(c.copies)
+        )
+    }];
+    if c.checked < c.videos {
+        copies.push(format!("{} waiting", thousands(c.videos - c.checked)));
+    }
+    if c.copy_failing > 0 {
+        copies.push(format!(
+            "{} failed, trying again later",
+            thousands(c.copy_failing)
+        ));
+    }
+    format!(
+        "<section class=\"{class}\">\n\
+         <h2>{icon}{label}</h2>\n\
+         <p class=\"stat-found\"><strong>{liked}</strong> likes found{gone}</p>\n\
+         {downloaded}\
+         {checked}\
+         </section>\n",
+        label = escape(label),
+        liked = thousands(c.liked),
+        downloaded = meter_html(
+            "Downloaded",
+            c.downloaded,
+            downloadable,
+            &downloads.join(" · ")
+        ),
+        checked = meter_html("Playback copies", c.checked, c.videos, &copies.join(" · ")),
+    )
+}
+
+/// A labeled progress bar of `done` out of `of`, with its percentage and a
+/// line under it.
+fn meter_html(label: &str, done: usize, of: usize, note: &str) -> String {
+    let (percent, width) = percent(done, of);
+    format!(
+        "<div class=\"stat-meter{done_class}\">\
+         <div class=\"stat-head\"><span>{label}</span><strong class=\"stat-pct\">{percent}</strong></div>\
+         <span class=\"progress\" role=\"progressbar\" aria-label=\"{label}\" \
+         aria-valuemin=\"0\" aria-valuemax=\"{of}\" aria-valuenow=\"{done}\">\
+         <span style=\"width:{width}\"></span></span>\
+         <p class=\"stat-note\">{note}</p></div>\n",
+        done_class = if of > 0 && done >= of { " done" } else { "" },
+    )
+}
+
+/// `done` out of `of` as a whole percentage, rounded down so that it only
+/// reads 100% when nothing is left, and "<1%" rather than 0% once anything
+/// is done; and a bar's width, to a tenth of a percent. With nothing to do
+/// there's no percentage.
+fn percent(done: usize, of: usize) -> (String, String) {
+    if of == 0 {
+        return ("–".into(), "0%".into());
+    }
+    let tenths = done.min(of) * 1000 / of;
+    let percent = if done > 0 && tenths < 10 {
+        "&lt;1%".to_string()
+    } else {
+        format!("{}%", tenths / 10)
+    };
+    (percent, format!("{}.{}%", tenths / 10, tenths % 10))
+}
+
 #[derive(Deserialize)]
 struct EventsQuery {
     after: Option<i64>,
@@ -1374,6 +1555,7 @@ enum Section<'a> {
     PostType(&'a str, &'a str),
     Tv,
     Downloading,
+    Stats,
 }
 
 /// What every page shares around its `main`.
@@ -1463,6 +1645,14 @@ fn nav_entries(frame: &Frame) -> Vec<NavEntry> {
         count_name: "downloading".into(),
         count: Some(busy_count(frame.board)),
     });
+    entries.push(NavEntry {
+        section: Section::Stats,
+        href: "/stats".into(),
+        label: "Stats",
+        sub: true,
+        count_name: String::new(),
+        count: None,
+    });
     entries
 }
 
@@ -1504,8 +1694,12 @@ fn panel_html(frame: &Frame, entries: &[NavEntry]) -> String {
             .collect::<Vec<_>>()
             .concat()
     };
-    let (likes, rest) = entries.split_at(entries.len() - 2);
-    let (watch, downloads) = rest.split_at(1);
+    let tv = entries
+        .iter()
+        .position(|entry| entry.section == Section::Tv)
+        .unwrap_or(entries.len());
+    let (likes, rest) = entries.split_at(tv);
+    let (watch, downloads) = rest.split_at(rest.len().min(1));
     format!(
         "<aside class=\"panel\">\n\
          {radio}\
@@ -1592,7 +1786,7 @@ fn layout(frame: &Frame, main: &str) -> String {
         platform = match frame.current {
             Section::Likes(platform) => platform.unwrap_or(""),
             Section::PostType(platform, _) => platform,
-            Section::Tv | Section::Downloading => "",
+            Section::Tv | Section::Downloading | Section::Stats => "",
         },
         post_type = match frame.current {
             Section::PostType(_, post_type) => post_type,
@@ -1765,7 +1959,7 @@ fn icon(section: Section) -> &'static str {
             "<img class=\"icon\" src=\"/assets/icon-instagram.webp\" alt=\"\">"
         }
         Section::Likes(_) => "<img class=\"icon\" src=\"/assets/icon-likes.webp\" alt=\"\">",
-        Section::Downloading => {
+        Section::Downloading | Section::Stats => {
             "<img class=\"icon\" src=\"/assets/icon-downloading.webp\" alt=\"\">"
         }
         // The player's red play dome, the top frame of its sprite.
@@ -1858,6 +2052,7 @@ const page = document.body.dataset;
 let after = page.after;
 let events = null;
 let unseen = 0;
+let statsDue = false;
 addEventListener("pagehide", disconnect);
 addEventListener("pageshow", (e) => { if (e.persisted) connect(); });
 document.addEventListener("visibilitychange", () => {
@@ -1920,6 +2115,21 @@ function connect() {
     if (board) {
       board.innerHTML = update.board;
       showTimes(board);
+    }
+    // The stats page: fetch its numbers again, a few seconds after the
+    // first change since the last fetch, as changes come in bursts.
+    const stats = document.getElementById("stats");
+    if (stats && !statsDue) {
+      statsDue = true;
+      setTimeout(async () => {
+        try {
+          const page = await (await fetch("/stats")).text();
+          const fresh = new DOMParser().parseFromString(page, "text/html").getElementById("stats");
+          if (fresh) stats.innerHTML = fresh.innerHTML;
+        } finally {
+          statsDue = false;
+        }
+      }, 5000);
     }
     // The list: a row whose video has just been downloaded swaps its
     // placeholder for the saved picture, built as `picture_html` builds it.
@@ -2965,6 +3175,7 @@ mod tests {
                 ("Carousels", true),
                 ("TV", false),
                 ("Downloading", false),
+                ("Stats", true),
             ]
         );
         // A platform's link drops the type; a type's keeps the search.
@@ -2979,6 +3190,9 @@ mod tests {
         assert_eq!(html.matches("aria-current").count(), 1);
         assert!(html.contains("<li class=\"sub\"><a href=\"/?platform=tiktok&amp;type=slideshow&amp;q=cat\" aria-current=\"page\">Slideshows"));
         assert!(html.contains("data-type=\"slideshow\""));
+        // Stats sits in the panel's Downloads menu, under Downloading.
+        let downloads = &html[html.find("<h2>Downloads</h2>").unwrap()..];
+        assert!(downloads[..downloads.find("</ul>").unwrap()].contains("href=\"/stats\""));
     }
 
     #[test]
@@ -3456,5 +3670,52 @@ mod tests {
         assert_eq!(range("bytes=5-1"), None);
         assert_eq!(range("items=0-1"), None);
         assert_eq!(byte_range(&HeaderValue::from_static("bytes=0-"), 0), None);
+    }
+
+    #[test]
+    fn percentages_round_down_but_show_a_start() {
+        assert_eq!(percent(0, 200), ("0%".into(), "0.0%".into()));
+        assert_eq!(percent(1, 200), ("&lt;1%".into(), "0.5%".into()));
+        assert_eq!(percent(1999, 2000), ("99%".into(), "99.9%".into()));
+        assert_eq!(percent(2000, 2000), ("100%".into(), "100.0%".into()));
+        assert_eq!(percent(0, 0).0, "–");
+    }
+
+    #[test]
+    fn stats_add_up_the_platforms() {
+        let youtube = db::CatchUp {
+            platform: "youtube".into(),
+            liked: 10,
+            gone: 2,
+            downloaded: 8,
+            videos: 8,
+            checked: 8,
+            copies: 6,
+            ..db::CatchUp::default()
+        };
+        let tiktok = db::CatchUp {
+            platform: "tiktok".into(),
+            liked: 1000,
+            downloaded: 250,
+            failing: 3,
+            videos: 200,
+            checked: 150,
+            copies: 140,
+            ..db::CatchUp::default()
+        };
+        let html = stats_html(&[tiktok, youtube]);
+        let all = html.find("All platforms").unwrap();
+        let first = html.find("YouTube").unwrap();
+        assert!(all < first && first < html.find("TikTok").unwrap());
+        assert!(html.contains("<strong>1,010</strong> likes found"));
+        assert!(html.contains("2 gone from their platform"));
+        assert!(html.contains("258 of 1,008 · 750 to go · 3 failed, trying again later"));
+        assert!(html.contains("All downloaded"));
+        assert!(
+            html.contains("150 of 200 downloaded videos checked · 140 needed a copy · 50 waiting")
+        );
+        assert!(html.contains("<strong class=\"stat-pct\">25%</strong>"));
+        assert!(html.contains("stat-meter done"));
+        assert!(stats_html(&[]).contains("No likes found yet"));
     }
 }

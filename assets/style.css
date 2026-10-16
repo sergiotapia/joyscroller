@@ -548,6 +548,24 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 .outcome-unavailable { color: #6b6b6b; }
 .outcome-downloaded { color: #2a7a17; }
 
+/* ---- The stats page ---------------------------------------------------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: 6px 28px;
+}
+.stat-all { grid-column: 1 / -1; }
+.stat h2 { display: flex; align-items: center; gap: 6px; margin-top: 14px; }
+.stat-found { margin: 0 0 10px; color: var(--muted); }
+.stat-found strong { font: 700 22px var(--font-title); color: var(--luna); }
+.stat-meter { margin-bottom: 12px; }
+.stat-head { display: flex; justify-content: space-between; align-items: baseline; font-weight: bold; }
+.stat-pct { font: 700 20px var(--font-title); color: var(--luna); }
+.stat-meter.done .stat-pct { color: #2a7a17; }
+.stat .progress { max-width: none; margin-top: 2px; }
+.stat-note { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+
 /* ---- Taskbar ----------------------------------------------------------- */
 
 .taskbar {

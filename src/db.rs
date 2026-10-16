@@ -6,9 +6,9 @@
 //! `migrate` (the schema and its migrations), `videos`, `listings` (like
 //! order, and listings under way), `syncs`, `downloads`,
 //! `playback` (playback copies), `loudness` (how loud each download is),
-//! `tv` (what /tv can air), `list` (the UI's pages and sorts) and
-//! `search` (two FTS5 indexes over each video's text, queried with what
-//! `query.rs` parses). Callers use what's re-exported here.
+//! `tv` (what /tv can air), `stats` (how far downloads have caught up),
+//! `list` (the UI's pages and sorts) and `search` (two FTS5 indexes over
+//! each video's text, queried with what `query.rs` parses). Callers use what's re-exported here.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +22,7 @@ mod loudness;
 mod migrate;
 mod playback;
 mod search;
+mod stats;
 mod syncs;
 #[cfg(test)]
 mod test_support;
@@ -44,6 +45,7 @@ pub use playback::{
     pending_playback_count, playback_item, playback_state, record_playback,
     record_playback_failure,
 };
+pub use stats::{CatchUp, catch_up};
 pub use syncs::{finish_sync, full_sync_done, full_sync_due, start_sync};
 pub use tv::{Airable, airable};
 pub use videos::{

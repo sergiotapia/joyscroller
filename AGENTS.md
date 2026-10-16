@@ -22,7 +22,8 @@ src/main.rs     CLI (clap), the app loop (run_app), and sync_youtube / sync_tikt
 src/desktop.rs  Fitting into each desktop: the macOS app bundle's data folders and log file, opening the UI
                 in the browser, and recognizing a copy that's already running
 src/web.rs      The localhost UI (axum): server-rendered HTML list and video pages (with a Download button),
-                /downloading, and /events, an SSE stream of newly stored videos, counts, sync status and
+                /downloading, /stats (how close each platform's downloads and playback copies are to
+                caught up), and /events, an SSE stream of newly stored videos, counts, sync status and
                 the download pipeline's board. run_app feeds it sync status through a watch channel.
                 Also serves downloaded files (with range requests, for seeking) to the player
 src/web/tv.rs   /tv's page (the set from tv.json, two stages for players under its glass, the remote) and
@@ -83,6 +84,7 @@ src/db/downloads.rs The download queue (with retry back-off) and what each downl
 src/db/playback.rs  The playback-copy queue and what each try made
 src/db/loudness.rs  The loudness queue and what each measurement found
 src/db/tv.rs        What /tv can air: every download, with its length and loudness
+src/db/stats.rs     How far each platform has caught up: likes, downloads, playback copies (/stats)
 src/db/list.rs      The UI's pages: platform filter, search, and the column sorts with their indexes
 src/db/search.rs    Turns a parsed search into SQL against the FTS5 indexes (tests in db/search/tests.rs)
 src/db/test_support.rs  Fixtures the db tests share (in-memory database, sample rows, a search helper)
