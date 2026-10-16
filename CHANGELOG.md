@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- Back up to a Personal Data Server, in Settings under Downloading: connect your account on a Personal Data Server (the server a Bluesky or other AT Protocol account lives on) with its handle and an app password, and Joyscroller uploads each download there too, newest first, photo posts' pictures and sound included. Each liked post becomes one record in your account, with its files, title, author and link. Pick which platforms' likes go up. Uploads run on their own, a post every few seconds, never waiting on downloads or playback copies, and Pause stops them on the spot until you resume. Settings shows a bar of how many files are uploaded and how many are left. Everything uploaded is public, which the page says before you connect. The Downloading page shows the upload under way, the side panel has a line for it, and each video's page says whether it's uploaded, with a link to view it. The app password is kept in your system's keyring, not in Joyscroller's files.
+
 ### Fixed
 
 - Dragging through a photo post's pictures works on every picture, not just the first. Before, after turning to the second picture, it stopped following drags until you went back.

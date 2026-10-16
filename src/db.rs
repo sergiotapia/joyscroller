@@ -7,6 +7,7 @@
 //! order, and listings under way), `syncs`, `downloads`,
 //! `playback` (playback copies), `loudness` (how loud each download is),
 //! `tv` (what /tv can air), `stats` (how far downloads have caught up),
+//! `uploads` (the PDS account and what's been uploaded to it),
 //! `list` (the UI's pages and sorts) and `search` (two FTS5 indexes over
 //! each video's text, queried with what `query.rs` parses). Callers use what's re-exported here.
 
@@ -27,6 +28,7 @@ mod syncs;
 #[cfg(test)]
 mod test_support;
 mod tv;
+mod uploads;
 mod videos;
 
 pub use downloads::{
@@ -48,6 +50,12 @@ pub use playback::{
 pub use stats::{CatchUp, catch_up};
 pub use syncs::{finish_sync, full_sync_done, full_sync_due, start_sync};
 pub use tv::{Airable, airable};
+pub use uploads::{
+    PdsAccount, PendingUpload, UploadProgress, UploadState, UploadedPost, forget_pds_account,
+    pds_account, pending_upload_count, pending_uploads, record_too_big, record_upload,
+    record_upload_failure, set_pds_account, set_pds_paused, set_pds_platforms, upload_progress,
+    upload_state,
+};
 pub use videos::{
     NewVideo, StoredVideo, VideoCount, insert_new, last_rowid, video, video_counts, video_ids,
     videos_after,

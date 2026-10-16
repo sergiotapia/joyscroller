@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 aes = "0.9.3"
 anyhow = "1.0.104"
-axum = { version = "0.8.9", default-features = false, features = ["http1", "query", "tokio"] }
+axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "query", "tokio"] }
 base64 = "0.23.1"
 cbc = "0.2.1"
 clap = { version = "4.6.7", features = ["derive"] }

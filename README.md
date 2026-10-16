@@ -9,9 +9,10 @@ You've liked thousands of videos. Some get deleted, some go private, and the res
 - **Everything you've liked, in one place.** Your YouTube likes, TikTok likes, Instagram likes and saves, and X likes and bookmarks, side by side in one library you can browse and watch.
 - **The best quality there is.** Each video is saved at the highest quality the platform offers, with its real sound. Photo posts are saved too, images and music included: TikTok slideshows, Instagram photos and carousels, and X posts' pictures at the size they were posted. On X, a post you liked that quotes a video or photos keeps the quoted post's media too.
 - **Neatly organized.** Videos land in plain folders, sorted by platform and by the day you liked them, each named after its title. No mystery file names, and nothing locked inside an app.
-- **Nothing to set up.** Joyscroller signs in with the browser you already use. No accounts to connect, no passwords to type, no API keys.
+- **Nothing to set up.** Joyscroller signs in with the browser you already use. No accounts to connect, no passwords to type, no API keys. (The optional backup below is the one place you type one.)
 - **It keeps up on its own.** Leave it running and new likes show up in your library within minutes of tapping the heart.
-- **Private by design.** It all runs on your computer. Your likes and videos never go anywhere else.
+- **Private by design.** It all runs on your computer. Your likes and videos never go anywhere else, unless you turn on the backup.
+- **An off-site copy, if you want one.** Connect a Bluesky account, or any account on an AT Protocol Personal Data Server, and Joyscroller uploads everything it downloads there too, pictures and sound included.
 
 ## How to get it and run it
 
@@ -47,6 +48,18 @@ Keep it running to stay up to date. To stop it, click **Turn off** at the end of
 
 Videos are saved as the platform serves them, at their best quality, and most come in formats only some browsers play. So Joyscroller also makes a `playback.mp4` beside each of those, in H.264 at the same resolution, which plays in any browser: on a phone, a tablet or a car. It works on one video at a time in the background, at low priority.
 
+### Backing up to a Personal Data Server
+
+A Personal Data Server is the server that holds a Bluesky account's data. Joyscroller can upload each download to your account on one, so your archive also lives somewhere off your computer. In Joyscroller, open **Settings** (under Downloading in the side panel), and enter:
+
+- **Server**: `bsky.social` for an account made on bsky.app, or your own server's address, such as `vlpds.jazco.dev`.
+- **Handle**: your username, without the @.
+- **App password**: not your login password. Make one in Bluesky under **Settings → Privacy and security → App passwords**. Joyscroller keeps it in your computer's keyring.
+
+Then pick which platforms' likes to upload and click **Connect and start uploading**. It uploads everything already downloaded, newest first, then each new download, one post at a time. Settings shows how far it's got and has **Pause** and **Disconnect** buttons; each post's page says whether it's uploaded and links to it.
+
+**Everything uploaded is public.** Anyone can download the videos, and anyone can read the list of what you liked. On Bluesky's own servers, this would use Bluesky's free storage as a video archive, which they may not welcome, so a server of your own, or one that invites it, is a better home. Each server has its own file size limit; posts over it are skipped.
+
 The first time it starts, Joyscroller fetches the helpers it downloads videos with (yt-dlp, plus ffmpeg and bun if you don't already have them) into a `tools` folder beside its database, and keeps them up to date. There's nothing else to install.
 
 ### Building from source
@@ -73,7 +86,7 @@ Then open **http://127.0.0.1:4774**. That runs against your real archive in `dat
 mkdir -p /tmp/joyscroller-dev && cp target/debug/joyscroller /tmp/joyscroller-dev/ && /tmp/joyscroller-dev/joyscroller
 ```
 
-The debugging subcommands (`likes`, `sync`, `download`, `cookies`, `tools`) are listed in [AGENTS.md](AGENTS.md). They use the app's own yt-dlp and ffmpeg once it has fetched them, and otherwise whatever is on your `PATH`.
+The debugging subcommands (`likes`, `sync`, `download`, `pds`, `cookies`, `tools`) are listed in [AGENTS.md](AGENTS.md). They use the app's own yt-dlp and ffmpeg once it has fetched them, and otherwise whatever is on your `PATH`.
 
 CI checks every pull request on Linux, macOS and Windows, and builds and smoke-tests the Linux and macOS downloads. Pushing a version tag runs the same checks and builds and publishes them as a release (see [.github/workflows/release.yml](.github/workflows/release.yml)). Run `just precommit` before every commit. [CONTRIBUTING.md](CONTRIBUTING.md) has the conventions, and [AGENTS.md](AGENTS.md) has the architecture and data model.
 

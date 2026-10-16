@@ -16,13 +16,22 @@
 //! at a time at low priority, newest first. It's quick (only the sound is
 //! decoded) and nobody waits on it, so it stays off the board.
 //!
-//! What the lanes, tracks and converter are doing is kept on a `Board`, which
+//! Once an AT Protocol PDS account is connected in Settings, the uploader
+//! copies each download there (`pds.rs`), one post at a time, newest first,
+//! pausing a few seconds between posts. It runs on its own, from files
+//! already downloaded, so downloads and playback copies never hold it up. A
+//! refused login or the PDS saying to slow down stops the whole uploader, not
+//! the post, until the user connects again or the PDS's limit resets.
+//! Pausing it in Settings, or disconnecting, stops an upload under way.
+//!
+//! What the lanes, tracks, converter and uploader are doing is kept on a `Board`, which
 //! the web UI watches. Nothing about the pipeline is stored: the lanes and
 //! the converter pick up from the database when the app starts again, and a
 //! requested download that was cut off needs asking for again.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,9 +40,9 @@ use rusqlite::Connection;
 use tokio::sync::{Notify, watch};
 
 use crate::browser::Browser;
-use crate::db::{self, PendingDownload, PendingLoudness, PendingPlayback};
+use crate::db::{self, PendingDownload, PendingLoudness, PendingPlayback, PendingUpload};
 use crate::download::{self, Credentials, Progress, Saved};
-use crate::{loudness, transcode};
+use crate::{loudness, pds, transcode};
 
 /// Whether the lanes download the backlog, every liked video (thousands of
 /// them) with the user's logins. When off, videos download only when asked
@@ -88,6 +97,21 @@ const RECENT: usize = 20;
 /// The pause after a playback copy fails, so a broken ffmpeg doesn't spin
 /// through the backlog. The video itself waits out its own retry delay.
 const CONVERT_FAILURE_PAUSE: Duration = Duration::from_secs(10);
+
+/// The pause between uploads. Bluesky's PDS software, when its operator
+/// turns rate limits on, allows 5,000 write points an hour, a record costing
+/// 3; a post every 5 s stays well under, and the uploads themselves take
+/// longer than that anyway.
+const UPLOAD_PACE: Duration = Duration::from_secs(5);
+
+/// How long the uploader sits out after the PDS says to slow down without
+/// saying until when: this, then doubling up to a day.
+const FIRST_UPLOAD_PAUSE: Duration = Duration::from_mins(15);
+const LONGEST_UPLOAD_PAUSE: Duration = Duration::from_hours(24);
+
+/// How long the uploader waits after the PDS refused the login before trying
+/// again, unless the account is connected again sooner.
+const LOGGED_OUT_PAUSE: Duration = Duration::from_hours(1);
 
 /// A step a video goes through, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +220,15 @@ pub enum Outcome {
     },
     /// Its playback copy couldn't be made.
     ConvertFailed(String),
+    /// It was uploaded to the PDS.
+    Uploaded {
+        bytes: u64,
+        seconds: u64,
+    },
+    /// Its upload failed.
+    UploadFailed(String),
+    /// A file is over the PDS's limit, so it isn't uploaded.
+    UploadTooBig(String),
 }
 
 /// What the converter, which makes playback copies, is doing.
@@ -216,6 +249,50 @@ pub struct Converting {
     pub progress: Option<transcode::Progress>,
 }
 
+/// Why the uploader is waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadWait {
+    /// The pause between posts.
+    Pace,
+    /// The pause after a failed upload.
+    Failed,
+    /// The longer pause after `FAILURES_BEFORE_OUTAGE` failures in a row.
+    Outage,
+    /// Nothing to upload; it looks again then.
+    Empty,
+    /// The PDS refused the login.
+    LoggedOut,
+    /// The PDS said to slow down.
+    RateLimited,
+    /// Paused in Settings.
+    Paused,
+}
+
+/// What the uploader, which copies downloads to the PDS, is doing.
+#[derive(Debug, Clone, Default)]
+pub struct Uploader {
+    /// The connected account, as "handle on host"; None when there's none.
+    pub account: Option<String>,
+    /// Posts still to upload, counting the one it's on, as of the last time
+    /// it looked. None until it first looks.
+    pub left: Option<usize>,
+    pub current: Option<Uploading>,
+    /// Why it's waiting, and until when.
+    pub waiting: Option<(UploadWait, i64)>,
+    /// The error that stopped it, for a refused login.
+    pub error: Option<String>,
+}
+
+/// A post the uploader is uploading.
+#[derive(Debug, Clone)]
+pub struct Uploading {
+    pub job: Job,
+    pub started_at: i64,
+    /// Bytes sent so far, of the post's files' `total`.
+    pub sent: u64,
+    pub total: u64,
+}
+
 /// What the pipeline is doing.
 #[derive(Debug, Clone, Default)]
 pub struct Board {
@@ -226,6 +303,7 @@ pub struct Board {
     /// Since the app started, newest first, up to `RECENT`.
     pub recent: VecDeque<Finished>,
     pub converter: Converter,
+    pub uploader: Uploader,
 }
 
 impl Board {
@@ -246,6 +324,14 @@ impl Board {
             .current
             .as_ref()
             .filter(|c| c.job.is(platform, video_id))
+    }
+
+    /// The post the uploader is on, if it's this one.
+    pub fn find_uploading(&self, platform: &str, video_id: &str) -> Option<&Uploading> {
+        self.uploader
+            .current
+            .as_ref()
+            .filter(|u| u.job.is(platform, video_id))
     }
 
     fn lane_mut(&mut self, platform: &str) -> Option<&mut Lane> {
@@ -322,6 +408,18 @@ struct Shared {
     wake: Notify,
     /// Wakes the meter when there's a new download to measure.
     meter_wake: Notify,
+    /// Wakes the uploader when there's a new download to upload.
+    download_wake: Notify,
+    /// Wakes the uploader when the PDS account was connected, disconnected,
+    /// paused, resumed or changed in Settings.
+    settings_wake: Notify,
+    /// Set when uploading is paused or the account disconnected, which stops
+    /// an upload under way. Only the uploader clears it, before it reads the
+    /// account, so a stop that comes in meanwhile isn't lost.
+    upload_stop: AtomicBool,
+    /// Set when an account was connected: the uploader logs in afresh, with
+    /// the password and server just typed.
+    relogin: AtomicBool,
     /// Videos whose copies pages asked for, to convert before the backlog.
     asked: Mutex<VecDeque<(String, String)>>,
 }
@@ -336,6 +434,10 @@ impl Shared {
             board: watch::Sender::new(Board::default()),
             wake: Notify::new(),
             meter_wake: Notify::new(),
+            download_wake: Notify::new(),
+            settings_wake: Notify::new(),
+            upload_stop: AtomicBool::new(false),
+            relogin: AtomicBool::new(false),
             asked: Mutex::new(VecDeque::new()),
         }
     }
@@ -376,6 +478,7 @@ impl Pipeline {
         // converter runs whether or not the lanes do.
         tokio::spawn(run_converter(Arc::clone(&pipeline.shared)));
         tokio::spawn(run_meter(Arc::clone(&pipeline.shared)));
+        tokio::spawn(run_uploader(Arc::clone(&pipeline.shared)));
         pipeline
     }
 
@@ -455,6 +558,26 @@ impl Pipeline {
             }
         }
         self.shared.wake.notify_one();
+    }
+
+    /// The PDS account was resumed or its platforms changed: the uploader
+    /// looks again now.
+    pub fn uploads_changed(&self) {
+        self.shared.settings_wake.notify_one();
+    }
+
+    /// Uploading was paused or the account disconnected: an upload under
+    /// way stops, and the uploader looks again now. Call it after the
+    /// change is stored.
+    pub fn stop_uploads(&self) {
+        self.shared.upload_stop.store(true, Ordering::SeqCst);
+        self.uploads_changed();
+    }
+
+    /// An account was connected: the uploader logs in to it afresh now.
+    pub fn account_connected(&self) {
+        self.shared.relogin.store(true, Ordering::SeqCst);
+        self.uploads_changed();
     }
 
     pub fn board(&self) -> Board {
@@ -630,6 +753,7 @@ async fn download_job(shared: &Shared, conn: &mut Connection, job: &Job) -> bool
     if downloaded {
         shared.wake.notify_one();
         shared.meter_wake.notify_one();
+        shared.download_wake.notify_one();
     }
     answered
 }
@@ -914,6 +1038,430 @@ pub fn record(
     Ok(())
 }
 
+/// The uploader: upload every download to the connected PDS account, one
+/// post at a time, forever. With no account it idles until one is connected.
+async fn run_uploader(shared: Arc<Shared>) {
+    let mut conn = loop {
+        match db::open(&shared.db_path) {
+            Ok(conn) => break conn,
+            Err(e) => {
+                eprintln!("pds: can't open the database: {e:#}");
+                tokio::time::sleep(DB_RETRY).await;
+            }
+        }
+    };
+    let mut session: Option<pds::Session> = None;
+    let mut pauses = UploadPauses::default();
+    loop {
+        // Cleared before the account is read: a pause or disconnect stored
+        // after this sets it again, and one stored before shows in the read.
+        shared.upload_stop.store(false, Ordering::SeqCst);
+        if shared.relogin.swap(false, Ordering::SeqCst) {
+            session = None;
+        }
+        let account = match db::pds_account(&conn) {
+            Ok(account) => account,
+            Err(e) => {
+                eprintln!("pds: can't read the account: {e:#}");
+                tokio::time::sleep(DB_RETRY).await;
+                continue;
+            }
+        };
+        let Some(account) = account else {
+            session = None;
+            shared
+                .board
+                .send_modify(|board| board.uploader = Uploader::default());
+            upload_wait(&shared, None, IDLE).await;
+            continue;
+        };
+        let host = account
+            .pds_url
+            .split("://")
+            .nth(1)
+            .unwrap_or(&account.pds_url)
+            .to_string();
+        shared.board.send_modify(|board| {
+            board.uploader.account = Some(format!("{} on {host}", account.handle));
+        });
+        if account.paused {
+            upload_wait(&shared, Some(UploadWait::Paused), IDLE).await;
+            continue;
+        }
+        if session.as_ref().is_none_or(|s| s.did != account.did) {
+            match log_in(&account).await {
+                Ok(new) => session = Some(new),
+                Err(e) => {
+                    eprintln!("pds: can't log in as {}: {e:#}", account.handle);
+                    let (why, pause) = if e.is::<pds::LoggedOut>() {
+                        (UploadWait::LoggedOut, LOGGED_OUT_PAUSE)
+                    } else {
+                        (UploadWait::Failed, FAILURE_PAUSE)
+                    };
+                    shared
+                        .board
+                        .send_modify(|board| board.uploader.error = Some(format!("{e:#}")));
+                    upload_wait(&shared, Some(why), pause).await;
+                    continue;
+                }
+            }
+        }
+        let next = db::pending_uploads(&conn, None, 1)
+            .and_then(|next| Ok((next, db::pending_upload_count(&conn)?)));
+        let (pending, left) = match next {
+            Ok((mut next, left)) => (next.pop(), left),
+            Err(e) => {
+                eprintln!("pds: can't read the queue: {e:#}");
+                upload_wait(&shared, Some(UploadWait::Failed), DB_RETRY).await;
+                continue;
+            }
+        };
+        shared.board.send_modify(|board| {
+            board.uploader.left = Some(left);
+            board.uploader.error = None;
+        });
+        let (Some(pending), Some(current)) = (pending, session.take()) else {
+            upload_wait(&shared, Some(UploadWait::Empty), IDLE).await;
+            continue;
+        };
+        let (back, next) = upload_job(&shared, &mut conn, current, &account, &pending).await;
+        session = back;
+        let (why, pause) = pauses.after(&next);
+        upload_wait(&shared, Some(why), pause).await;
+    }
+}
+
+/// What the uploader's run of failures and slow-downs says to wait.
+#[derive(Default)]
+struct UploadPauses {
+    failures_in_a_row: usize,
+    /// The next slow-down's pause when the PDS doesn't say; zero until one.
+    slow_down: Duration,
+}
+
+impl UploadPauses {
+    /// Why and how long to wait after a post that ended in `next`.
+    fn after(&mut self, next: &Next) -> (UploadWait, Duration) {
+        match next {
+            Next::Done => {
+                *self = UploadPauses::default();
+                (UploadWait::Pace, UPLOAD_PACE)
+            }
+            Next::Failed => {
+                self.failures_in_a_row += 1;
+                if self.failures_in_a_row < FAILURES_BEFORE_OUTAGE {
+                    return (UploadWait::Failed, FAILURE_PAUSE);
+                }
+                eprintln!(
+                    "pds: {} uploads failed in a row; pausing uploads for {} min",
+                    self.failures_in_a_row,
+                    OUTAGE_PAUSE.as_secs() / 60
+                );
+                self.failures_in_a_row = 0;
+                (UploadWait::Outage, OUTAGE_PAUSE)
+            }
+            Next::SlowDown(Some(pause)) => (UploadWait::RateLimited, *pause),
+            Next::SlowDown(None) => {
+                let pause = self.slow_down.max(FIRST_UPLOAD_PAUSE);
+                self.slow_down = (pause * 2).min(LONGEST_UPLOAD_PAUSE);
+                (UploadWait::RateLimited, pause)
+            }
+            Next::LoggedOut => (UploadWait::LoggedOut, LOGGED_OUT_PAUSE),
+            // The account says what's next, and it's looked at right away.
+            Next::Stopped => (UploadWait::Paused, Duration::ZERO),
+        }
+    }
+}
+
+/// What the uploader does after a post.
+enum Next {
+    /// Go on to the next post: this one was uploaded, or is too big.
+    Done,
+    /// The upload failed; the post waits out its retry delay.
+    Failed,
+    /// The PDS said to slow down, and maybe for how long.
+    SlowDown(Option<Duration>),
+    /// The PDS refused the login.
+    LoggedOut,
+    /// Paused or disconnected while it uploaded.
+    Stopped,
+}
+
+/// Log in to the account's PDS with the app password in the keyring.
+async fn log_in(account: &db::PdsAccount) -> Result<pds::Session> {
+    let Some(password) = crate::keyring::load(&account.did).await? else {
+        return Err(pds::LoggedOut("no app password is kept for this account".into()).into());
+    };
+    let (service, handle) = (account.service_url.clone(), account.handle.clone());
+    tokio::task::spawn_blocking(move || pds::Session::log_in(&service, &handle, &password))
+        .await
+        .context("the login stopped")?
+}
+
+/// Sleep for `pause`, or until something that ends the wait early
+/// (`cut_short_by`), with the uploader showing why and until when.
+async fn upload_wait(shared: &Shared, why: Option<UploadWait>, pause: Duration) {
+    let until = db::now() + i64::try_from(pause.as_secs()).unwrap_or(i64::MAX);
+    shared.board.send_modify(|board| {
+        board.uploader.waiting = why.map(|why| (why, until));
+    });
+    let (by_download, by_settings) = cut_short_by(why);
+    let download = async {
+        if by_download {
+            shared.download_wake.notified().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    let settings = async {
+        if by_settings {
+            shared.settings_wake.notified().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        () = download => {}
+        () = settings => {}
+        () = tokio::time::sleep(pause) => {}
+    }
+    shared
+        .board
+        .send_modify(|board| board.uploader.waiting = None);
+}
+
+/// Whether a finished download, and a change in Settings, end a wait for
+/// `why` early. Only having nothing to upload waits on downloads. The pace
+/// and a rate limit are kept whatever happens. After a refused login or a
+/// failure, only the user changing something is worth trying again for:
+/// logging in again on every download would hammer the server with a
+/// password it refuses, which can get the account locked.
+fn cut_short_by(why: Option<UploadWait>) -> (bool, bool) {
+    match why {
+        Some(UploadWait::Empty) => (true, true),
+        Some(UploadWait::Pace | UploadWait::RateLimited) => (false, false),
+        Some(
+            UploadWait::Failed | UploadWait::Outage | UploadWait::LoggedOut | UploadWait::Paused,
+        )
+        | None => (false, true),
+    }
+}
+
+/// How the board shows a post being uploaded: as a job, which only needs
+/// its name and where it links.
+fn upload_board_job(pending: &PendingUpload) -> Job {
+    Job::new(PendingDownload {
+        platform: pending.platform.clone(),
+        video_id: pending.video_id.clone(),
+        url: pending.url.clone(),
+        kind: pending.kind.clone(),
+        title: pending.title.clone(),
+        author_name: pending.author_name.clone(),
+        added_on: String::new(),
+        listing_json: String::new(),
+    })
+}
+
+/// Upload a post, record how it went and keep the board up to date. Returns
+/// the session (None if it has to log in again) and what to do next.
+async fn upload_job(
+    shared: &Arc<Shared>,
+    conn: &mut Connection,
+    session: pds::Session,
+    account: &db::PdsAccount,
+    pending: &PendingUpload,
+) -> (Option<pds::Session>, Next) {
+    let started = Instant::now();
+    let job = upload_board_job(pending);
+    shared.board.send_modify(|board| {
+        board.uploader.current = Some(Uploading {
+            job: job.clone(),
+            started_at: db::now(),
+            sent: 0,
+            total: pending.size_bytes,
+        });
+    });
+    // A file is read in small pieces; the board needs a few updates a second.
+    let reported = Mutex::new(Instant::now());
+    let progress_board = Arc::clone(shared);
+    let progress = move |sent, total| {
+        let go_on = !progress_board.upload_stop.load(Ordering::SeqCst);
+        let mut last = reported.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.elapsed() < Duration::from_millis(250) && sent < total {
+            return go_on;
+        }
+        *last = Instant::now();
+        progress_board.board.send_modify(|board| {
+            if let Some(current) = &mut board.uploader.current {
+                current.sent = sent;
+                current.total = total;
+            }
+        });
+        go_on
+    };
+    let (session, result) = upload_post(
+        session,
+        &shared.media_root,
+        pending,
+        account.blob_limit_bytes,
+        progress,
+    )
+    .await;
+    if matches!(&result, Err(e) if e.is::<pds::Stopped>()) {
+        eprintln!(
+            "pds: stopped uploading {} post {}",
+            pending.platform, pending.video_id
+        );
+        shared
+            .board
+            .send_modify(|board| board.uploader.current = None);
+        return (session, Next::Stopped);
+    }
+    let recorded = record_upload(conn, &account.did, pending, &result);
+    let (mut outcome, mut next) = match &result {
+        Ok(uploaded) => (
+            Outcome::Uploaded {
+                bytes: uploaded.blobs.iter().map(|b| b.size_bytes).sum(),
+                seconds: started.elapsed().as_secs(),
+            },
+            Next::Done,
+        ),
+        Err(e) if e.is::<pds::TooBig>() => (Outcome::UploadTooBig(format!("{e:#}")), Next::Done),
+        Err(e) if e.is::<pds::LoggedOut>() => {
+            (Outcome::UploadFailed(format!("{e:#}")), Next::LoggedOut)
+        }
+        Err(e) => match e.downcast_ref::<pds::RateLimited>() {
+            // The PDS said when its limit resets: wait that long.
+            Some(limited) => (
+                Outcome::UploadFailed(format!("{e:#}")),
+                Next::SlowDown(limited.until.map(|until| {
+                    Duration::from_secs(u64::try_from(until - db::now()).unwrap_or(0).max(60))
+                })),
+            ),
+            None => (Outcome::UploadFailed(format!("{e:#}")), Next::Failed),
+        },
+    };
+    if let Err(e) = recorded {
+        eprintln!(
+            "pds: couldn't record the upload of {} post {}: {e:#}",
+            pending.platform, pending.video_id
+        );
+        outcome = Outcome::UploadFailed(format!("couldn't record it: {e:#}"));
+        if matches!(next, Next::Done) {
+            next = Next::Failed;
+        }
+    }
+    let error = match (&next, &result) {
+        (Next::LoggedOut, Err(e)) => Some(format!("{e:#}")),
+        _ => None,
+    };
+    shared.board.send_modify(|board| {
+        board.uploader.current = None;
+        board.uploader.error = error;
+        board.remember(&job, outcome);
+    });
+    // A refused login means logging in again, once the user has fixed it.
+    let session = if matches!(next, Next::LoggedOut) {
+        None
+    } else {
+        session
+    };
+    (session, next)
+}
+
+/// Upload `pending`'s files and record to the PDS in a blocking thread,
+/// which `session` goes into and comes back out of. None for the session if
+/// the thread was lost, which means logging in again.
+pub async fn upload_post(
+    session: pds::Session,
+    media_root: &Path,
+    pending: &PendingUpload,
+    limit_bytes: Option<u64>,
+    progress: impl Fn(u64, u64) -> bool + Send + 'static,
+) -> (Option<pds::Session>, Result<pds::Uploaded>) {
+    let media_root = media_root.to_owned();
+    let post = pending.clone();
+    let mut session = session;
+    let uploaded = tokio::task::spawn_blocking(move || {
+        let result = session.upload_post(&media_root, &post, limit_bytes, &progress);
+        (session, result)
+    })
+    .await;
+    match uploaded {
+        Ok((session, result)) => (Some(session), result),
+        Err(e) => (
+            None,
+            Err(anyhow::Error::new(e).context("the upload stopped")),
+        ),
+    }
+}
+
+/// Store how an upload to `did` went and log it. A failure counts against
+/// the post unless it was about the account or the PDS's pace (logged out,
+/// rate limited), which aren't the post's doing.
+pub fn record_upload(
+    conn: &Connection,
+    did: &str,
+    pending: &PendingUpload,
+    result: &Result<pds::Uploaded>,
+) -> Result<()> {
+    let (platform, video_id) = (&pending.platform, &pending.video_id);
+    match result {
+        Ok(uploaded) => {
+            let blobs: Vec<serde_json::Value> = uploaded
+                .blobs
+                .iter()
+                .map(|b| {
+                    serde_json::json!({
+                        "file": b.file,
+                        "cid": b.cid,
+                        "mime_type": b.mime_type,
+                        "size_bytes": b.size_bytes,
+                    })
+                })
+                .collect();
+            let size_bytes = uploaded.blobs.iter().map(|b| b.size_bytes).sum();
+            let stored = db::record_upload(
+                conn,
+                did,
+                pending,
+                &db::UploadedPost {
+                    record_uri: &uploaded.record_uri,
+                    record_cid: &uploaded.record_cid,
+                    blobs_json: &serde_json::to_string(&blobs)?,
+                    size_bytes,
+                },
+            )
+            .context("storing the upload")?;
+            #[expect(clippy::cast_precision_loss, reason = "a size for a log line")]
+            let megabytes = size_bytes as f64 / 1e6;
+            if stored {
+                eprintln!(
+                    "pds: uploaded {platform} post {video_id} ({megabytes:.1} MB) as {}",
+                    uploaded.record_uri
+                );
+            } else {
+                eprintln!(
+                    "pds: {platform} post {video_id} was downloaded again; it's uploaded afresh"
+                );
+            }
+        }
+        Err(e) if e.is::<pds::TooBig>() => {
+            db::record_too_big(conn, did, pending, &format!("{e:#}"))?;
+            eprintln!("pds: not uploading {platform} post {video_id}: {e:#}");
+        }
+        Err(e) if e.is::<pds::Stopped>() => {}
+        Err(e) if e.is::<pds::LoggedOut>() || e.is::<pds::RateLimited>() => {
+            eprintln!("pds: {platform} post {video_id} waits: {e:#}");
+        }
+        Err(e) => {
+            db::record_upload_failure(conn, did, pending, &format!("{e:#}"))?;
+            eprintln!("pds: upload of {platform} post {video_id} failed: {e:#}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1131,6 +1679,80 @@ mod tests {
             board.finish_converting(&job, Some(Outcome::ConvertFailed("no".into())));
         });
         assert_eq!(pipeline.board().recent.len(), 1);
+    }
+
+    #[test]
+    fn uploads_pace_back_off_and_stop() {
+        let mut pauses = UploadPauses::default();
+        assert_eq!(pauses.after(&Next::Done), (UploadWait::Pace, UPLOAD_PACE));
+        // A run of failures ends in the longer pause, and starts over.
+        assert_eq!(pauses.after(&Next::Failed).0, UploadWait::Failed);
+        assert_eq!(pauses.after(&Next::Failed).0, UploadWait::Failed);
+        assert_eq!(
+            pauses.after(&Next::Failed),
+            (UploadWait::Outage, OUTAGE_PAUSE)
+        );
+        assert_eq!(pauses.after(&Next::Failed).0, UploadWait::Failed);
+        // Slowing down doubles when the server doesn't say how long, up to a
+        // day, and takes the server's word when it does.
+        let slow: Vec<Duration> = (0..9)
+            .map(|_| pauses.after(&Next::SlowDown(None)).1)
+            .collect();
+        assert_eq!(
+            slow[..3],
+            [
+                FIRST_UPLOAD_PAUSE,
+                FIRST_UPLOAD_PAUSE * 2,
+                FIRST_UPLOAD_PAUSE * 4
+            ]
+        );
+        assert_eq!(slow[8], LONGEST_UPLOAD_PAUSE);
+        let said = Duration::from_secs(90);
+        assert_eq!(pauses.after(&Next::SlowDown(Some(said))).1, said);
+        // An upload that goes through starts the slow-downs over.
+        pauses.after(&Next::Done);
+        assert_eq!(pauses.after(&Next::SlowDown(None)).1, FIRST_UPLOAD_PAUSE);
+        assert_eq!(
+            pauses.after(&Next::LoggedOut),
+            (UploadWait::LoggedOut, LOGGED_OUT_PAUSE)
+        );
+        assert_eq!(
+            pauses.after(&Next::Stopped),
+            (UploadWait::Paused, Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn only_settings_wake_an_uploader_that_was_refused() {
+        // A download finishing mustn't send the server a refused password
+        // again, nor cut a pace or a rate limit short.
+        for why in [
+            UploadWait::LoggedOut,
+            UploadWait::Failed,
+            UploadWait::Outage,
+            UploadWait::Paused,
+        ] {
+            assert_eq!(cut_short_by(Some(why)), (false, true), "{why:?}");
+        }
+        for why in [UploadWait::Pace, UploadWait::RateLimited] {
+            assert_eq!(cut_short_by(Some(why)), (false, false), "{why:?}");
+        }
+        assert_eq!(cut_short_by(Some(UploadWait::Empty)), (true, true));
+        assert_eq!(cut_short_by(None), (false, true));
+    }
+
+    #[test]
+    fn a_stop_is_only_cleared_by_the_uploader() {
+        let pipeline = pipeline();
+        let stopped = || pipeline.shared.upload_stop.load(Ordering::SeqCst);
+        pipeline.stop_uploads();
+        assert!(stopped());
+        // Saving the platforms, or resuming, right after a pause doesn't let
+        // the upload under way go on.
+        pipeline.uploads_changed();
+        pipeline.account_connected();
+        assert!(stopped());
+        assert!(pipeline.shared.relogin.load(Ordering::SeqCst));
     }
 
     #[test]

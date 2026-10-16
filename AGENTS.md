@@ -4,15 +4,15 @@ Notes for coding agents working in this repo. `CONTRIBUTING.md` has the setup an
 
 ## What this is
 
-Joyscroller archives what a user has liked on YouTube, TikTok, Instagram (saves and likes) and X (bookmarks and likes with pictures or video). Plain `joyscroller` starts one long-running process. It syncs the likes into SQLite right away and then every 5 minutes, and downloads each liked video at the best quality available. It makes a playback copy of any video that not every browser can play, and serves a web UI at http://127.0.0.1:4774 for browsing, searching and playing the archive, plus `/tv`, which plays the archive as television. Each module's `//!` comment says how its part works. `CHANGELOG.md` says what users see.
+Joyscroller archives what a user has liked on YouTube, TikTok, Instagram (saves and likes) and X (bookmarks and likes with pictures or video). Plain `joyscroller` starts one long-running process. It syncs the likes into SQLite right away and then every 5 minutes, and downloads each liked video at the best quality available. It makes a playback copy of any video that not every browser can play, and serves a web UI at http://127.0.0.1:4774 for browsing, searching and playing the archive, plus `/tv`, which plays the archive as television. If the user connects an AT Protocol PDS in Settings, it also uploads each download there. Each module's `//!` comment says how its part works. `CHANGELOG.md` says what users see.
 
 ## Rules
 
 Product:
 
-- **End users never run subcommands.** Launching `joyscroller` starts everything. `cookies`, `likes`, `sync`, `download` and `tools` are developer tools. New features go inside the long-running process, as a background task or in the web UI, never as CLI flags.
+- **End users never run subcommands.** Launching `joyscroller` starts everything. `cookies`, `likes`, `sync`, `download`, `pds` and `tools` are developer tools. New features go inside the long-running process, as a background task or in the web UI, never as CLI flags.
 - **It runs natively, not in Docker.** It reads the host browser's cookie database and the desktop keyring, which a container can't reach.
-- **Logging in means reading the user's browser cookies.** No OAuth, no API keys, no login profile of our own.
+- **Logging in means reading the user's browser cookies.** No OAuth, no API keys, no login profile of our own. The one exception is the PDS the archive can be uploaded to (`pds.rs`), which takes a handle and an app password typed in Settings. The password lives only in the OS keyring (`keyring.rs`), never in the database, a file or a log.
 - **Users install nothing but the app.** `tools.rs` fetches yt-dlp, ffmpeg/ffprobe and bun (yt-dlp's JavaScript runtime for YouTube) into `tools/`, and Chrome's headless shell only when no installed browser can run headless. yt-dlp is always our own copy, updated daily, since distro packages lag behind site changes. ffmpeg and bun already on `PATH` are used as they are.
 - **We don't call YouTube's API.** yt-dlp scrapes, and we parse its JSON.
 - **We never reimplement a platform's request signing** (TikTok's, or X's `x-client-transaction-id`). The platform's own page makes the request instead (see Platforms).
@@ -50,9 +50,12 @@ cargo run                         # the app on the real archive in data/
 cargo run -- likes --limit 5      # recent likes (real browser cookies, no DB); --platform tiktok|instagram|x
 cargo run -- sync --db /tmp/t.db  # one sync into a scratch DB; --platform, --full (read the whole list)
 cargo run -- download --db /tmp/t.db --media /tmp/m --limit 3
+cargo run -- pds --db /tmp/t.db --media data/downloads --limit 1 --max-mb 10  # upload to a PDS (see below)
 cargo run -- tools                # fetch the tools and print their versions
 cargo run -- cookies --out c.txt  # cookies.txt, live credentials: delete it after
 ```
+
+**Trying PDS uploads.** The `pds` command logs in with `BLUESKY_ACCOUNT_HANDLE` and `BLUESKY_APP_PASSWORD` from the environment (`.env`, which git ignores; `set -a; . ./.env; set +a`). Run it on a copy of the database (`sqlite3 'file:data/joyscroller.db?mode=ro' '.backup /tmp/t.db'`) with `--media data/downloads`, which it only reads. Uploads are public and go to a real account, so upload a few small posts per platform, never the backlog. The app uploads everything downloaded once an account is connected, so a whole-app trial with a PDS needs a database trimmed to a handful of posts, and connecting in the copy that uses `data/` starts on the whole archive.
 
 **Where data lives.** `joyscroller.db`, `downloads/`, `tools/` and `backups/` sit next to the executable, where users will look for them. A binary inside this repo's `target/` uses `data/` instead (`app_dir` in `main.rs`), so `cargo clean` can't delete the archive. `Joyscroller.app` uses `~/Movies/Joyscroller` for downloads and `~/Library/Application Support/Joyscroller` for the rest, its log included (`desktop.rs`).
 
@@ -104,17 +107,20 @@ src/main.rs        CLI, run_app (UI + pipeline + sync loop), the per-platform sy
 src/desktop.rs     Data folders per OS, the macOS bundle and its log, opening the UI, spotting a running copy
 src/web.rs         The axum UI: list, video page, /downloading, /stats, /events (SSE), media files, ASSETS
 src/web/tv.rs      /tv's page and /tv/<channel>/lineup
+src/web/settings.rs /settings: connecting a PDS account
 src/tv.rs          /tv's schedules: decks, what airs next, station breaks, the live timeline
 src/player.rs      The video page's player markup (Video.js 10 elements)
 src/browser.rs     Finding the browser and profile, copying and decrypting its cookies, sniff
 src/browser/       firefox.rs, safari.rs: those browsers' cookie stores
 src/headless.rs    A minimal CDP client: headless browser with the user's cookies, eval in page, watch requests
 src/youtube.rs     The Liked playlist through yt-dlp
+src/pds.rs         Uploading downloads to an AT Protocol PDS: login, blobs, one record per post
+src/keyring.rs     The PDS app password in the OS keyring
 src/tiktok.rs      TikTok's liked list from inside a tiktok.com tab; photo posts' images and sound
 src/instagram.rs   Instagram's saved list (in a tab) and liked list (phone API); photo posts' slides and music
 src/x.rs           X's bookmarks and likes through its web GraphQL API from an x.com tab
 src/tools.rs       Fetching and updating yt-dlp, ffmpeg/ffprobe, bun, Chrome's headless shell; running them
-src/pipeline.rs    Download lanes per platform, the immediate track, the converter, the loudness meter, the Board
+src/pipeline.rs    Download lanes per platform, the immediate track, the converter, the loudness meter, the uploader, the Board
 src/download.rs    One video's download into its folder, per platform
 src/transcode.rs   playback.mp4: probe, decide (none, remux, encode), run ffmpeg
 src/loudness.rs    EBU R128 measurement and the gain /tv plays at
@@ -122,7 +128,7 @@ src/filename.rs    safe_name: text to a file name valid on every OS
 src/query.rs       The search box's syntax (magnetissimo's operators) and unicode61-style tokens
 src/db.rs          open (backup, migrations) and re-exports; db/ holds every query:
   migrate.rs  videos.rs  listings.rs  syncs.rs  downloads.rs  playback.rs  loudness.rs
-  tv.rs  stats.rs  list.rs  search.rs (+ search/tests.rs)  test_support.rs  migrations/*.sql
+  tv.rs  stats.rs  uploads.rs  list.rs  search.rs (+ search/tests.rs)  test_support.rs  migrations/*.sql
 assets/            The UI's look, built into the binary (web.rs ASSETS) and served at /assets/<file>
 assets/blender/    The scenes the renders come from
 ```
@@ -156,7 +162,11 @@ assets/blender/    The scenes the renders come from
 - **Best quality means one file per video, at its highest quality.** No second copies at lower qualities.
   - The one exception is the playback copy, `playback.mp4`: H.264 + AAC at the original's resolution (bar an odd dimension cropped by a pixel), with HDR tone-mapped to SDR. The original is never replaced.
   - `playback_copies.file_name` is NULL when the original already plays everywhere.
-- **Playback copies and loudness rows belong to one download**, through `download_folder`. A new download deletes them, a result from an earlier download isn't recorded, and the copy is only served while its folder matches the download's. Loudness columns are NULL for silence. The gain is worked out when `/tv` asks (`loudness::gain_db`), so changing the target needs no new measurements.
+- **Playback copies, loudness rows and PDS uploads belong to one download**, through `download_folder`. A new download deletes the copy and loudness rows, and its upload row stops matching, so the post uploads again. A result from an earlier download isn't recorded, and the copy is only served while its folder matches the download's. Loudness columns are NULL for silence. The gain is worked out when `/tv` asks (`loudness::gain_db`), so changing the target needs no new measurements.
+- **PDS uploads.** `pds_accounts` holds the one connected account (connecting another replaces it); its app password is in the keyring. `pds_uploads` has a row per post and account once an upload has been tried, keyed `(platform, video_id, did)`.
+  - Each post is one record in `pds::COLLECTION`, keyed `<platform>-<video_id>`, so uploading it again (a new download) replaces the record.
+  - A post with a file over the PDS's limit gets `too_big_at` and isn't tried again until the account is connected again. Failures back off like downloads; a refused login or a 429 pauses the uploader, not the post.
+  - Pausing (`paused_at`, migration 12) and disconnecting stop an upload under way: `pds::Stopped`, which isn't recorded against the post. Disconnecting keeps the rows, so reconnecting the same account doesn't upload again.
 - **`downloads.metadata_json`** is yt-dlp's metadata minus `INFO_DROP`: format lists, URLs, per-stream fields and `cookies`. Photo posts store the platform's item without its media links instead, and X stores `{"media": [links]}`.
 - **Search** reads `search_text` (title, author, description), which triggers fill from the `search_text_source` view. For X, the description is the quoted post's author and text from `listing_json` (migration 10). Two FTS5 tables index it as external content: `search_trigrams` and `search_words` (unicode61).
   - To search more fields, add a migration that replaces the view and refills `search_text`.
@@ -200,6 +210,13 @@ How each platform's likes are listed and downloaded, and what's been tried and d
 - On HTTP 429, a list sits out from `FIRST_X_PAUSE`, doubling.
 - Only posts with pictures, video or GIFs are kept, their own or a quoted post's. A text post quoting a video is kept with the quoted post's media.
 - Downloads ask X's API nothing: they read the links from `listing_json` (`pbs.twimg.com` at `name=orig`, the highest-bitrate MP4 from `video.twimg.com`). That's H.264 + AAC already, so no playback copy.
+
+**PDS uploads.**
+
+- One post at a time: its files go up with `uploadBlob` (the raw file, exact `Content-Length`), then `putRecord` writes its record right away, because a PDS deletes a blob no record points to after an hour or so.
+- A Bluesky account logs in at bsky.social, but its repo lives on another host (`*.host.bsky.network`), read from the DID document `createSession` returns. Uploads go there.
+- The upload limit comes from `describeServer`'s `blobUploadLimit`, which isn't in the standard lexicon: 300 MiB on Bluesky's PDSes, 100 MiB on vlpds.jazco.dev (seen 2026-10-16). Without it, a 413 marks the post too big.
+- Everything in a repo is public: anyone can fetch the blobs, and records go out on the firehose. Settings says so before connecting.
 
 ## Traps
 

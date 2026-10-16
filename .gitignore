@@ -1,3 +1,6 @@
 /target
 /data
 /assets/videojs/node_modules
+
+# Local secrets (the PDS test account's app password)
+.env

@@ -12,7 +12,9 @@ mod download;
 mod filename;
 mod headless;
 mod instagram;
+mod keyring;
 mod loudness;
+mod pds;
 mod pipeline;
 mod player;
 mod query;
@@ -51,6 +53,7 @@ struct Cli {
 /// YouTube's pace), `Credentials::read`, the dispatch in `download` and
 /// `folder_name` in `download.rs`, `PLATFORMS`, `POST_TYPES`, `icon`,
 /// `short_title`, `author_label` and `author_html` in `web.rs`,
+/// `PlatformsForm` in `web/settings.rs`,
 /// `post_type_sql!` in `db/videos.rs`, `Channel` in `tv.rs`, `LOGINS` in
 /// `browser.rs`, and an icon rendered by `assets/blender/badges.py`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -155,6 +158,29 @@ enum Command {
         /// How many videos to download.
         #[arg(long, default_value = "1")]
         limit: usize,
+    },
+    /// Upload the next few downloaded posts to an AT Protocol PDS, as the app
+    /// does for the account connected in Settings. Logs in with the
+    /// environment's `BLUESKY_ACCOUNT_HANDLE` and `BLUESKY_APP_PASSWORD`, on
+    /// `BLUESKY_PDS` (default bsky.social), and connects that account in the
+    /// database. Everything uploaded is public.
+    Pds {
+        /// Database file (default: joyscroller.db next to this executable, or in
+        /// data/ when run from the repo's target/).
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Where the downloads are (default: downloads/ next to the database).
+        #[arg(long)]
+        media: Option<PathBuf>,
+        /// Only this platform's posts (default: every platform's).
+        #[arg(long, value_enum)]
+        platform: Option<Platform>,
+        /// How many posts to upload from each platform.
+        #[arg(long, default_value = "1")]
+        limit: usize,
+        /// Skip posts larger than this many megabytes.
+        #[arg(long)]
+        max_mb: Option<u64>,
     },
 }
 
@@ -379,7 +405,91 @@ async fn run(cli: Cli) -> Result<()> {
                 download_batch(browser, &profile, &mut conn, &media_root, limit).await?;
             eprintln!("attempted {attempted} → {}", media_root.display());
         }
+        Command::Pds {
+            db,
+            media,
+            platform,
+            limit,
+            max_mb,
+        } => upload_batch(db, media, platform, limit, max_mb).await?,
     }
+    Ok(())
+}
+
+/// The `pds` command: connect the environment's account and upload `limit`
+/// posts from each platform (or `platform`'s), skipping any over `max_mb`.
+async fn upload_batch(
+    db: Option<PathBuf>,
+    media: Option<PathBuf>,
+    platform: Option<Platform>,
+    limit: usize,
+    max_mb: Option<u64>,
+) -> Result<()> {
+    let conn = &mut db::open(&db.map_or_else(default_db, Ok)?)?;
+    let media_root = &media.map_or_else(default_media, Ok)?;
+    let var = |name: &str| std::env::var(name).with_context(|| format!("{name} isn't set"));
+    let service = pds::service_url(
+        &std::env::var("BLUESKY_PDS").unwrap_or_else(|_| "https://bsky.social".into()),
+    )?;
+    let (handle, password) = (var("BLUESKY_ACCOUNT_HANDLE")?, var("BLUESKY_APP_PASSWORD")?);
+    let (mut session, server) = {
+        let service = service.clone();
+        tokio::task::spawn_blocking(move || {
+            let session = pds::Session::log_in(&service, &handle, &password)?;
+            let server = session.describe_server()?;
+            anyhow::Ok((session, server))
+        })
+        .await??
+    };
+    let limit_bytes = server.blob_limit_bytes;
+    eprintln!(
+        "pds: logged in as {} ({}) on {}; files up to {}",
+        session.handle,
+        session.did,
+        session.pds,
+        limit_bytes.map_or_else(|| "an unknown size".into(), |b| format!("{} MiB", b >> 20))
+    );
+    let platforms: Vec<&str> = match platform {
+        Some(platform) => vec![platform.name()],
+        None => Platform::value_variants()
+            .iter()
+            .map(|p| p.name())
+            .collect(),
+    };
+    let did = session.did.clone();
+    db::set_pds_account(
+        conn,
+        &db::PdsAccount {
+            did: did.clone(),
+            handle: session.handle.clone(),
+            service_url: service,
+            pds_url: session.pds.clone(),
+            platforms: platforms.iter().map(ToString::to_string).collect(),
+            blob_limit_bytes: limit_bytes,
+            paused: false,
+        },
+    )?;
+    let max_bytes = max_mb.map(|mb| mb * 1_000_000);
+    for platform in platforms {
+        let picked: Vec<db::PendingUpload> = db::pending_uploads(conn, Some(platform), 500)?
+            .into_iter()
+            .filter(|p| max_bytes.is_none_or(|max| p.size_bytes <= max))
+            .take(limit)
+            .collect();
+        for pending in picked {
+            let (back, result) =
+                pipeline::upload_post(session, media_root, &pending, limit_bytes, |_, _| true)
+                    .await;
+            pipeline::record_upload(conn, &did, &pending, &result)?;
+            if let Err(e) = result
+                && (e.is::<pds::LoggedOut>() || e.is::<pds::RateLimited>())
+            {
+                return Err(e);
+            }
+            session = back.context("the upload's thread was lost")?;
+        }
+    }
+    println!("https://pdsls.dev/at://{did}/{}", pds::COLLECTION);
     Ok(())
 }
 

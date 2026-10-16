@@ -25,6 +25,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0008_unavailable_downloads.sql"),
     include_str!("migrations/0009_loudness.sql"),
     include_str!("migrations/0010_x_search.sql"),
+    include_str!("migrations/0011_pds_uploads.sql"),
+    include_str!("migrations/0012_pds_pause.sql"),
 ];
 
 /// Before `init` changes an existing database, save a copy of it as it is,

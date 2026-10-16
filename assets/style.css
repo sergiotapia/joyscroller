@@ -797,6 +797,29 @@ code { font: 12px "Lucida Console", "Liberation Mono", monospace; overflow-wrap:
 }
 .search input[type="search"]:focus { outline: 1px solid var(--select); outline-offset: -2px; }
 
+/* ---- The settings page ------------------------------------------------- */
+
+.notice {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid #e2c044;
+  background: #fffbe1;
+}
+.notice-error { border-color: #d27a72; background: #fdeceb; color: #8a1f17; }
+.settings { margin: 12px 0 0; }
+.settings label:not(.check) { display: grid; gap: 3px; max-width: 420px; margin: 0 0 10px; color: var(--muted); }
+.settings input[type="text"], .settings input[type="password"] {
+  padding: 3px 6px;
+  border: 1px solid #7f9db9;
+  background: #fff;
+  color: #000;
+  font: 12px var(--font-ui);
+}
+.settings input:focus { outline: 1px solid var(--select); outline-offset: -2px; }
+.settings .check { display: inline-flex; align-items: center; gap: 4px; margin: 0 14px 6px 0; }
+.settings .hint { margin: -4px 0 12px; max-width: 560px; color: var(--muted); font-size: 11px; }
+.settings .hint b { color: #333; font-weight: 600; }
+
 /* ---- Small screens ----------------------------------------------------- */
 
 @media (max-width: 960px) {

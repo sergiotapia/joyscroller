@@ -3,7 +3,8 @@
 //! any column or narrowed by a search, all kept in the URL; each video
 //! has its own page, with a button that has the download pipeline download it
 //! right away, `/downloading` shows what the pipeline is doing, `/stats`
-//! how close each platform's downloads are to caught up, and `/tv`
+//! how close each platform's downloads are to caught up, `/settings`
+//! connects a PDS to upload the archive to (`web/settings.rs`), and `/tv`
 //! plays what's downloaded as television (`web/tv.rs`). Every open page
 //! keeps a Server-Sent Events connection, over which newly stored videos, the
 //! per-platform counts, what each sync is doing and the pipeline's progress
@@ -34,11 +35,15 @@ use tokio::sync::watch;
 use tower_http::services::ServeFile;
 
 use crate::db;
-use crate::pipeline::{Active, Board, Converter, Converting, Job, Lane, Outcome, Pipeline, Wait};
+use crate::pipeline::{
+    Active, Board, Converter, Converting, Job, Lane, Outcome, Pipeline, UploadWait, Uploader,
+    Uploading, Wait,
+};
 use crate::player;
 use crate::tv::Tv;
 use crate::x;
 
+mod settings;
 mod tv;
 
 /// Where the UI listens. Localhost only: the archive is the user's own.
@@ -202,6 +207,12 @@ pub async fn serve(
         )
         .route("/downloading", get(downloading_page))
         .route("/stats", get(stats_page))
+        .route("/settings", get(settings::page))
+        .route("/settings/pds", post(settings::connect))
+        .route("/settings/pds/platforms", post(settings::platforms))
+        .route("/settings/pds/disconnect", post(settings::disconnect))
+        .route("/settings/pds/pause", post(settings::pause))
+        .route("/settings/pds/resume", post(settings::resume))
         .route("/tv", get(tv::all_page))
         .route("/tv/{channel}", get(tv::channel_page))
         .route("/tv/{channel}/lineup", get(tv::lineup))
@@ -971,13 +982,15 @@ async fn video_page(
     State(app): State<App>,
     Path((platform, video_id)): Path<(String, String)>,
 ) -> Result<Html<String>, Failure> {
-    let (found, download, playback, counts, after) = app.db(|conn| {
+    let (found, download, playback, counts, after, account, upload) = app.db(|conn| {
         Ok((
             db::video(conn, &platform, &video_id)?,
             db::download_state(conn, &platform, &video_id)?,
             db::playback_state(conn, &platform, &video_id)?,
             db::video_counts(conn)?,
             db::last_rowid(conn)?,
+            db::pds_account(conn)?,
+            db::upload_state(conn, &platform, &video_id)?,
         ))
     })?;
     let (video, raw_json) = found.ok_or_else(not_found)?;
@@ -1004,7 +1017,11 @@ async fn video_page(
     } else {
         String::new()
     };
-    let fields = facts_html(&video, download.as_ref());
+    let mut fields = facts_html(&video, download.as_ref());
+    if let Some(account) = &account {
+        let backup = backup_html(&video, account, download.as_ref(), upload.as_ref(), &board);
+        let _ = writeln!(fields, "<dt>Backup</dt><dd>{backup}</dd>");
+    }
     // Fall back to the stored text if it somehow isn't valid JSON.
     let pretty = serde_json::from_str::<serde_json::Value>(&raw_json)
         .and_then(|value| serde_json::to_string_pretty(&value))
@@ -1120,6 +1137,71 @@ fn facts_html(video: &db::StoredVideo, download: Option<&db::DownloadState>) -> 
     ]
     .map(|(name, value)| format!("<dt>{name}</dt><dd>{value}</dd>\n"))
     .concat()
+}
+
+/// The video page's Backup: where the post's upload to the connected PDS
+/// account stands.
+fn backup_html(
+    video: &db::StoredVideo,
+    account: &db::PdsAccount,
+    download: Option<&db::DownloadState>,
+    upload: Option<&db::UploadState>,
+    board: &Board,
+) -> String {
+    if let Some(uploading) = board.find_uploading(&video.platform, &video.video_id) {
+        return uploading_html(uploading);
+    }
+    let host = account
+        .pds_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(&account.pds_url);
+    match upload {
+        Some(db::UploadState {
+            uploaded_at: Some(at),
+            record_uri: Some(uri),
+            current,
+            ..
+        }) => format!(
+            "uploaded to {} {}{}. <a href=\"https://pdsls.dev/{uri}\">View it on pdsls.dev</a>\
+             <br><code>{uri}</code>",
+            escape(host),
+            time(*at, "datetime"),
+            if *current {
+                ""
+            } else {
+                "; downloaded again since, so it's uploaded again in its turn"
+            },
+            uri = escape(uri),
+        ),
+        Some(db::UploadState {
+            too_big_at: Some(_),
+            last_error,
+            current: true,
+            ..
+        }) => format!(
+            "not uploaded: {}",
+            escape(last_error.as_deref().unwrap_or("too big for this server"))
+        ),
+        Some(db::UploadState {
+            failures,
+            last_error: Some(error),
+            current: true,
+            ..
+        }) if *failures > 0 => format!(
+            "not uploaded; {failures} failed {}, last error: {}",
+            if *failures == 1 { "try" } else { "tries" },
+            escape(error)
+        ),
+        _ if download.is_none_or(|d| d.downloaded_at.is_none()) => {
+            "uploaded once downloaded".into()
+        }
+        _ if !account.platforms.contains(&video.platform) => format!(
+            "{} likes aren't uploaded (see <a href=\"/settings\">Settings</a>)",
+            display_name(&video.platform)
+        ),
+        _ => format!("waiting its turn to upload to {}", escape(host)),
+    }
 }
 
 /// The top of a video's page: its player once the media is saved, and
@@ -1340,7 +1422,7 @@ async fn stats_page(State(app): State<App>) -> Result<Html<String>, Failure> {
          each platform, how many are downloaded, and how many of the downloaded videos \
          are transcoded into a copy that plays in every browser (a few already do, and \
          need none).</p>\n\
-         <div id=\"stats\" class=\"stats\">\n{}</div>\n",
+         <div id=\"stats\" class=\"stats\" data-refresh=\"/stats\">\n{}</div>\n",
         stats_html(&catch_up)
     );
     Ok(Html(layout(
@@ -1480,7 +1562,7 @@ fn catch_up_html(class: &str, icon: &str, label: &str, gone_from: &str, c: &db::
 
 /// A labeled progress bar of `done` out of `of`, with its percentage and a
 /// line under it.
-fn meter_html(label: &str, done: usize, of: usize, note: &str) -> String {
+pub(super) fn meter_html(label: &str, done: usize, of: usize, note: &str) -> String {
     let (percent, width) = percent(done, of);
     format!(
         "<div class=\"stat-meter{done_class}\">\
@@ -1603,6 +1685,7 @@ enum Section<'a> {
     Tv,
     Downloading,
     Stats,
+    Settings,
 }
 
 /// What every page shares around its `main`.
@@ -1700,6 +1783,14 @@ fn nav_entries(frame: &Frame) -> Vec<NavEntry> {
         count_name: String::new(),
         count: None,
     });
+    entries.push(NavEntry {
+        section: Section::Settings,
+        href: "/settings".into(),
+        label: "Settings",
+        sub: true,
+        count_name: String::new(),
+        count: None,
+    });
     entries
 }
 
@@ -1756,12 +1847,14 @@ fn panel_html(frame: &Frame, entries: &[NavEntry]) -> String {
          <h2>Downloads</h2>\n<ul class=\"menu\">\n{downloads}</ul>\n\
          </nav>\n\
          <h2>Sync</h2>\n<ul class=\"sync\" id=\"status\">\n{status}</ul>\n\
+         <ul class=\"sync\" id=\"upload-status\">{upload}</ul>\n\
          </aside>\n",
         radio = radio_html(),
         likes = menu(likes),
         watch = menu(watch),
         downloads = menu(downloads),
         status = status_html(frame.status),
+        upload = upload_status_html(&frame.board.uploader),
     )
 }
 
@@ -1833,7 +1926,7 @@ fn layout(frame: &Frame, main: &str) -> String {
         platform = match frame.current {
             Section::Likes(platform) => platform.unwrap_or(""),
             Section::PostType(platform, _) => platform,
-            Section::Tv | Section::Downloading | Section::Stats => "",
+            Section::Tv | Section::Downloading | Section::Stats | Section::Settings => "",
         },
         post_type = match frame.current {
             Section::PostType(_, post_type) => post_type,
@@ -2007,7 +2100,7 @@ fn icon(section: Section) -> &'static str {
         }
         Section::Likes(Some("x")) => "<img class=\"icon\" src=\"/assets/icon-x.webp\" alt=\"\">",
         Section::Likes(_) => "<img class=\"icon\" src=\"/assets/icon-likes.webp\" alt=\"\">",
-        Section::Downloading | Section::Stats => {
+        Section::Downloading | Section::Stats | Section::Settings => {
             "<img class=\"icon\" src=\"/assets/icon-downloading.webp\" alt=\"\">"
         }
         // The player's red play dome, the top frame of its sprite.
@@ -2100,7 +2193,7 @@ const page = document.body.dataset;
 let after = page.after;
 let events = null;
 let unseen = 0;
-let statsDue = false;
+let refreshDue = false;
 addEventListener("pagehide", disconnect);
 addEventListener("pageshow", (e) => { if (e.persisted) connect(); });
 document.addEventListener("visibilitychange", () => {
@@ -2159,23 +2252,30 @@ function connect() {
     const tray = document.getElementById("tray-downloads");
     tray.classList.toggle("idle", update.count === 0);
     tip(tray, update.count === 0 ? "Nothing downloading" : update.count + " downloading");
+    const uploads = document.getElementById("upload-status");
+    uploads.innerHTML = update.upload;
+    showTimes(uploads);
     const board = document.getElementById("downloads");
     if (board) {
       board.innerHTML = update.board;
       showTimes(board);
     }
-    // The stats page: fetch its numbers again, a few seconds after the
-    // first change since the last fetch, as changes come in bursts.
-    const stats = document.getElementById("stats");
-    if (stats && !statsDue) {
-      statsDue = true;
+    // A page's live numbers (the stats page's, Settings' upload bar): fetch
+    // the page again a few seconds after the first change since the last
+    // fetch, as changes come in bursts, and swap them in.
+    const live = document.querySelector("[data-refresh]");
+    if (live && !refreshDue) {
+      refreshDue = true;
       setTimeout(async () => {
         try {
-          const page = await (await fetch("/stats")).text();
-          const fresh = new DOMParser().parseFromString(page, "text/html").getElementById("stats");
-          if (fresh) stats.innerHTML = fresh.innerHTML;
+          const page = await (await fetch(live.dataset.refresh)).text();
+          const fresh = new DOMParser().parseFromString(page, "text/html").getElementById(live.id);
+          if (fresh) {
+            live.innerHTML = fresh.innerHTML;
+            showTimes(live);
+          }
         } finally {
-          statsDue = false;
+          refreshDue = false;
         }
       }, 5000);
     }
@@ -2737,10 +2837,21 @@ fn board_html(board: &Board) -> String {
             .concat();
         format!("<ul class=\"jobs\">\n{items}</ul>\n")
     };
+    let uploads = if board.uploader.account.is_some() {
+        format!(
+            "<ul class=\"jobs\">\n<li>{}</li>\n</ul>\n",
+            uploader_html(&board.uploader, &job_link, true)
+        )
+    } else {
+        "<p>Off. <a href=\"/settings\">Settings</a> can upload each download to a \
+         Personal Data Server, such as a Bluesky account's.</p>\n"
+            .into()
+    };
     format!(
         "<h2>Lanes</h2>\n{lanes}\
          <h2>Requested</h2>\n{requested}\
          <h2>Playback copies</h2>\n{converter}\
+         <h2>Uploads</h2>\n{uploads}\
          <h2>Finished</h2>\n{finished}",
         converter = converter_html(&board.converter, &job_link)
     )
@@ -2760,7 +2871,7 @@ fn outcome_html(outcome: &Outcome) -> (&'static str, String) {
             )
         }
         Outcome::Failed(error) => ("failed", format!("failed: {}", one_line(error))),
-        Outcome::Unavailable(said) => ("unavailable", one_line(said)),
+        Outcome::Unavailable(said) | Outcome::UploadTooBig(said) => ("unavailable", one_line(said)),
         Outcome::Converted {
             bytes,
             seconds,
@@ -2785,7 +2896,142 @@ fn outcome_html(outcome: &Outcome) -> (&'static str, String) {
             "failed",
             format!("playback copy failed: {}", one_line(error)),
         ),
+        Outcome::Uploaded { bytes, seconds } => {
+            let megabytes = *bytes as f64 / 1e6;
+            let seconds = i64::try_from(*seconds).unwrap_or(i64::MAX);
+            (
+                "downloaded",
+                format!(
+                    "uploaded to the Personal Data Server, {megabytes:.1} MB in {}",
+                    duration(seconds)
+                ),
+            )
+        }
+        Outcome::UploadFailed(error) => ("failed", format!("upload failed: {}", one_line(error))),
     }
+}
+
+/// What the uploader is doing, after the connected account: the post it's
+/// uploading, or why it's waiting. With `count_left`, how many posts are
+/// left as of its last look; Settings' bar counts them itself.
+pub(super) fn uploader_html(
+    uploader: &Uploader,
+    job_link: &dyn Fn(&Job) -> String,
+    count_left: bool,
+) -> String {
+    let left = match uploader.left {
+        Some(left) if left > 0 && count_left => format!(" ({} to go)", thousands(left)),
+        _ => String::new(),
+    };
+    let account = escape(
+        uploader
+            .account
+            .as_deref()
+            .unwrap_or("the Personal Data Server"),
+    );
+    if let Some(current) = &uploader.current {
+        return format!(
+            "{account}: {} — {}{left}",
+            job_link(&current.job),
+            uploading_html(current)
+        );
+    }
+    let error = uploader
+        .error
+        .as_deref()
+        .map(|e| format!(" ({})", escape(e)))
+        .unwrap_or_default();
+    let doing = match uploader.waiting {
+        None => "starting".into(),
+        Some((UploadWait::Pace, until)) => format!("next upload at {}", time(until, "time")),
+        Some((UploadWait::Empty, _)) if uploader.left.is_some_and(|left| left > 0) => {
+            "waiting".into()
+        }
+        Some((UploadWait::Empty, _)) => "everything is uploaded".into(),
+        Some((UploadWait::Failed, until)) => {
+            format!(
+                "an upload failed{error}; trying again at {}",
+                time(until, "time")
+            )
+        }
+        Some((UploadWait::Outage, until)) => format!(
+            "paused after several failed uploads in a row, until {}",
+            time(until, "time")
+        ),
+        Some((UploadWait::LoggedOut, _)) => {
+            format!(
+                "the server refused the login{error}; <a href=\"/settings\">connect it again</a>"
+            )
+        }
+        Some((UploadWait::RateLimited, until)) => format!(
+            "the server asked to slow down; uploading again at {}",
+            time(until, "time")
+        ),
+        Some((UploadWait::Paused, _)) => {
+            "paused; <a href=\"/settings\">resume it in Settings</a>".into()
+        }
+    };
+    format!("{account}: {doing}{left}")
+}
+
+/// What the uploader is doing with a post, e.g. "uploading: 45% of 12.3 MB,
+/// started 3:04:05 PM", with a progress bar.
+#[expect(clippy::cast_precision_loss, reason = "sizes for display")]
+fn uploading_html(uploading: &Uploading) -> String {
+    let started = time(uploading.started_at, "time");
+    let percent = if uploading.total > 0 {
+        (uploading.sent as f64 / uploading.total as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    format!(
+        "uploading: {percent:.0}% of {:.1} MB, started {started}\
+         <span class=\"progress\"><span style=\"width: {percent:.1}%\"></span></span>",
+        uploading.total as f64 / 1e6
+    )
+}
+
+/// The side panel's line for the uploader, under the syncs, when an account
+/// is connected. The `downloads` event brings it up to date.
+fn upload_status_html(uploader: &Uploader) -> String {
+    let Some(account) = &uploader.account else {
+        return String::new();
+    };
+    let (light, what) = if let Some(current) = &uploader.current {
+        (
+            "running",
+            format!("uploading {}", escape(&truncate(&current.job.title, 40))),
+        )
+    } else {
+        match uploader.waiting {
+            Some((UploadWait::LoggedOut, _)) => (
+                "failed",
+                "app password refused; connect again in Settings".into(),
+            ),
+            Some((UploadWait::Outage | UploadWait::Failed, until)) => (
+                "failed",
+                format!("uploads failing; trying again at {}", time(until, "time")),
+            ),
+            Some((UploadWait::RateLimited, until)) => (
+                "waiting",
+                format!("asked to slow down, until {}", time(until, "time")),
+            ),
+            Some((UploadWait::Paused, _)) => ("waiting", "paused".into()),
+            _ => match uploader.left {
+                Some(left) if left > 0 => ("done", format!("{} to upload", thousands(left))),
+                Some(_) => ("done", "everything is uploaded".into()),
+                None => ("waiting", "starting".into()),
+            },
+        }
+    };
+    // On hover: the error that stopped it, as a sync's line shows, or else
+    // where it uploads to.
+    let hover = uploader.error.as_deref().unwrap_or(account);
+    format!(
+        "<li class=\"sync-{light}\"><span class=\"led\"></span><b>Backup</b>\
+         <span class=\"what\" title=\"{}\">{what}</span></li>\n",
+        escape(hover)
+    )
 }
 
 /// The downloads page's Playback copies: what the converter is on.
@@ -2890,6 +3136,7 @@ fn downloads_json(board: &Board) -> String {
         "videos": videos,
         "converting": converting.map(|job| format!("{}/{}", job.item.platform, job.item.video_id)),
         "pictures": pictures,
+        "upload": upload_status_html(&board.uploader),
     })
     .to_string()
 }
@@ -3249,6 +3496,7 @@ mod tests {
                 ("TV", false),
                 ("Downloading", false),
                 ("Stats", true),
+                ("Settings", true),
             ]
         );
         // A platform's link drops the type; a type's keeps the search.
