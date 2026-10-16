@@ -149,6 +149,10 @@ mod imp {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[expect(
+    clippy::unused_async,
+    reason = "the same signatures as the keyrings on Linux and macOS"
+)]
 mod imp {
     use anyhow::{Result, bail};
 
