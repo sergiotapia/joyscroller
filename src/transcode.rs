@@ -255,17 +255,15 @@ pub async fn make(
 
 /// Ask ffprobe about the file at `path`, whose extension is `container`.
 async fn probe(path: &Path, container: &str) -> Result<Probe> {
-    let out = crate::tools::ffprobe()?
-        .args(["-v", "error", "-of", "json", "-show_entries"])
+    let mut cmd = crate::tools::ffprobe()?;
+    cmd.args(["-v", "error", "-of", "json", "-show_entries"])
         .arg(
             "format=duration,bit_rate:stream=codec_type,codec_name,profile,level,pix_fmt,\
              width,height,avg_frame_rate,r_frame_rate,color_transfer,channels,bit_rate:\
              stream_disposition=attached_pic",
         )
-        .arg(path)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
+        .arg(path);
+    let out = crate::tools::output(&mut cmd)
         .await
         .context("failed to run ffprobe; is it installed?")?;
     if !out.status.success() {
@@ -433,14 +431,10 @@ async fn run_ffmpeg(
     total: Option<f64>,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<()> {
-    let mut child = crate::tools::ffmpeg_in_background()?
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("failed to run ffmpeg; is it installed?")?;
+    let mut cmd = crate::tools::ffmpeg_in_background()?;
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child =
+        crate::tools::Running::spawn(&mut cmd).context("failed to run ffmpeg; is it installed?")?;
     let stdout = child.stdout.take().context("no stdout from ffmpeg")?;
     let mut stderr = child.stderr.take().context("no stderr from ffmpeg")?;
     // Read both pipes at once: ffmpeg blocks if either fills up.

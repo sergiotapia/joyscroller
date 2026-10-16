@@ -413,10 +413,8 @@ async fn fetch(
         .arg("--print")
         .arg("after_move:%(format_id)s\t%(acodec)s\t%(height)s\t%(filepath)s")
         .arg(&item.url)
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     let printed = run_yt_dlp(&mut cmd, progress).await?;
 
     let written = parse_written(&printed);
@@ -464,9 +462,8 @@ async fn fetch(
 /// Run yt-dlp, passing its progress lines to `progress` as they come.
 /// Returns the rest of what it printed.
 async fn run_yt_dlp(cmd: &mut Command, progress: &(dyn Fn(Progress) + Sync)) -> Result<String> {
-    let mut child = cmd
-        .spawn()
-        .context("failed to run yt-dlp; is it installed?")?;
+    let mut child =
+        crate::tools::Running::spawn(cmd).context("failed to run yt-dlp; is it installed?")?;
     let stdout = child.stdout.take().context("no stdout from yt-dlp")?;
     let mut stderr = child.stderr.take().context("no stderr from yt-dlp")?;
     // Read both pipes at once: yt-dlp blocks if either fills up.
@@ -649,18 +646,16 @@ async fn keep_clip(track: &Path, clip: Option<(u64, u64)>, work: &Path) -> Resul
         return Ok(());
     };
     let seconds = |ms: u64| format!("{}.{:03}", ms / 1000, ms % 1000);
-    let out = crate::tools::ffmpeg()?
-        .args(["-v", "error", "-y", "-ss"])
+    let mut cmd = crate::tools::ffmpeg()?;
+    cmd.args(["-v", "error", "-y", "-ss"])
         .arg(seconds(start))
         .arg("-t")
         .arg(seconds(length))
         .arg("-i")
         .arg(track)
         .args(["-map", "0:a:0", "-c", "copy"])
-        .arg(&out_path)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
+        .arg(&out_path);
+    let out = crate::tools::output(&mut cmd)
         .await
         .context("failed to run ffmpeg; is it installed?")?;
     if !out.status.success() {
@@ -769,16 +764,14 @@ fn parse_progress(line: &str) -> Option<Progress> {
 async fn mux(video: &Path, sound: &Path, work: &Path) -> Result<()> {
     let ext = video.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
     let out_path = work.join(format!("video.{ext}"));
-    let out = crate::tools::ffmpeg()?
-        .args(["-v", "error", "-y", "-i"])
+    let mut cmd = crate::tools::ffmpeg()?;
+    cmd.args(["-v", "error", "-y", "-i"])
         .arg(video)
         .arg("-i")
         .arg(sound)
         .args(["-map", "0:v:0", "-map", "1:a:0", "-c", "copy"])
-        .arg(&out_path)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
+        .arg(&out_path);
+    let out = crate::tools::output(&mut cmd)
         .await
         .context("failed to run ffmpeg; is it installed?")?;
     if !out.status.success() {
@@ -837,13 +830,12 @@ async fn keep_largest_thumbnail(work: &Path) -> Result<()> {
 /// A still image's pixel count and file extension, via ffprobe. None for
 /// anything else, including animated images.
 async fn probe_image(path: &Path) -> Result<Option<(u64, &'static str)>> {
-    let out = crate::tools::ffprobe()?
-        .args(["-v", "error", "-select_streams", "v:0"])
+    let mut cmd = crate::tools::ffprobe()?;
+    cmd.args(["-v", "error", "-select_streams", "v:0"])
         .args(["-show_entries", "stream=codec_name,width,height"])
         .args(["-of", "csv=p=0"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
+        .arg(path);
+    let out = crate::tools::output(&mut cmd)
         .await
         .context("failed to run ffprobe; is ffmpeg installed?")?;
     Ok(parse_probe(&String::from_utf8_lossy(&out.stdout)))

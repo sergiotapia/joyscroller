@@ -11,7 +11,6 @@
 //! the target; letting the limiter take up to 3 dB off peaks, 93%.
 
 use std::path::Path;
-use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 
@@ -60,8 +59,8 @@ pub async fn measure(dir: &Path, files: &[String]) -> Result<Loudness> {
     };
     let path = dir.join(file);
     // Only the sound is decoded, at a few hundred times real time.
-    let out = crate::tools::ffmpeg_in_background()?
-        .args(["-nostdin", "-hide_banner", "-nostats", "-i"])
+    let mut cmd = crate::tools::ffmpeg_in_background()?;
+    cmd.args(["-nostdin", "-hide_banner", "-nostats", "-i"])
         .arg(&path)
         .args([
             "-map",
@@ -71,11 +70,8 @@ pub async fn measure(dir: &Path, files: &[String]) -> Result<Loudness> {
             "-f",
             "null",
             "-",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .kill_on_drop(true)
-        .output()
+        ]);
+    let out = crate::tools::output(&mut cmd)
         .await
         .context("failed to run ffmpeg; is it installed?")?;
     let log = String::from_utf8_lossy(&out.stderr);

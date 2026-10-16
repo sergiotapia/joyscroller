@@ -11,6 +11,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 ### Fixed
 
 - A download could occasionally fail to be recorded with "database is locked" when something else wrote to the archive at the same moment. It now waits its turn.
+- Stopping Joyscroller with Ctrl-C, or by closing its terminal or logging out, now also stops the downloads, conversions and hidden browser windows it had running, and deletes the hidden browsers' temporary profiles, which hold a copy of your logins. Before, they could keep running in the background after Joyscroller was gone.
+- After each YouTube sync, a leftover yt-dlp no longer keeps running in the background for most of a minute.
 
 ## [0.10.0] - 2026-10-15
 

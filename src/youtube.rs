@@ -60,13 +60,10 @@ pub async fn liked_videos(
         cmd.arg("--playlist-end").arg(limit.to_string());
     }
     cmd.arg(LIKED_PLAYLIST);
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .context("failed to run yt-dlp; is it installed?")?;
+    let mut child =
+        crate::tools::Running::spawn(&mut cmd).context("failed to run yt-dlp; is it installed?")?;
     // Drain stderr concurrently so a chatty yt-dlp can't block on a full pipe.
     let mut stderr_pipe = child.stderr.take().context("yt-dlp stderr not piped")?;
     let stderr_task = tokio::spawn(async move {

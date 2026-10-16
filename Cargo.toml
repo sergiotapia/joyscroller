@@ -25,13 +25,17 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 tar = { version = "0.4.46", default-features = false }
 tempfile = "3.27.0"
-tokio = { version = "1.53.2", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.2", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake"] }
 tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
 ureq = "3.4.2"
 zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # Where each OS keeps the browser's cookie password.
+# Killing a tool's whole process group (`tools::Running`).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", features = ["process"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 secret-service = { version = "5.2.0", features = ["rt-tokio-crypto-rust"] }
 

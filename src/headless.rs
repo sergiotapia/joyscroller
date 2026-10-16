@@ -19,6 +19,7 @@ use tokio::process::{Child, Command};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 use crate::browser::{Browser, Cookie};
+use crate::tools::Running;
 
 /// How long one CDP call (including a page script's `await`s) may take.
 const CALL_TIMEOUT: Duration = Duration::from_mins(1);
@@ -29,8 +30,9 @@ pub struct Headless {
     /// The tab's flattened CDP session; commands carrying it go to the tab.
     session_id: String,
     next_id: u64,
-    /// Killed on drop, as a backstop for when `close` isn't reached.
-    child: Child,
+    /// Killed on drop with every process it started, as a backstop for when
+    /// `close` isn't reached.
+    child: Running,
     /// Deleted on drop. Declared after `child` so it's dropped after it.
     _profile: tempfile::TempDir,
 }
@@ -47,8 +49,8 @@ impl Headless {
         let profile = tempfile::Builder::new()
             .prefix("joyscroller-browser-")
             .tempdir()?;
-        let mut child = Command::new(&exe)
-            .arg("--headless=new")
+        let mut cmd = Command::new(&exe);
+        cmd.arg("--headless=new")
             // Port 0 picks a free port; the browser prints the address it chose.
             .arg("--remote-debugging-port=0")
             .arg(format!("--user-data-dir={}", profile.path().display()))
@@ -60,11 +62,9 @@ impl Headless {
             .arg("--password-store=basic")
             .arg("--use-mock-keychain")
             .arg("about:blank")
-            .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
+            .stderr(Stdio::piped());
+        let mut child = Running::spawn(&mut cmd)
             .with_context(|| format!("failed to start {}", exe.display()))?;
 
         let ws = match devtools_socket(&mut child).await {

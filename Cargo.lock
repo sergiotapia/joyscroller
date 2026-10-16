@@ -848,6 +848,7 @@ dependencies = [
  "pbkdf2",
  "regex",
  "rusqlite",
+ "rustix",
  "secret-service",
  "security-framework",
  "serde",

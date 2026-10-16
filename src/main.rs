@@ -211,12 +211,60 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
-    let result = runtime.block_on(run(cli));
-    // Shutting the runtime down drops every task, which kills the yt-dlp and
-    // ffmpeg processes they started (`kill_on_drop`) rather than leaving them
-    // running after the app has quit.
+    let result = runtime.block_on(async {
+        tokio::select! {
+            result = run(cli) => result,
+            why = stop_signal() => {
+                eprintln!("joyscroller: {why}, stopping");
+                Ok(())
+            }
+        }
+    });
+    // Shutting the runtime down drops every task, which kills the yt-dlp,
+    // ffmpeg and browser processes they started, with everything those
+    // started in turn (`tools::Running`), rather than leaving them running
+    // after the app has quit.
     runtime.shutdown_timeout(QUIT_GRACE);
     result
+}
+
+/// Waits for a signal to stop: Ctrl-C, and on Linux and macOS also SIGTERM
+/// (`kill`, a service manager, logging out) and SIGHUP (the terminal
+/// closing). Left to them, the process would die on the spot, leaving the
+/// tools it started running and the headless browsers' throwaway profiles,
+/// which hold copies of the user's cookies, on disk. Says which it was.
+async fn stop_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) {
+            (Ok(mut term), Ok(mut hup)) => tokio::select! {
+                Ok(()) = tokio::signal::ctrl_c() => "interrupted",
+                Some(()) = term.recv() => "terminated",
+                Some(()) = hup.recv() => "hung up",
+                // None of them can come any more.
+                else => std::future::pending().await,
+            },
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("warning: can't watch for SIGTERM and SIGHUP: {e}");
+                interrupted().await
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    interrupted().await
+}
+
+/// Waits for Ctrl-C; forever if it can't be watched for.
+async fn interrupted() -> &'static str {
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        eprintln!("warning: can't watch for Ctrl-C: {e}");
+        std::future::pending::<()>().await;
+    }
+    "interrupted"
 }
 
 async fn run(cli: Cli) -> Result<()> {

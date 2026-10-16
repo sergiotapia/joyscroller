@@ -11,6 +11,10 @@
 //! `x86_64` and `aarch64` (`ASSETS`); anywhere else, everything comes from `PATH`.
 //! Tool files carry the platform's executable suffix (`.exe` on Windows).
 //!
+//! Start them with `Running::spawn` or `output`, which put each in a
+//! process group of its own and kill the whole group if it's dropped
+//! before it finishes, so nothing a tool started outlives it.
+//!
 //! Chrome's headless shell is fetched only when it's needed: when the user's
 //! browser can't run TikTok and Instagram headless (Firefox, Arc) and no
 //! other installed browser can either (`headless_chrome`).
@@ -20,13 +24,14 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
-use tokio::process::Command;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::{Child, Command};
 use ureq::ResponseExt as _;
 
 const YT_DLP_RELEASE: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
@@ -254,6 +259,80 @@ pub fn ffprobe() -> Result<Command> {
     Ok(Command::new(program("ffprobe")?))
 }
 
+/// A tool that's running, in a process group of its own with whatever it
+/// starts in turn. Dropped before it has finished (a listing stopped early,
+/// a task dropped as the app quits), the whole group is killed. Killing the
+/// tool alone, as `kill_on_drop` does, isn't enough: yt-dlp's standalone
+/// build is a launcher that runs the real yt-dlp as its child, which ran on
+/// for most of a minute after every listing stopped early. Its stdin is
+/// empty, since a process outside the terminal's foreground group that
+/// reads the terminal is stopped.
+pub struct Running(Child);
+
+impl Running {
+    pub fn spawn(cmd: &mut Command) -> std::io::Result<Running> {
+        #[cfg(unix)]
+        cmd.process_group(0);
+        Ok(Running(
+            cmd.stdin(Stdio::null()).kill_on_drop(true).spawn()?,
+        ))
+    }
+}
+
+impl std::ops::Deref for Running {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Running {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        // Only while the tool is still running: once it has exited and been
+        // waited for, its id (the group's) may be some other process's.
+        #[cfg(unix)]
+        if matches!(self.0.try_wait(), Ok(None))
+            && let Some(id) = self.0.id()
+            && let Some(pid) = i32::try_from(id)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+            && let Err(e) = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
+        {
+            eprintln!("warning: couldn't stop process group {id}: {e}");
+        }
+    }
+}
+
+/// Run `cmd` to the end and collect what it printed, as `Command::output`
+/// does, in a process group of its own (see `Running`).
+pub async fn output(cmd: &mut Command) -> std::io::Result<Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut running = Running::spawn(cmd)?;
+    let stdout = running.stdout.take();
+    let stderr = running.stderr.take();
+    let (stdout, stderr, status) =
+        tokio::try_join!(read_all(stdout), read_all(stderr), running.wait())?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+async fn read_all(pipe: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut buf).await?;
+    }
+    Ok(buf)
+}
+
 /// Whether everything downloads need is here, our own copy or on `PATH`.
 pub fn ready() -> Result<bool> {
     have_all(&["yt-dlp", "ffmpeg", "ffprobe", "bun"])
@@ -413,13 +492,9 @@ pub async fn update_yt_dlp() -> Result<()> {
     // progress) keeps its old copy, and on Windows, which can't overwrite a
     // running .exe, it moves the running exe aside first. Either way
     // `--update` is safe while downloads run.
-    let out = Command::new(&own)
-        .arg("--update")
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .context("running yt-dlp --update")?;
+    let mut cmd = Command::new(&own);
+    cmd.arg("--update");
+    let out = output(&mut cmd).await.context("running yt-dlp --update")?;
     if !out.status.success() {
         bail!(
             "yt-dlp --update failed: {}",
@@ -663,11 +738,9 @@ pub async fn versions() -> Result<String> {
         } else {
             on_path(&[name]).unwrap_or_else(|| program.clone())
         };
-        let out = Command::new(&program)
-            .arg(flag)
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output()
+        let mut cmd = Command::new(&program);
+        cmd.arg(flag);
+        let out = output(&mut cmd)
             .await
             .with_context(|| format!("running {} {flag}", path.display()))?;
         if !out.status.success() {
@@ -685,11 +758,9 @@ pub async fn versions() -> Result<String> {
         let program =
             chrome_folder(&dir()?).join(chrome_in_zip(build, std::env::consts::EXE_SUFFIX));
         if program.is_file() {
-            let out = Command::new(&program)
-                .arg("--version")
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output()
+            let mut cmd = Command::new(&program);
+            cmd.arg("--version");
+            let out = output(&mut cmd)
                 .await
                 .with_context(|| format!("running {} --version", program.display()))?;
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -756,6 +827,61 @@ fn checksum(sums: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shell that starts a `sleep` and waits for it, as yt-dlp's launcher
+    /// runs the real yt-dlp, and prints the sleep's pid.
+    #[cfg(unix)]
+    fn launcher() -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(Stdio::piped());
+        cmd
+    }
+
+    #[cfg(unix)]
+    async fn started_pid(running: &mut Running) -> rustix::process::Pid {
+        use tokio::io::AsyncBufReadExt;
+        let stdout = running.stdout.take().unwrap();
+        let line = tokio::io::BufReader::new(stdout)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .unwrap();
+        rustix::process::Pid::from_raw(line.trim().parse().unwrap()).unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn gone(pid: rustix::process::Pid) -> bool {
+        // Killed, it's reaped by init a moment later.
+        for _ in 0..50 {
+            if rustix::process::test_kill_process(pid).is_err() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_a_running_tool_stops_what_it_started() {
+        let mut running = Running::spawn(&mut launcher()).unwrap();
+        let sleep = started_pid(&mut running).await;
+        drop(running);
+        assert!(gone(sleep).await, "the launcher's child outlived it");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_collects_what_a_tool_prints() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let out = output(&mut cmd).await.unwrap();
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+        assert_eq!(out.status.code(), Some(3));
+    }
 
     #[test]
     fn finds_checksum_by_exact_name() {
