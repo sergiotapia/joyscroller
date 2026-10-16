@@ -1,6 +1,6 @@
 # Joyscroller
 
-![Joyscroller's pages: the list of likes, a search typed in and its results sorted by length, a YouTube video playing, and a TikTok photo post's slideshow](docs/joyscroller.gif)
+https://github.com/user-attachments/assets/e23a3a30-3098-4132-9f6b-e0f4a6a12575
 
 Automatically download the videos you like on TikTok, YouTube and Instagram, and keep them forever.
 
