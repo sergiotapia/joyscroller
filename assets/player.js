@@ -75,15 +75,19 @@ function slideshow(show, signal) {
     go(index + step);
   }, { signal });
 
+  // The slideshow listens, not the strip: the strip's own box is one picture
+  // wide and slides out of view past the first, and the pictures ignore the
+  // pointer. A press on the turn buttons or the dots is left a click.
   let drag = null;
-  strip.addEventListener("pointerdown", (e) => {
+  show.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 || pictures.length < 2) return;
+    if (e.target.closest(".slide-turn, .slide-dots")) return;
     drag = { id: e.pointerId, x: e.clientX, at: e.timeStamp, dx: 0 };
-    strip.setPointerCapture(e.pointerId);
+    show.setPointerCapture(e.pointerId);
     strip.style.transition = "none";
     show.classList.add("dragging");
   });
-  strip.addEventListener("pointermove", (e) => {
+  show.addEventListener("pointermove", (e) => {
     if (drag?.id !== e.pointerId) return;
     let dx = e.clientX - drag.x;
     // Past the first or last picture the strip gives way only a little.
@@ -101,8 +105,10 @@ function slideshow(show, signal) {
     const flick = speed > 0.4 && Math.abs(dx) > 24;
     go(far || flick ? index - Math.sign(dx) : index);
   };
-  strip.addEventListener("pointerup", letGo);
-  strip.addEventListener("pointercancel", letGo);
+  show.addEventListener("pointerup", letGo);
+  show.addEventListener("pointercancel", letGo);
+  // Losing the pointer some other way still lets go, so a drag can't stick.
+  show.addEventListener("lostpointercapture", letGo);
 
   // The screen takes the first picture's shape (TikTok's are mostly 3:4 or
   // 9:16), so it isn't letterboxed. Later ones that differ are fitted inside.

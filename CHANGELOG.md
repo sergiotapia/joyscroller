@@ -4,6 +4,10 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+
+- Dragging through a photo post's pictures works on every picture, not just the first. Before, after turning to the second picture, it stopped following drags until you went back.
+
 ## [0.12.0] - 2026-10-16
 
 ### Added
