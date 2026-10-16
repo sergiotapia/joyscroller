@@ -1,45 +1,68 @@
-/* /tv (src/web/tv.rs, assets/tv.js): the video page's player as a TV.
-   Two players sit in one grid cell; only the one on air is shown, and the
-   other loads the next show behind it. Every show gets the same 16:9
-   screen, so a portrait TikTok after a widescreen YouTube video gets bars
-   at its sides rather than the set changing shape. Over the screen's glass
-   go the static shown while tuning, the channel's number in the corner,
-   and the power button. Uses style.css's colors and fonts and player.css's
-   casing. */
+/* /tv (src/web/tv.rs, assets/tv.js): a television set in the clock radio's
+   plastic. The set is a render (assets/blender/tv.py) laid out by its
+   front face: the ears rise above it and its shadow falls below, outside
+   the box. Every part sits where tv.json says, in percentages of the
+   front, so it all scales together. Under the render's cut-out glass is
+   the tube's face: the two players stacked in one cell (only the one on
+   air shown), and over them the canvas the picture is drawn on
+   (assets/crt.js); over the render, the glass's reflections, blended as
+   light. Beside the set (under it, on a narrow window) are the remote's
+   channel buttons and the guide. Uses style.css's colors and fonts. */
 
-.tv { display: grid; justify-items: center; gap: 12px; }
-
-/* As wide as the window allows, and short enough that the remote and the
-   guide fit under it in a window as tall as player.css allows a screen:
-   the casing adds 18px a side and the 72px strip below. */
-.tv-screen {
-  position: relative;
+.tv {
+  --ears: 0.27;  /* how far the ears rise over the front, of its height */
   display: grid;
-  width: min(100%, calc((var(--screen-height) - 180px) * 16 / 9 + 36px));
-  margin: 0 0 30px;
+  grid-template-columns: auto minmax(220px, 280px);
+  align-items: center;
+  justify-content: center;
+  gap: 12px 36px;
 }
-.tv-stage { grid-area: 1 / 1; min-width: 0; }
-.tv-stage:not(.on-air) { visibility: hidden; }
-.tv .player { grid-template-columns: minmax(0, 1fr); width: 100%; min-width: 0; margin: 0; }
-.tv .player-screen { width: 100%; aspect-ratio: 16 / 9; }
-.tv .player-screen > video { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; object-fit: contain; }
-/* tv.js tells the slideshow when to turn; its own shape is the screen's. */
-.tv .slideshow { height: auto; aspect-ratio: 16 / 9 !important; }
-.tv .player-start { display: none; }
 
-/* ---- Over the glass ------------------------------------------------------ */
+/* As big as the window allows: the height under the top bar and over the
+   taskbar, less room for the ears; the width beside the guide. */
+.tv-set {
+  position: relative;
+  width: max(420px, min(calc((100vh - 200px) / (1 + var(--ears)) * var(--set-ratio)), calc(100vw - 400px)));
+  aspect-ratio: var(--set-ratio);
+  margin-top: calc(var(--ears) * 100% / var(--set-ratio));
+  user-select: none;
+}
+.tv-set > * { position: absolute; }
+.tv-body, .tv-glare { max-width: none; pointer-events: none; }
+.tv-body { z-index: 2; filter: drop-shadow(0 10px 18px rgba(0, 0, 0, .35)); }
+.tv-glare { z-index: 3; mix-blend-mode: screen; }
+
+/* ---- The tube's face ---------------------------------------------------- */
+
+.tv-screen {
+  z-index: 1;
+  display: grid;
+  overflow: hidden;
+  background: #070908;
+}
+.tv-stage { grid-area: 1 / 1; min-width: 0; min-height: 0; }
+.tv-stage:not(.on-air) { visibility: hidden; }
+.tv .player { display: block; width: 100%; height: 100%; min-width: 0; margin: 0; padding: 0; border-image: none; }
+.tv .player-screen { width: 100%; height: 100%; border-radius: 0; background: #000; }
+.tv .player-screen::before { display: none; }
+.tv .player-screen > video { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; object-fit: contain; }
+.tv .slideshow { width: 100%; height: 100% !important; aspect-ratio: auto !important; }
+.tv .player-strip, .tv .player-start, .tv .player-busy, .tv .slide-turn, .tv .slide-dots, .tv .slide-count { display: none !important; }
+
+/* The tube draws over the players, which keep playing underneath it. */
+.tv-crt { grid-area: 1 / 1; z-index: 1; width: 100%; height: 100%; }
+.tv.flat .tv-crt { display: none; }
 
 .tv-glass {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   grid-area: 1 / 1;
-  margin: 18px 18px 72px;
   overflow: hidden;
   pointer-events: none;
-  border-radius: 14px;
 }
 
-/* Snow: noise drawn by an SVG filter, jumping about a few times a frame. */
+/* The flat set's snow (no WebGL): noise drawn by an SVG filter, jumping
+   about a few times a frame. The tube draws its own. */
 .tv-static {
   position: absolute;
   inset: -50%;
@@ -50,7 +73,7 @@
   transition: opacity .12s;
   animation: snow .24s steps(6) infinite;
 }
-.tv.tuning .tv-static { opacity: 1; transition: none; }
+.tv.flat.tuning:not(.off) .tv-static { opacity: 1; transition: none; }
 @keyframes snow {
   0% { transform: translate(0, 0); }
   20% { transform: translate(-7%, 4%); }
@@ -59,20 +82,22 @@
   80% { transform: translate(9%, 2%); }
   100% { transform: translate(-6%, -5%); }
 }
+@media (prefers-reduced-motion: reduce) {
+  .tv-static { animation: none; }
+}
 
-/* The channel's number, lit up in the corner for a few seconds after
-   tuning, in the clock radio's LCD digits. Top left: a photo post counts
-   its pictures in the top right. */
+/* The flat set's channel number, which the tube draws as its OSD. */
 .tv-bug {
   position: absolute;
-  top: 14px;
-  left: 18px;
+  top: 6%;
+  right: 6%;
   display: grid;
-  justify-items: start;
-  color: var(--slime);
-  text-shadow: 0 0 8px rgba(166, 229, 43, .7), 2px 2px 0 rgba(0, 0, 0, .7);
+  justify-items: end;
+  color: #3dff5a;
+  text-shadow: 3px 3px 0 #000;
   opacity: 0;
 }
+.tv:not(.flat) .tv-bug { display: none; }
 .tv-bug b { font: 44px/1 "DSEG7", monospace; }
 .tv-bug span { font: 600 15px/1.4 "Fredoka", sans-serif; letter-spacing: .06em; text-transform: uppercase; }
 .tv-bug.shown { animation: bug 3.2s forwards; }
@@ -85,45 +110,97 @@
   display: grid;
   place-items: center;
   margin: 0;
-  padding: 24px;
-  color: #fff;
+  padding: 10%;
+  color: #3dff5a;
   font: 600 18px/1.4 "Fredoka", sans-serif;
   text-align: center;
-  background: rgba(7, 4, 15, .82);
+  text-shadow: 2px 2px 0 #000;
 }
 .tv-off[hidden] { display: none; }
 
-/* The player's red dome, as the power button: a click is what lets the
-   browser play sound. */
-.tv-power {
+/* While the set's off, the dark glass says how to turn it on, and is a
+   button for it too. */
+.tv-wake {
   position: absolute;
   inset: 0;
   display: grid;
   place-content: center;
-  justify-items: center;
-  gap: 10px;
   padding: 0;
-  color: #fff;
-  font: 26px/1 "Luckiest Guy", sans-serif;
+  color: rgba(255, 255, 255, .55);
+  font: 22px/1.3 "Luckiest Guy", sans-serif;
   letter-spacing: .04em;
-  text-shadow: 2px 3px 0 var(--purple-dark);
   cursor: pointer;
   pointer-events: auto;
-  background: rgba(7, 4, 15, .45);
+  background: none;
   border: 0;
+  animation: wake 1.2s 1s backwards;
 }
-.tv-power[hidden] { display: none; }
-.tv-power::before {
-  content: "";
-  width: 128px;
-  height: 128px;
-  background: url("/assets/dome-play.webp") 0 0 / 100% 200% no-repeat;
+.tv-wake b { color: #ff6b5e; font-weight: normal; }
+.tv-wake:hover { color: rgba(255, 255, 255, .8); }
+.tv-wake[hidden] { display: none; }
+@keyframes wake { from { opacity: 0; } }
+
+/* ---- The set's controls -------------------------------------------------- */
+
+/* The channel LCD: the radio's lit digits over the render's dark glass,
+   with the unlit segments faintly there. */
+.tv-lcd {
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  font: clamp(14px, 3.2cqw, 40px)/1 "DSEG7", monospace;
+  container-type: size;
+  pointer-events: none;
 }
-.tv-power:hover::before { filter: brightness(1.06); }
-.tv-power:active::before { background-position: 0 100%; }
+.tv-lcd span { grid-area: 1 / 1; font-size: 62cqh; }
+.tv-lcd-unlit { color: rgba(166, 229, 43, .07); }
+.tv-lcd-lit { color: var(--slime); text-shadow: 0 0 8px rgba(166, 229, 43, .75); }
+.tv.off .tv-lcd-lit { visibility: hidden; }
+
+/* A button over its render: the sprite holds it up, then pressed. */
+.tv-key {
+  z-index: 4;
+  padding: 0;
+  cursor: pointer;
+  background: url("/assets/tv-up.webp") 0 0 / 100% 200% no-repeat;
+  border: 0;
+  border-radius: 50%;
+}
+.tv-key span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.tv-key:hover { filter: brightness(1.08); }
+.tv-key:active { background-position: 0 100%; }
+.tv-key:focus-visible, .tv-knob:focus-visible { outline: 3px solid var(--slime); outline-offset: 2px; }
+.tv-ch-down { background-image: url("/assets/tv-down.webp"); }
+.tv-power-key { background-image: url("/assets/tv-power.webp"); }
+/* Standby: the button breathes, so it's clear where to press. */
+.tv.off .tv-power-key { animation: standby 2.4s ease-in-out infinite; }
+@keyframes standby { 50% { filter: brightness(1.18) drop-shadow(0 0 10px rgba(255, 60, 40, .55)); } }
+@media (prefers-reduced-motion: reduce) {
+  .tv.off .tv-power-key { animation: none; }
+}
+
+/* The VOLUME knob: the frame of the sprite at the volume (tv.js sets
+   background-position-y). */
+.tv-knob {
+  z-index: 4;
+  cursor: grab;
+  touch-action: none;
+  background: url("/assets/tv-knob.webp") 0 0 / 100% 2800% no-repeat;
+  border-radius: 50%;
+}
+.tv-knob:active { cursor: grabbing; }
+
+/* The power light: red on standby, green on. */
+.tv-led {
+  z-index: 4;
+  background: url("/assets/tv-led.webp") 0 50% / 100% 300% no-repeat;
+  pointer-events: none;
+}
+.tv:not(.off) .tv-led { background-position: 0 100%; }
 
 /* ---- The remote and the guide -------------------------------------------- */
 
+.tv-side { display: grid; gap: 14px; align-content: center; }
 .tv-remote { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .tv-remote a {
   display: inline-flex;
@@ -138,6 +215,7 @@
   border-radius: 999px;
   box-shadow: inset 0 2px 0 rgba(255, 255, 255, .3), 0 3px 0 var(--purple-dark);
 }
+.tv-remote .tv-channel { flex: 1 1 calc(50% - 8px); }
 .tv-remote a:hover { filter: brightness(1.1); }
 .tv-remote a:active { transform: translateY(2px); box-shadow: inset 0 2px 0 rgba(255, 255, 255, .3), 0 1px 0 var(--purple-dark); }
 .tv-remote b {
@@ -153,36 +231,36 @@
 }
 .tv-remote a[aria-current] b { color: var(--slime); text-shadow: 0 0 6px rgba(166, 229, 43, .8); }
 .tv-remote a[aria-current] { background: linear-gradient(#b48cff, var(--violet)); }
-.tv-remote .tv-step { padding: 6px 14px; background: linear-gradient(#ff5b52, var(--dome)); border-color: #8a1410; box-shadow: inset 0 2px 0 rgba(255, 255, 255, .3), 0 3px 0 #8a1410; }
+.tv-remote .tv-step { flex: 1 1 calc(50% - 8px); justify-content: center; padding: 6px 14px; background: linear-gradient(#ff5b52, var(--dome)); border-color: #8a1410; box-shadow: inset 0 2px 0 rgba(255, 255, 255, .3), 0 3px 0 #8a1410; }
 
 .tv-guide {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 4px 12px;
-  width: min(100%, 760px);
   margin: 4px 0 0;
 }
 /* Straight on the desktop's dark backdrop, so light text with a shadow. */
 .tv-guide, .tv-keys { color: #fff; text-shadow: 1px 1px 2px rgba(0, 0, 0, .9), 0 0 6px rgba(0, 0, 0, .6); }
 .tv-guide dt { color: var(--slime); font-weight: bold; text-transform: uppercase; font-size: 11px; line-height: 20px; }
-.tv-guide dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv-guide dd { margin: 0; overflow-wrap: anywhere; }
 .tv-guide a { color: #fff; }
 .tv-who, .tv-left { color: rgba(255, 255, 255, .72); }
-.tv-left { margin-left: 8px; font-variant-numeric: tabular-nums; }
-.tv-keys { margin: 0; font-size: 11px; text-align: center; color: rgba(255, 255, 255, .72); }
+.tv-left { display: block; font-variant-numeric: tabular-nums; }
+.tv-keys { margin: 0; font-size: 11px; color: rgba(255, 255, 255, .72); }
 
-/* ---- Fullscreen: the whole screen, both players, no casing ------------- */
-
-.tv-screen:fullscreen { width: 100%; height: 100%; margin: 0; background: #000; }
-.tv-screen:fullscreen .player { display: block; height: 100%; padding: 0; border-image: none; }
-.tv-screen:fullscreen .player-screen { height: 100%; aspect-ratio: auto !important; border-radius: 0; }
-.tv-screen:fullscreen .player-screen::before { display: none; }
-.tv-screen:fullscreen .player-strip { display: none; }
-.tv-screen:fullscreen .tv-glass { margin: 0; border-radius: 0; }
-.tv-screen:fullscreen { cursor: none; }
-
-/* A phone's strip has no room for the time as well; the guide says how
-   long the show has left. */
-@media (max-width: 480px) {
-  .tv .player-lcd { display: none; }
+/* A window too narrow for the guide beside the set: under it. */
+@media (max-width: 900px) {
+  .tv { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+  .tv-set { width: min(100%, calc((100vh - 190px) / (1 + var(--ears)) * var(--set-ratio))); }
+  .tv-side { width: min(100%, 560px); }
 }
+
+/* ---- Fullscreen: just the tube ------------------------------------------ */
+
+.tv-screen:fullscreen { inset: 0; width: 100%; height: 100%; background: #000; cursor: none; }
+.tv-screen:fullscreen .tv-crt { width: 100%; height: 100%; }
+.tv.flat .tv-screen:fullscreen .player-screen > video { object-fit: contain; }
+
+/* No set render (tv.json didn't read): a bare 4:3 screen. */
+.tv-set.bare { aspect-ratio: 4 / 3; margin-top: 0; }
+.tv-set.bare .tv-screen { inset: 0; }

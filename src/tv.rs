@@ -18,6 +18,10 @@
 //! - A video longer than `MAX_AIRTIME` airs a stretch of it, from a random
 //!   point, like a show joined in progress; its page has the whole thing.
 //! - A photo post airs for a few seconds a picture (`photo_airtime`).
+//! - Every `BREAK_EVERY` of airtime, at the end of a show, the station
+//!   takes a break: one of its bumpers (short idents and "up next" cards,
+//!   assets/blender/bumpers.py), dealt from a shuffled deck of its own. They
+//!   are on the schedule like the shows, so tuning in can land in one.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
@@ -33,6 +37,11 @@ const MAX_AIRTIME: f64 = 600.0;
 const PHOTO_SECONDS_EACH: f64 = 5.0;
 const PHOTO_SHORTEST: f64 = 10.0;
 const PHOTO_LONGEST: f64 = 40.0;
+
+/// How much airtime goes by between station breaks, in seconds: a few
+/// minutes, so a channel of 15-second posts isn't all bumpers, and a long
+/// video's stretch has one after it.
+const BREAK_EVERY: f64 = 240.0;
 
 /// How many shows go by before a creator airs again, when the deck allows.
 const AUTHOR_GAP: usize = 3;
@@ -159,12 +168,27 @@ fn photo_airtime(slides: usize) -> f64 {
 
 type Key = (String, String);
 
-/// One show's turn on air.
+/// One of the station's bumpers: a short clip it airs between shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bumper {
+    pub name: String,
+    /// How long it runs, in seconds.
+    pub seconds: f64,
+}
+
+/// What a slot airs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Program {
+    Show(Show),
+    Break(Bumper),
+}
+
+/// One show's (or break's) turn on air.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Slot {
     /// Its place on the channel's schedule, counting up from 0.
     pub seq: u64,
-    pub show: Show,
+    pub program: Program,
     /// When it goes on air, unix seconds.
     pub starts_at: f64,
     /// Where in the media it starts, in seconds: past 0 only for a long
@@ -177,6 +201,14 @@ pub struct Slot {
 impl Slot {
     pub fn ends_at(&self) -> f64 {
         self.starts_at + self.airtime
+    }
+
+    /// The show it airs, unless it's a break.
+    pub fn show(&self) -> Option<&Show> {
+        match &self.program {
+            Program::Show(show) => Some(show),
+            Program::Break(_) => None,
+        }
     }
 }
 
@@ -202,10 +234,18 @@ pub struct Lineup {
     last_seq: HashMap<Key, u64>,
     slots: VecDeque<Slot>,
     next_seq: u64,
+    /// The station's bumpers, and what's left of their deck (indexes into
+    /// it; the end is dealt first).
+    bumpers: Vec<Bumper>,
+    breaks: Vec<usize>,
+    /// The last bumper dealt, so a fresh deck doesn't start with it.
+    last_break: Option<usize>,
+    /// Airtime since the last break, in seconds.
+    since_break: f64,
 }
 
 impl Lineup {
-    pub fn new(channel: Channel, seed: u64) -> Lineup {
+    pub fn new(channel: Channel, seed: u64, bumpers: Vec<Bumper>) -> Lineup {
         Lineup {
             channel,
             rng: Rng(seed),
@@ -218,6 +258,10 @@ impl Lineup {
             last_seq: HashMap::new(),
             slots: VecDeque::new(),
             next_seq: 0,
+            bumpers,
+            breaks: Vec::new(),
+            last_break: None,
+            since_break: 0.0,
         }
     }
 
@@ -246,8 +290,10 @@ impl Lineup {
         }
         // A show already scheduled keeps its turn, with its latest gain.
         for slot in &mut self.slots {
-            if let Some(show) = shows.get(&slot.show.key()) {
-                slot.show.gain_db = show.gain_db;
+            if let Program::Show(on) = &mut slot.program
+                && let Some(show) = shows.get(&on.key())
+            {
+                on.gain_db = show.gain_db;
             }
         }
         let mut library: HashMap<String, usize> = HashMap::new();
@@ -317,7 +363,7 @@ impl Lineup {
             && last.ends_at() <= now
         {
             let starts_at = last.ends_at();
-            let Some(next) = self.deal(starts_at) else {
+            let Some(next) = self.next(starts_at) else {
                 return Vec::new();
             };
             self.slots.push_back(next);
@@ -343,7 +389,7 @@ impl Lineup {
             && last.seq + 1 < end
         {
             let starts_at = last.ends_at();
-            let Some(next) = self.deal(starts_at) else {
+            let Some(next) = self.next(starts_at) else {
                 break;
             };
             self.slots.push_back(next);
@@ -353,6 +399,45 @@ impl Lineup {
             .filter(|slot| (start..end).contains(&slot.seq))
             .cloned()
             .collect()
+    }
+
+    /// The next slot, starting at `starts_at`: a break when one is due,
+    /// otherwise the next show.
+    fn next(&mut self, starts_at: f64) -> Option<Slot> {
+        let after_show = self.slots.back().is_some_and(|slot| slot.show().is_some());
+        if after_show && self.since_break >= BREAK_EVERY && !self.bumpers.is_empty() {
+            return self.deal_break(starts_at);
+        }
+        self.deal(starts_at)
+    }
+
+    /// A break's slot, starting at `starts_at`: the next bumper from the
+    /// deck, shuffling a fresh one when it's run out, never the last one
+    /// again.
+    fn deal_break(&mut self, starts_at: f64) -> Option<Slot> {
+        if self.breaks.is_empty() {
+            let mut deck: Vec<usize> = (0..self.bumpers.len()).collect();
+            self.rng.shuffle(&mut deck);
+            // Dealt from the end: the last one aired mustn't be there.
+            let last = deck.len() - 1;
+            if last > 0 && deck.last() == self.last_break.as_ref() {
+                deck.swap(0, last);
+            }
+            self.breaks = deck;
+        }
+        let at = self.breaks.pop()?;
+        let bumper = self.bumpers.get(at)?.clone();
+        self.last_break = Some(at);
+        self.since_break = 0.0;
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        Some(Slot {
+            seq,
+            starts_at,
+            from: 0.0,
+            airtime: bumper.seconds,
+            program: Program::Break(bumper),
+        })
     }
 
     /// The next show's slot, starting at `starts_at`.
@@ -368,6 +453,7 @@ impl Lineup {
             (0.0, show.length)
         };
         *self.aired.entry(platform).or_default() += airtime;
+        self.since_break += airtime;
         self.recent.push_back(show.creator());
         while self.recent.len() > AUTHOR_GAP {
             self.recent.pop_front();
@@ -377,7 +463,7 @@ impl Lineup {
         self.next_seq += 1;
         Some(Slot {
             seq,
-            show,
+            program: Program::Show(show),
             starts_at,
             from,
             airtime,
@@ -491,14 +577,17 @@ impl Lineup {
 /// Every channel's lineup, for the web UI.
 pub struct Tv {
     seed: u64,
+    bumpers: Vec<Bumper>,
     lineups: Mutex<HashMap<Channel, Lineup>>,
 }
 
 impl Tv {
-    /// Channels whose schedules are shuffled by `seed`.
-    pub fn new(seed: u64) -> Tv {
+    /// Channels whose schedules are shuffled by `seed`, with `bumpers` in
+    /// their breaks.
+    pub fn new(seed: u64, bumpers: Vec<Bumper>) -> Tv {
         Tv {
             seed,
+            bumpers,
             lineups: Mutex::new(HashMap::new()),
         }
     }
@@ -518,7 +607,7 @@ impl Tv {
         let seed = self.seed ^ (channel.number() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let lineup = lineups
             .entry(channel)
-            .or_insert_with(|| Lineup::new(channel, seed));
+            .or_insert_with(|| Lineup::new(channel, seed, self.bumpers.clone()));
         lineup.refresh(shows);
         lineup.slots(now, from, count)
     }
@@ -601,7 +690,7 @@ mod tests {
     }
 
     fn lineup(channel: Channel, seed: u64, shows: &[Show]) -> Lineup {
-        let mut lineup = Lineup::new(channel, seed);
+        let mut lineup = Lineup::new(channel, seed, Vec::new());
         lineup.refresh(shows.iter().cloned());
         lineup
     }
@@ -611,7 +700,10 @@ mod tests {
     }
 
     fn ids(slots: &[Slot]) -> Vec<String> {
-        slots.iter().map(|s| s.show.video_id.clone()).collect()
+        slots
+            .iter()
+            .map(|s| s.show().unwrap().video_id.clone())
+            .collect()
     }
 
     #[test]
@@ -645,7 +737,10 @@ mod tests {
         shows.extend((20..40).map(|i| show("tiktok", i, "a", 30.0)));
         for seed in 0..50 {
             let slots = deal(&mut lineup(Channel::TikTok, seed, &shows), 400);
-            let authors: Vec<_> = slots.iter().map(|s| s.show.author.clone()).collect();
+            let authors: Vec<_> = slots
+                .iter()
+                .map(|s| s.show().unwrap().author.clone())
+                .collect();
             let repeats = authors.windows(2).filter(|w| w[0] == w[1]).count();
             assert_eq!(repeats, 0, "seed {seed}");
         }
@@ -657,7 +752,10 @@ mod tests {
         let mut worst = 0;
         for seed in 0..20 {
             let slots = deal(&mut lineup(Channel::TikTok, seed, &shows), 1500);
-            let authors: Vec<_> = slots.iter().map(|s| s.show.author.clone()).collect();
+            let authors: Vec<_> = slots
+                .iter()
+                .map(|s| s.show().unwrap().author.clone())
+                .collect();
             let close = authors
                 .windows(AUTHOR_GAP + 1)
                 .filter(|w| w[1..].contains(&w[0]))
@@ -680,7 +778,7 @@ mod tests {
             for (platform, share) in [("youtube", 10.0), ("tiktok", 30.0), ("instagram", 20.0)] {
                 let aired: f64 = slots
                     .iter()
-                    .filter(|s| s.show.platform == platform)
+                    .filter(|s| s.show().unwrap().platform == platform)
                     .map(|s| s.airtime)
                     .sum();
                 let off = (aired / total - share / 60.0).abs();
@@ -700,7 +798,7 @@ mod tests {
         let slots = deal(&mut lineup, 22);
         let instagram = slots
             .iter()
-            .filter(|s| s.show.platform == "instagram")
+            .filter(|s| s.show().unwrap().platform == "instagram")
             .count();
         // Its one post airs, then rests while YouTube carries on, rather
         // than airing again and again to make up its share.
@@ -717,7 +815,7 @@ mod tests {
         let run = slots
             .iter()
             .fold((0, 0), |(longest, now), s| {
-                let now = if s.show.platform == "instagram" {
+                let now = if s.show().unwrap().platform == "instagram" {
                     now + 1
                 } else {
                     0
@@ -746,9 +844,11 @@ mod tests {
         ];
         for seed in 0..50 {
             for slot in deal(&mut lineup(Channel::YouTube, seed, &shows), 4) {
-                if slot.show.length > MAX_AIRTIME {
+                if slot.show().unwrap().length > MAX_AIRTIME {
                     assert!((slot.airtime - MAX_AIRTIME).abs() < f64::EPSILON);
-                    assert!(slot.from >= 0.0 && slot.from + slot.airtime <= slot.show.length);
+                    assert!(
+                        slot.from >= 0.0 && slot.from + slot.airtime <= slot.show().unwrap().length
+                    );
                 } else {
                     assert!(slot.from == 0.0 && (slot.airtime - 90.0).abs() < f64::EPSILON);
                 }
@@ -809,7 +909,7 @@ mod tests {
         assert!(
             deal(&mut tiktok, 9)
                 .iter()
-                .all(|s| s.show.platform == "tiktok")
+                .all(|s| s.show().unwrap().platform == "tiktok")
         );
         let mut instagram = lineup(Channel::Instagram, 0, &shows);
         assert!(instagram.slots(0.0, None, 3).is_empty());
@@ -843,5 +943,72 @@ mod tests {
         assert_eq!(video.slides, 0);
         assert!(Show::from_airable(&airable(&["video.mp4"], None)).is_none());
         assert!(Show::from_airable(&airable(&["thumbnail.jpg"], Some(9.0))).is_none());
+    }
+
+    fn bumpers() -> Vec<Bumper> {
+        ["splat", "up-next", "slime"]
+            .iter()
+            .map(|name| Bumper {
+                name: (*name).into(),
+                seconds: 5.0,
+            })
+            .collect()
+    }
+
+    /// The first `count` slots of `lineup`'s schedule, read as a page would.
+    fn schedule(lineup: &mut Lineup, count: usize) -> Vec<Slot> {
+        let mut slots = lineup.slots(0.0, None, 1);
+        while slots.len() < count {
+            let last = slots.last().unwrap().clone();
+            slots.extend(lineup.slots(last.starts_at, Some(last.seq + 1), 10));
+        }
+        slots.truncate(count);
+        slots
+    }
+
+    #[test]
+    fn breaks_come_every_few_minutes_of_airtime() {
+        let shows = library("tiktok", 60, &["a", "b", "c", "d"], 25.0);
+        for seed in 0..20 {
+            let mut lineup = Lineup::new(Channel::TikTok, seed, bumpers());
+            lineup.refresh(shows.iter().cloned());
+            let slots = schedule(&mut lineup, 300);
+            assert!(slots[0].show().is_some());
+            let mut since = 0.0;
+            let mut last: Option<String> = None;
+            let mut breaks = 0;
+            for slot in &slots {
+                match &slot.program {
+                    Program::Show(_) => since += slot.airtime,
+                    Program::Break(bumper) => {
+                        // At the end of the show that crosses the mark.
+                        assert!(
+                            (BREAK_EVERY..BREAK_EVERY + 25.0).contains(&since),
+                            "seed {seed}: {since}"
+                        );
+                        assert_ne!(last.as_deref(), Some(bumper.name.as_str()), "seed {seed}");
+                        assert!((slot.airtime - bumper.seconds).abs() < 1e-9);
+                        last = Some(bumper.name.clone());
+                        since = 0.0;
+                        breaks += 1;
+                    }
+                }
+            }
+            assert!(breaks >= 25, "seed {seed}: {breaks}");
+        }
+    }
+
+    #[test]
+    fn tuning_in_can_land_in_a_break() {
+        // Shows longer than BREAK_EVERY: a break after every one.
+        let shows = library("youtube", 10, &["a", "b"], 300.0);
+        let mut lineup = Lineup::new(Channel::YouTube, 3, bumpers());
+        lineup.refresh(shows.iter().cloned());
+        let slots = schedule(&mut lineup, 6);
+        let on_break = slots.iter().find(|s| s.show().is_none()).unwrap().clone();
+        let now = on_break.starts_at + 2.0;
+        let on = lineup.slots(now, None, 2);
+        assert_eq!(on[0], on_break);
+        assert!(on[1].show().is_some());
     }
 }

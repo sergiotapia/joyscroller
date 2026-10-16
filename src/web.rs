@@ -177,7 +177,7 @@ pub async fn serve(
         pipeline,
         media_root,
         quit: Arc::new(quit),
-        tv: Arc::new(Tv::new(crate::tv::seed())),
+        tv: Arc::new(Tv::new(crate::tv::seed(), tv::bumpers())),
     };
     let router = Router::new()
         .route("/", get(list_page))
@@ -239,7 +239,7 @@ You can close this tab.</p>\n\
 /// The stylesheets, scripts, fonts and pictures, as (name, type, contents).
 /// They're built into the executable, so the app stays a single file.
 /// `videojs.js` is Video.js 10, bundled by `just videojs`.
-const ASSETS: [(&str, &str, &[u8]); 35] = [
+const ASSETS: [(&str, &str, &[u8]); 47] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -254,6 +254,63 @@ const ASSETS: [(&str, &str, &[u8]); 35] = [
         "tv.js",
         "text/javascript; charset=utf-8",
         include_bytes!("../assets/tv.js"),
+    ),
+    (
+        "crt.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../assets/crt.js"),
+    ),
+    (
+        "tvsound.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../assets/tvsound.js"),
+    ),
+    ("tv.webp", "image/webp", include_bytes!("../assets/tv.webp")),
+    (
+        "tv-glass.webp",
+        "image/webp",
+        include_bytes!("../assets/tv-glass.webp"),
+    ),
+    (
+        "tv-power.webp",
+        "image/webp",
+        include_bytes!("../assets/tv-power.webp"),
+    ),
+    (
+        "tv-up.webp",
+        "image/webp",
+        include_bytes!("../assets/tv-up.webp"),
+    ),
+    (
+        "tv-down.webp",
+        "image/webp",
+        include_bytes!("../assets/tv-down.webp"),
+    ),
+    (
+        "tv-knob.webp",
+        "image/webp",
+        include_bytes!("../assets/tv-knob.webp"),
+    ),
+    (
+        "tv-led.webp",
+        "image/webp",
+        include_bytes!("../assets/tv-led.webp"),
+    ),
+    // The station's bumpers (assets/blender/bumpers.py, bumpers.json).
+    (
+        "bumper-splat.mp4",
+        "video/mp4",
+        include_bytes!("../assets/bumper-splat.mp4"),
+    ),
+    (
+        "bumper-up-next.mp4",
+        "video/mp4",
+        include_bytes!("../assets/bumper-up-next.mp4"),
+    ),
+    (
+        "bumper-bounce.mp4",
+        "video/mp4",
+        include_bytes!("../assets/bumper-bounce.mp4"),
     ),
     (
         "player.css",
@@ -434,16 +491,54 @@ async fn asset(Path(name): Path<String>, headers: HeaderMap) -> Result<Response,
     let kept = headers
         .get(header::IF_NONE_MATCH)
         .is_some_and(|tags| tags.as_bytes() == etag.as_bytes());
-    let headers = [
+    // Several ranges at once, which browsers don't ask media for, get the
+    // whole file, as RFC 9110 allows.
+    let range = headers
+        .get(header::RANGE)
+        .filter(|r| !r.as_bytes().contains(&b','))
+        .map(|r| byte_range(r, body.len()));
+    let fixed = [
         (header::CONTENT_TYPE, content_type),
         (header::CACHE_CONTROL, cache),
         (header::ETAG, etag.as_str()),
+        (header::ACCEPT_RANGES, "bytes"),
     ];
-    Ok(if kept {
-        (StatusCode::NOT_MODIFIED, headers).into_response()
-    } else {
-        (headers, body).into_response()
+    Ok(match range {
+        _ if kept => (StatusCode::NOT_MODIFIED, fixed).into_response(),
+        None => (fixed, body).into_response(),
+        // A clip (the bumpers): Safari plays video only from a server that
+        // answers range requests, and the TV seeks into one it joins late.
+        Some(Some((start, end))) => (
+            StatusCode::PARTIAL_CONTENT,
+            fixed,
+            [(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{}", body.len()),
+            )],
+            &body[start..=end],
+        )
+            .into_response(),
+        Some(None) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [(header::CONTENT_RANGE, format!("bytes */{}", body.len()))],
+        )
+            .into_response(),
     })
+}
+
+/// The first and last byte a `Range` header asks for, of `len` bytes: a
+/// single range, as browsers ask for media (`bytes=a-b`, `bytes=a-` or the
+/// last n, `bytes=-n`). None if it can't be served.
+fn byte_range(header: &HeaderValue, len: usize) -> Option<(usize, usize)> {
+    let spec = header.to_str().ok()?.strip_prefix("bytes=")?;
+    let (from, to) = spec.split_once('-')?;
+    let last = len.checked_sub(1)?;
+    let (start, end) = match (from.trim(), to.trim()) {
+        ("", n) => (len.checked_sub(n.parse::<usize>().ok()?.min(len))?, last),
+        (a, "") => (a.parse().ok()?, last),
+        (a, b) => (a.parse().ok()?, b.parse::<usize>().ok()?.min(last)),
+    };
+    (start <= end).then_some((start, end))
 }
 
 /// An asset's entity tag: a hash of its contents. `DefaultHasher::new`
@@ -3352,5 +3447,19 @@ mod tests {
             headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
             assert_eq!(from_this_ui(&headers), ok, "{origin}");
         }
+    }
+
+    #[test]
+    fn byte_ranges() {
+        let range = |r: &str| byte_range(&HeaderValue::from_str(r).unwrap(), 1000);
+        assert_eq!(range("bytes=0-"), Some((0, 999)));
+        assert_eq!(range("bytes=100-199"), Some((100, 199)));
+        assert_eq!(range("bytes=900-5000"), Some((900, 999)));
+        assert_eq!(range("bytes=-100"), Some((900, 999)));
+        assert_eq!(range("bytes=-5000"), Some((0, 999)));
+        assert_eq!(range("bytes=1000-"), None);
+        assert_eq!(range("bytes=5-1"), None);
+        assert_eq!(range("items=0-1"), None);
+        assert_eq!(byte_range(&HeaderValue::from_static("bytes=0-"), 0), None);
     }
 }

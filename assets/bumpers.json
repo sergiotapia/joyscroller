@@ -1,0 +1,27 @@
+[
+ {
+  "name": "splat",
+  "file": "bumper-splat.mp4",
+  "seconds": 4.5
+ },
+ {
+  "name": "up-next",
+  "file": "bumper-up-next.mp4",
+  "seconds": 6.5,
+  "text": {
+   "box": [
+    110,
+    226,
+    421,
+    118
+   ],
+   "from": 2.083,
+   "to": 5.5
+  }
+ },
+ {
+  "name": "bounce",
+  "file": "bumper-bounce.mp4",
+  "seconds": 4.5
+ }
+]
