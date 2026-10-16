@@ -43,9 +43,8 @@ struct Set {
     /// The set's front face, which the page lays out by: the ears above it
     /// and the shadow below hang outside.
     front: [f64; 4],
-    /// The tube's face, where the picture goes, and its corners' radius.
+    /// The tube's face, where the picture goes.
     screen: [f64; 4],
-    screen_radius: f64,
     /// `tv-glass.webp`, the face's reflections.
     glass: [f64; 4],
     lcd: [f64; 4],
@@ -174,13 +173,13 @@ fn set_html(channel: Channel) -> String {
     let Some(set) = &*SET else {
         return format!(
             "<div class=\"tv-set bare\" id=\"tv-set\">\n\
-             <div class=\"tv-screen\" id=\"tv-screen\" data-radius=\"0.02\">\n{screen_inside}</div>\n</div>\n"
+             <div class=\"tv-screen\" id=\"tv-screen\">\n{screen_inside}</div>\n</div>\n"
         );
     };
     let knob = &set.knob;
     format!(
         "<div class=\"tv-set\" id=\"tv-set\" style=\"--set-ratio:{ratio:.5}\">\n\
-         <div class=\"tv-screen\" id=\"tv-screen\" style=\"{screen}\" data-radius=\"{radius:.5}\">\n{screen_inside}</div>\n\
+         <div class=\"tv-screen\" id=\"tv-screen\" style=\"{screen}\">\n{screen_inside}</div>\n\
          <img class=\"tv-body\" src=\"/assets/tv.webp\" alt=\"\" style=\"{body}\">\n\
          <img class=\"tv-glare\" src=\"/assets/tv-glass.webp\" alt=\"\" style=\"{glass}\">\n\
          <div class=\"tv-lcd\" style=\"{lcd}\" aria-hidden=\"true\"><span class=\"tv-lcd-unlit\">88</span><span class=\"tv-lcd-lit\"></span></div>\n\
@@ -194,7 +193,6 @@ fn set_html(channel: Channel) -> String {
          </div>\n",
         ratio = set.front[2] / set.front[3],
         screen = place(set, set.screen),
-        radius = set.screen_radius / set.screen[2],
         body = place(set, [0.0, 0.0, set.width, set.height]),
         glass = place(set, set.glass),
         lcd = place(set, set.lcd),

@@ -921,9 +921,9 @@ function face() {
   if (document.fullscreenElement === screen) {
     const fh = Math.min(h, (w * 3) / 4);
     const fw = (fh * 4) / 3;
-    return [[(w - fw) / 2, (h - fh) / 2, fw, fh], fh * 0.03];
+    return [(w - fw) / 2, (h - fh) / 2, fw, fh];
   }
-  return [[0, 0, w, h], w * Number(screen.dataset.radius || 0.02)];
+  return [0, 0, w, h];
 }
 
 let drewOff = false;
@@ -969,7 +969,7 @@ function frame() {
     drewOff = true;
   } else drewOff = false;
   resize();
-  const [box, radius] = face();
+  const box = face();
   const tuningNow = powered && tv.classList.contains("tuning");
   const show = tuningNow ? null : onAir;
   if (powered && !tuningNow) crt.source(pictureOf(show));
@@ -989,7 +989,6 @@ function frame() {
   crt.draw(
     {
       face: box,
-      radius,
       power: powered ? (calm ? 1 : Math.min(1, sinceOn / 0.5)) * spot : collapsing && !calm ? 1 : 0,
       collapse: collapsing && !calm ? Math.min(1, sinceOff / 1.8) : 0,
       degauss: powered && !calm ? Math.max(0, 1 - sinceOn / 1.6) : 0,
@@ -1000,7 +999,6 @@ function frame() {
       roll: !calm && sinceLock < 0.6 ? -0.12 * Math.exp(-sinceLock * 7) * (1 - sinceLock / 0.6) : 0,
       jitter: !calm && sinceLock < 0.4 ? 6 * (1 - sinceLock / 0.4) : 0.4,
       noise: 0.025,
-      grille: 0.35,
     },
     calm ? 0 : now / 1000,
   );

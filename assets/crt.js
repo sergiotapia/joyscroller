@@ -13,17 +13,14 @@
 //    circuit rings at edges. Then snow (no signal) and a picture rolling
 //    while the set locks on to a new channel, and the set's own on-screen
 //    display (channel, volume), which it adds after decoding.
-// 2. The tube, at the canvas's own pixels: the raster on a bowed face (so
-//    it bends near the edges, and the set's overscan crops its edges), 480
-//    lines drawn by a beam that widens with brightness, an aperture grille,
-//    light scattering in the glass round bright parts, the tube's gamma,
-//    the corners dimmer than the middle, the power-off collapse to a dot
-//    and the purity wobble of the degaussing coil at power-on.
+// 2. The tube, over the face (see the pass below): a bowed face with
+//    rounded corners, an interlaced, sharp beam whose lines close up as it
+//    brightens, a dot mask and the tube's gamma, and the set's power-off
+//    collapse to a dot and degaussing wobble.
 //
-// Every effect is worked out in the tube's light (linear), and the lines
-// and grille are integrated over each pixel, so the picture doesn't shimmer
-// with moire at sizes the lines can't be drawn: then they fade to an even
-// glow, as a real tube's do at a distance.
+// A face with fewer pixels than the raster has lines is drawn at twice the
+// raster's height, off screen, and scaled down into place, so the lines and
+// the mask aren't drawn finer than they can be.
 
 const RASTER_W = 640;
 const RASTER_H = 480;
@@ -157,97 +154,137 @@ void main() {
   color = vec4(rgb, 1.0);
 }`;
 
-// Pass 2: the tube.
+// Pass 2: the tube, drawn over the face. The face is part of a sphere seen
+// from a little way off, so the picture bows out to the face's edges and
+// its corners fall short, rounded, into black. Each line
+// is resampled sharply along its length (Lanczos2); the beam that draws it
+// is a bell that flattens and widens as it brightens, so bright lines close
+// up and dark ones leave gaps, averaged over each pixel's height so lines
+// finer than the pixels blend rather than shimmer. The 480-line picture is
+// interlaced: each frame draws one field's 240 lines, the next the other's.
+// A magenta and green dot mask, the tube's gamma (2.4) out to the
+// display's (2.2). On top, the set: the power-off collapse to a line and a
+// dot, and the degaussing coil's purity wobble at power-on.
 const tube = `#version 300 es
 precision highp float;
 in vec2 uv;
 out vec4 color;
 uniform sampler2D signal;
-uniform vec2 size;       // the canvas, in pixels
-uniform vec4 face;       // the tube's face in the canvas, in pixels: x, y, w, h
-uniform float radius;    // its corners, in pixels
+uniform int frame;
 uniform float power;     // the beam's strength: 1 on, 0 off (and dips between shows)
 uniform float collapse;  // the power-off collapse, 0 to 1
 uniform float degauss;   // 1 at power-on, fading to 0
 uniform float time;
-uniform float grille;    // how strong the aperture grille is
 
 const float PI = 3.14159265;
+// The face's size, one wide and 4:3, the unit the sphere's radius and the
+// viewing distance are in.
+const vec2 FACE = vec2(1.0, 0.75);
+const float RADIUS = 2.0;
+const float DISTANCE = 1.6;
+const float CORNER = 0.03;
+const float CORNER_SHARPNESS = 1000.0;
+const float MASK = 0.3;
+// The beam's width, in line spacings, and the light its lines give of the
+// flat picture's.
+const float BEAM = 0.3;
+const float LINE_LIGHT = 0.8;
+const float TUBE_GAMMA = 2.4;
+const float DISPLAY_GAMMA = 2.2;
 
-float roundedBox(vec2 p, vec2 extent, float r) {
-  vec2 q = abs(p) - extent + r;
-  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+// Where the eye's ray through q (on the plane at the face's front) lands on
+// the sphere: the arc lengths to it, across and up.
+vec2 arcs(vec2 q) {
+  vec3 center = vec3(0.0, 0.0, -RADIUS);
+  vec3 eye = vec3(0.0, 0.0, DISTANCE);
+  vec3 ray = normalize(vec3(q, -DISTANCE));
+  vec3 from = eye - center;
+  float b = dot(from, ray);
+  float disc = b * b - (dot(from, from) - RADIUS * RADIUS);
+  if (disc < 0.0) return vec2(1e6);
+  vec3 n = (eye + (-b - sqrt(disc)) * ray - center) / RADIUS;
+  return RADIUS * vec2(atan(n.x, n.z), atan(n.y, n.z));
 }
 
-// The fraction of a pixel spanning [a, b] lit by a beam (a Gaussian of
-// sigma) centered at 0: the Gaussian integrated over the pixel.
-float erf(float x) {
-  float t = 1.0 / (1.0 + 0.47047 * abs(x));
-  float y = 1.0 - t * (0.3480242 + t * (-0.0958798 + t * 0.7478556)) * exp(-x * x);
-  return sign(x) * y;
-}
-float covered(float a, float b, float sigma) {
-  float s = sigma * 1.41421356;
-  return 0.5 * (erf(b / s) - erf(a / s)) / max(b - a, 1e-4);
+// How much of the picture shows at t (0-1): all of it inside, rounded off
+// at the corners, nothing past its edges.
+float corners(vec2 t) {
+  vec2 from = (0.5 - abs(t - 0.5)) * FACE;
+  vec2 into = max(vec2(CORNER) - from, 0.0);
+  return clamp((CORNER - length(into)) * CORNER_SHARPNESS, 0.0, 1.0);
 }
 
-vec3 linear(vec3 c) { return pow(c, vec3(2.4)); }  // a tube's gamma
+float sinc(float x) {
+  return abs(x) < 1e-4 ? 1.0 : sin(PI * x) / (PI * x);
+}
+
+// Line "row" of the signal at x (in texels), in the tube's light: Lanczos2
+// over its four nearest pixels.
+vec3 line(int row, float x) {
+  float left = floor(x - 0.5);
+  float f = x - 0.5 - left;
+  vec3 sum = vec3(0.0);
+  float total = 0.0;
+  for (int k = -1; k <= 2; k++) {
+    float dist = abs(float(k) - f);
+    float w = dist < 2.0 ? sinc(dist) * sinc(dist * 0.5) : 0.0;
+    ivec2 at = ivec2(clamp(int(left) + k, 0, ${RASTER_W} - 1), clamp(row, 0, ${RASTER_H} - 1));
+    sum += w * pow(max(texelFetch(signal, at, 0).rgb, 0.0), vec3(TUBE_GAMMA));
+    total += w;
+  }
+  return max(sum / total, 0.0);
+}
+
+// The beam's light at "dist" line spacings from its center, for a line of
+// brightness c: a bell whose exponent goes from 2 to 4 as it brightens,
+// scaled by its area (2 sigma Gamma(1 + 1/e), Gamma running 0.886 to
+// 0.906), so a line gives the same light whatever its shape.
+vec3 beam(float dist, vec3 c) {
+  vec3 e = 2.0 + 2.0 * pow(c, vec3(4.0));
+  vec3 w = exp(-pow(vec3(abs(dist) / BEAM), e));
+  return w / (2.0 * BEAM * (0.886 + 0.0101 * (e - 2.0)));
+}
 
 void main() {
-  vec2 frag = vec2(uv.x, 1.0 - uv.y) * size;
-  vec2 c = (frag - face.xy - face.zw * 0.5) / (face.zw * 0.5);  // -1..1 over the face
-  // The face's own color where no beam lands: the phosphor's dark gray,
-  // under the room's light.
-  vec3 glass = vec3(0.0035, 0.0045, 0.004);
-
-  // The bowed face: the raster bends outward toward the edges, and the
-  // set's 5% overscan crops the picture's own edges.
-  vec2 bent = c * (1.0 + 0.045 * dot(c, c)) / 1.05;
   // Collapsing: the raster squeezes to a line, then to a dot.
   float squeezeY = mix(1.0, 0.006, smoothstep(0.0, 0.35, collapse));
   float squeezeX = mix(1.0, 0.012, smoothstep(0.35, 0.55, collapse));
-  vec2 r = bent / vec2(squeezeX, squeezeY);
-  vec2 p = r * 0.5 + 0.5;  // 0..1 over the raster, top first
+  vec2 at = (uv - 0.5) / vec2(squeezeX, squeezeY) + 0.5;
+  vec2 c = uv * 2.0 - 1.0;
 
+  // The face's own dark gray where no beam lands, under the room's light.
+  vec3 glass = vec3(0.0035, 0.0045, 0.004);
   vec3 light = vec3(0.0);
-  if (all(greaterThanEqual(p, vec2(0.0))) && all(lessThanEqual(p, vec2(1.0)))) {
-    // How many raster lines and pixels one canvas pixel spans here.
-    vec2 perPixel = vec2(${RASTER_W}.0, ${RASTER_H}.0) / face.zw * 1.05 / vec2(squeezeX, squeezeY);
-    float lineAt = p.y * ${RASTER_H}.0 - 0.5;
-    float l0 = floor(lineAt + 0.5);
-    float reach = perPixel.y * 0.5;
-    // The beam from the nearest line and the ones either side, which a
-    // wide (bright) beam reaches into.
+  vec2 edge = vec2(arcs(vec2(FACE.x * 0.5, 0.0)).x, arcs(vec2(0.0, FACE.y * 0.5)).y);
+  vec2 t = arcs((at - 0.5) * FACE) / edge * 0.5 + 0.5;
+  float shown = corners(t);
+  if (shown > 0.0) {
+    vec2 tc = t * vec2(${RASTER_W}.0, ${RASTER_H}.0);
+    float field = float(frame % 2);
+    float y = (tc.y - 0.5 - field) / 2.0;
+    float base = floor(y);
+    float f = y - base;
+    int row0 = int(base * 2.0 + field);
+    vec3 c0 = line(row0, tc.x);
+    vec3 c1 = line(row0 + 2, tc.x);
+    float reach = (abs(dFdx(tc.y)) + abs(dFdy(tc.y))) / 6.0;
     for (int k = -1; k <= 1; k++) {
-      float l = l0 + float(k);
-      if (l < 0.0 || l > ${RASTER_H}.0 - 1.0) continue;
-      vec2 at = vec2(p.x, (l + 0.5) / ${RASTER_H}.0);
-      vec3 rgb = textureLod(signal, vec2(at.x, 1.0 - at.y), 0.0).rgb;
-      vec3 lin = linear(rgb);
-      // The beam widens with its current: bright parts fill the gaps
-      // between lines. One width for all three guns, from the line's
-      // brightness, keeps it to one integral a line.
-      float sigma = mix(0.3, 0.52, sqrt(dot(lin, vec3(0.2126, 0.7152, 0.0722))));
-      float d = lineAt - l;
-      light += lin * covered(d - reach, d + reach, sigma);
+      float d = f + float(k) * reach;
+      light += c0 * beam(d, c0) + c1 * beam(1.0 - d, c1);
     }
-    // Halation: light scattered in the thick glass round bright parts.
-    vec3 halo = linear(textureLod(signal, vec2(p.x, 1.0 - p.y), 4.0).rgb);
-    light += halo * 0.07;
-    // The beam lands less squarely, and dimmer, toward the corners.
-    light *= 1.0 - 0.28 * pow(dot(c * vec2(0.9, 1.0), c * vec2(0.9, 1.0)) * 0.5, 2.0);
+    light *= LINE_LIGHT / 3.0;
+    float odd = mod(floor(gl_FragCoord.x), 2.0);
+    light *= mix(vec3(1.0, 1.0 - MASK, 1.0), vec3(1.0 - MASK, 1.0, 1.0 - MASK), odd) * shown;
     // Collapsing, the beam's light only ever fades (so the screen never
     // brightens as a whole, which would flash), while the shrinking
-    // picture gets brighter for its size, up to a point: a bright line,
-    // then a dot.
+    // picture gets brighter for its size, up to a point.
     float energy = 1.0 - smoothstep(0.05, 1.0, collapse);
-    float area = squeezeX * squeezeY;
-    light *= min(energy / max(area, 1e-4), 2.5) * power;
+    light *= min(energy / max(squeezeX * squeezeY, 1e-4), 2.5) * power;
   }
   if (collapse > 0.0) {
     // The dot's afterglow on the phosphor, fading with the beam.
     float energy = 1.0 - smoothstep(0.05, 1.0, collapse);
-    float d = length(c * vec2(face.z / face.w, 1.0));
+    float d = length(c * vec2(4.0 / 3.0, 1.0));
     light += vec3(0.85, 0.92, 1.0) * energy * energy * smoothstep(0.3, 0.55, collapse) * exp(-d * d / 0.0012) * 1.6;
   }
   // Purity: the degaussing coil's field bends the beams off their
@@ -258,24 +295,7 @@ void main() {
     vec3 tint = 0.5 + 0.5 * cos(vec3(0.0, 2.1, 4.2) + q.x * 2.5 + q.y * 1.7 + a);
     light *= mix(vec3(1.0), tint * 1.6, degauss * 0.55);
   }
-
-  // The aperture grille, in the canvas's own pixels: stripes of red, green
-  // and blue phosphor three pixels wide, which a scaled pattern couldn't
-  // draw without moire. Brightened to make up for the light it takes.
-  float column = mod(floor(frag.x), 3.0);
-  vec3 stripe = vec3(column == 0.0, column == 1.0, column == 2.0);
-  vec3 mask = mix(vec3(1.0), stripe * 3.0, grille / 3.0);
-  // A slightly cool white, as sets of the day were set (9300 K).
-  light *= mask * vec3(0.97, 0.99, 1.04) * 1.12;
-
-  vec3 lit = glass + light;
-  // Out of the tube's light into the display's sRGB.
-  vec3 srgb = pow(clamp(lit, 0.0, 1.0), vec3(1.0 / 2.2));
-  // The face's rounded outline: dark past it (the set's gasket covers
-  // the edge on the page), softened over a pixel.
-  float edge = roundedBox(frag - face.xy - face.zw * 0.5, face.zw * 0.5, radius);
-  float inside = 1.0 - smoothstep(-1.0, 0.5, edge);
-  color = vec4(srgb * inside, 1.0);
+  color = vec4(pow(clamp(glass + light, 0.0, 1.0), vec3(1.0 / DISPLAY_GAMMA)), 1.0);
 }`;
 
 function compile(gl, type, source) {
@@ -338,7 +358,7 @@ export class Tube {
     this.decode = program(gl, decode);
     this.tube = program(gl, tube);
     this.yiq = target(gl, false);
-    this.signal = target(gl, true);
+    this.signal = target(gl, false);
     this.sourceTex = texture(gl);
     this.graphicsTex = texture(gl);
     this.osdTex = texture(gl);
@@ -395,8 +415,8 @@ export class Tube {
   }
 
   // Draw a frame. `s` is the set's state: power (0-1), collapse (0-1),
-  // degauss (0-1), snow (0-1), roll (frames), jitter (px), noise, grille,
-  // and face (the tube's face in canvas pixels) and radius.
+  // degauss (0-1), snow (0-1), roll (frames), jitter (px), noise, and face
+  // (the tube's face in canvas pixels, x, y, w, h from the top left).
   draw(s, time) {
     const gl = this.gl;
     this.frame++;
@@ -443,25 +463,57 @@ export class Tube {
     gl.uniform1f(u.snow, s.snow || 0);
     gl.uniform1f(u.noise, s.noise ?? 0.04);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    gl.bindTexture(gl.TEXTURE_2D, this.signal.t);
-    gl.generateMipmap(gl.TEXTURE_2D);
 
+    // The tube, over the face: straight onto the canvas, or, on a face
+    // shorter than one pixel a line, at twice the raster's height off
+    // screen, scaled down into place.
+    const [fx, fy, fw, fh] = s.face.map(Math.round);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const out = fh < RASTER_H * 1.5 ? this.offscreen(Math.round((RASTER_H * 2 * fw) / fh), RASTER_H * 2) : null;
+    if (out) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, out.fb);
+      gl.viewport(0, 0, out.w, out.h);
+    } else {
+      gl.viewport(fx, this.canvas.height - fy - fh, fw, fh);
+    }
     gl.useProgram(this.tube.p);
     u = this.tube.u;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.signal.t);
     gl.uniform1i(u.signal, 0);
-    gl.uniform2f(u.size, this.canvas.width, this.canvas.height);
-    gl.uniform4fv(u.face, s.face);
-    gl.uniform1f(u.radius, s.radius);
+    gl.uniform1i(u.frame, this.frame);
     gl.uniform1f(u.power, s.power);
     gl.uniform1f(u.collapse, s.collapse || 0);
     gl.uniform1f(u.degauss, s.degauss || 0);
     gl.uniform1f(u.time, time);
-    gl.uniform1f(u.grille, s.grille ?? 0.3);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (out) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, out.fb);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      const y = this.canvas.height - fy - fh;
+      gl.blitFramebuffer(0, 0, out.w, out.h, fx, y, fx + fw, y + fh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+  }
+
+  // An 8-bit target of w x h for the tube, kept while the size holds.
+  offscreen(w, h) {
+    const gl = this.gl;
+    if (this.spare?.w === w && this.spare?.h === h) return this.spare;
+    if (this.spare) {
+      gl.deleteTexture(this.spare.t);
+      gl.deleteFramebuffer(this.spare.fb);
+    }
+    const t = texture(gl);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    this.spare = { t, fb, w, h };
+    return this.spare;
   }
 }
 
