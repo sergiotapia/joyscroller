@@ -4,6 +4,8 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-15
+
 ### Added
 
 - TV: a new page that plays your downloaded likes like television, in shuffled order, on four channels: everything, YouTube, TikTok and Instagram. Like real TV, a channel keeps going whether you watch or not, so you join a show partway through, and flipping away and back finds it further along. Nothing repeats until everything on the channel has aired, the same creator doesn't come up twice in a row, and every show plays at the same volume, however loud or quiet it was posted. Videos over 10 minutes air a 10-minute stretch, and the guide beside the set links to each show's page.
@@ -148,7 +150,8 @@ The first release, for Linux on x86_64 and aarch64.
 - Downloaded videos play on their page, and TikTok photo posts play as a slideshow with their sound.
 - Fetches its own yt-dlp, ffmpeg and deno on first launch, checksum-verified, and keeps yt-dlp updated daily. Nothing else to install.
 
-[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/sergiotapia/joyscroller/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/sergiotapia/joyscroller/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/sergiotapia/joyscroller/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/sergiotapia/joyscroller/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/sergiotapia/joyscroller/compare/v0.8.1...v0.8.2
