@@ -2,6 +2,6 @@
 # in a newer release can't fail CI while `just precommit` passes. Upgrade on
 # purpose: bump this, fix what the new lints find, commit both.
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]
 profile = "minimal"

@@ -224,7 +224,7 @@ mod tests {
 
         let measured = pending_loudness(&conn, 1).unwrap().remove(0);
         assert!(record_loudness(&conn, &measured, LOUD).unwrap());
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
         conn.execute(
             "UPDATE downloads SET downloaded_at = downloaded_at - 10",
             [],
@@ -241,7 +241,7 @@ mod tests {
         download(&mut conn, "youtube", "a");
         let pending = pending_loudness(&conn, 1).unwrap().remove(0);
         record_loudness_failure(&conn, &pending, "ffmpeg broke").unwrap();
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
         conn.execute(
             "UPDATE loudness SET last_attempt_at = last_attempt_at - 3601",
             [],

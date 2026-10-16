@@ -383,12 +383,12 @@ mod tests {
     #[test]
     fn a_dash_on_its_own_is_ignored() {
         assert_eq!(clauses("cat - dog"), [vec![w("cat")], vec![w("dog")]]);
-        assert!(excludes("cat - dog").is_empty());
+        assert_eq!(excludes("cat - dog"), Vec::<Atom>::new());
     }
 
     #[test]
     fn only_an_ascii_hyphen_excludes() {
-        assert!(excludes("cat –dog —dog").is_empty());
+        assert_eq!(excludes("cat –dog —dog"), Vec::<Atom>::new());
         assert_eq!(
             clauses("cat –dog —dog"),
             [vec![w("cat")], vec![w("–dog")], vec![w("—dog")]]
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn only_exclusions_is_still_a_query() {
         let query = parse("-cat -dog");
-        assert!(query.clauses.is_empty());
+        assert_eq!(query.clauses, Vec::<Vec<Atom>>::new());
         assert_eq!(query.excludes, [w("cat"), w("dog")]);
         assert!(!query.is_empty());
     }
@@ -511,7 +511,7 @@ mod tests {
         let query = parse(&format!("{} -cat", words.join(" | ")));
         assert_eq!(query.clauses.len(), 1);
         assert_eq!(query.clauses[0].len(), MAX_ATOMS);
-        assert!(query.excludes.is_empty());
+        assert_eq!(query.excludes, Vec::<Atom>::new());
     }
 
     #[test]
@@ -530,7 +530,7 @@ mod tests {
         );
         // Marks stay in their word: a Devanagari vowel sign isn't a separator.
         assert_eq!(tokens("नमस्ते"), [(Index::Trigram, "नमस्ते")]);
-        assert!(tokens("🔥 -- ... |").is_empty());
+        assert_eq!(tokens("🔥 -- ... |"), Vec::<(Index, &str)>::new());
     }
 
     #[test]

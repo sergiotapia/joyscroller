@@ -608,10 +608,9 @@ fn titles_rank_above_authors_and_descriptions() {
     assert_eq!(ranked, ["title", "author", "description"]);
     // A platform narrows a search, and its count.
     let query = query::parse("piano");
-    assert!(
-        videos_page(&conn, Some("tiktok"), &query, best, 10, 0)
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        ids(videos_page(&conn, Some("tiktok"), &query, best, 10, 0).unwrap()),
+        Vec::<String>::new()
     );
     assert_eq!(videos_count(&conn, Some("youtube"), &query).unwrap(), 3);
     assert_eq!(videos_count(&conn, Some("tiktok"), &query).unwrap(), 0);
@@ -684,7 +683,7 @@ fn glob_characters_in_a_pattern_are_punctuation() {
     assert_eq!(found(&conn, "q*ion"), ["q"]);
     assert_eq!(found(&conn, "ques*[remastered]"), ["q"]);
     // As a GLOB class, "[a-z]" would match the "q" of "Question".
-    assert!(found(&conn, "[a-z]uestion*").is_empty());
+    assert_eq!(found(&conn, "[a-z]uestion*"), Vec::<String>::new());
 }
 
 #[test]

@@ -537,8 +537,8 @@ mod tests {
             url_list(Some(&serde_json::json!("https://c"))),
             ["https://c"]
         );
-        assert!(url_list(Some(&serde_json::json!(""))).is_empty());
-        assert!(url_list(None).is_empty());
+        assert_eq!(url_list(Some(&serde_json::json!(""))), Vec::<String>::new());
+        assert_eq!(url_list(None), Vec::<String>::new());
     }
 
     #[test]

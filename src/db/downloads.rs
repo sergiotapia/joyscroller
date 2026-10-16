@@ -328,7 +328,7 @@ mod tests {
             [2 * MAX_RETRY_DELAY],
         )
         .unwrap();
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
         // The like stays, with its link and title, and says why.
         let state = download_state(&conn, "tiktok", "a").unwrap().unwrap();
         assert!(state.unavailable_at.is_some());
@@ -340,7 +340,7 @@ mod tests {
         let mut conn = memory_db();
         insert_new(&mut conn, "youtube", &[new_video("a", true)]).unwrap();
         record_download_failure(&conn, "youtube", "a", "HTTP 429", false).unwrap();
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
 
         // An hour later it's due again.
         conn.execute(
@@ -356,7 +356,7 @@ mod tests {
             [now() - MAX_RETRY_DELAY + 60],
         )
         .unwrap();
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
         conn.execute(
             "UPDATE downloads SET last_attempt_at = last_attempt_at - 60",
             [],
@@ -380,7 +380,7 @@ mod tests {
             posted_at,
         };
         record_download(&mut conn, "youtube", "a", &done(Some(5))).unwrap();
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
         let (error, stored_files): (Option<String>, String) = conn
             .query_row("SELECT last_error, files_json FROM downloads", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))

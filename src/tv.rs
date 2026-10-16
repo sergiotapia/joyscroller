@@ -916,7 +916,7 @@ mod tests {
                 .all(|s| s.show().unwrap().platform == "tiktok")
         );
         let mut instagram = lineup(Channel::Instagram, 0, &shows);
-        assert!(instagram.slots(0.0, None, 3).is_empty());
+        assert_eq!(instagram.slots(0.0, None, 3), Vec::<Slot>::new());
         assert_eq!(Channel::from_slug("tiktok"), Some(Channel::TikTok));
         assert_eq!(Channel::Instagram.number(), 4);
     }

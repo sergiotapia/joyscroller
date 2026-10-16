@@ -473,7 +473,7 @@ mod tests {
         let mut conn = memory_db();
         insert_new(&mut conn, "tiktok", &[new_video("a", true)]).unwrap();
         download(&mut conn, "tiktok", "a");
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
         assert_eq!(pds_account(&conn).unwrap(), None);
     }
 
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(pending_ids(&conn), ["a"]);
         let uploading = pending_uploads(&conn, None, 1).unwrap().remove(0);
         assert!(record_upload(&conn, "did:plc:me", &uploading, &DONE).unwrap());
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
     }
 
     #[test]
@@ -563,7 +563,7 @@ mod tests {
 
         record_upload_failure(&conn, "did:plc:me", &a, "offline").unwrap();
         record_too_big(&conn, "did:plc:me", &big, "video.webm is too big").unwrap();
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
         // Waiting out a retry delay still counts as left; too big doesn't.
         let progress = upload_progress(&conn).unwrap();
         assert_eq!((progress.left_posts, progress.too_big_posts), (1, 1));
@@ -606,7 +606,7 @@ mod tests {
         forget_pds_account(&conn).unwrap();
         assert_eq!(upload_state(&conn, "tiktok", "a").unwrap(), None);
         set_pds_account(&conn, &account(&["tiktok"])).unwrap();
-        assert!(pending_ids(&conn).is_empty());
+        assert_eq!(pending_ids(&conn), Vec::<String>::new());
         assert!(upload_state(&conn, "tiktok", "a").unwrap().is_some());
     }
 }

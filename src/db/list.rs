@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(ids(None, 10, 0), ["t1", "y2", "y1"]);
         assert_eq!(ids(None, 1, 1), ["y2"]);
         assert_eq!(ids(Some("youtube"), 10, 0), ["y2", "y1"]);
-        assert!(ids(Some("instagram"), 10, 0).is_empty());
+        assert_eq!(ids(Some("instagram"), 10, 0), Vec::<String>::new());
 
         let mut counts: Vec<(String, String, usize)> = video_counts(&conn)
             .unwrap()
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(ids("instagram", "carousel"), ["carousel"]);
         assert_eq!(ids("tiktok", "slideshow"), ["slides"]);
         assert_eq!(ids("tiktok", "video"), ["clip"]);
-        assert!(ids("tiktok", "carousel").is_empty());
+        assert_eq!(ids("tiktok", "carousel"), Vec::<String>::new());
         let carousels = video_counts(&conn)
             .unwrap()
             .into_iter()

@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(state.failures, 1);
         assert_eq!(state.last_error.as_deref(), Some("HTTP 429"));
         assert_eq!(state.downloaded_at, None);
-        assert!(state.files.is_empty());
+        assert_eq!(state.files, Vec::<String>::new());
     }
 
     #[test]

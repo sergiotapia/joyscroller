@@ -311,7 +311,7 @@ mod tests {
             downloaded_at: downloaded_at("old"),
         };
         assert!(record_playback(&conn, "tiktok", "old", &none_needed).unwrap());
-        assert!(playback_ids(&conn).is_empty());
+        assert_eq!(playback_ids(&conn), Vec::<String>::new());
         let state = playback_state(&conn, "tiktok", "new").unwrap().unwrap();
         assert_eq!(state.file_name.as_deref(), Some("playback.mp4"));
         assert_eq!(state.method.as_deref(), Some("encode"));
@@ -359,7 +359,7 @@ mod tests {
             "ffmpeg failed",
         )
         .unwrap();
-        assert!(playback_ids(&conn).is_empty());
+        assert_eq!(playback_ids(&conn), Vec::<String>::new());
         let state = playback_state(&conn, "youtube", "a").unwrap().unwrap();
         assert_eq!(state.failures, 1);
         assert_eq!(state.last_error.as_deref(), Some("ffmpeg failed"));
