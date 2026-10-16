@@ -6,7 +6,7 @@ What each release of Joyscroller changed. The format follows [Keep a Changelog](
 
 ### Added
 
-- Stats, under Downloading in the side panel: for each platform, how many likes were found, how many are downloaded and how many have their playback copy, with progress bars and percentages, so you can see how close the archive is to caught up. It updates as downloads finish.
+- Stats, under Downloading in the side panel: for each platform, how many likes were found, how many are downloaded and how many are transcoded to play in every browser, with progress bars and percentages, so you can see how close the archive is to caught up. It updates as downloads finish.
 
 ### Changed
 

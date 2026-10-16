@@ -1299,8 +1299,9 @@ async fn stats_page(State(app): State<App>) -> Result<Html<String>, Failure> {
     let board = app.pipeline.board();
     let main = format!(
         "<p class=\"intro\">How close the archive is to caught up: of the likes found on \
-         each platform, how many are downloaded, and of the downloaded videos, how many \
-         have been checked for a playback copy and given one where needed.</p>\n\
+         each platform, how many are downloaded, and how many of the downloaded videos \
+         are transcoded into a copy that plays in every browser (a few already do, and \
+         need none).</p>\n\
          <div id=\"stats\" class=\"stats\">\n{}</div>\n",
         stats_html(&catch_up)
     );
@@ -1366,7 +1367,7 @@ fn stats_html(catch_up: &[db::CatchUp]) -> String {
 }
 
 /// One card of the stats page: how many likes were found, then a meter for
-/// the downloads and one for the playback copies.
+/// the downloads and one for transcoding them into playback copies.
 fn catch_up_html(class: &str, icon: &str, label: &str, gone_from: &str, c: &db::CatchUp) -> String {
     let gone = if c.gone > 0 {
         format!(
@@ -1393,18 +1394,26 @@ fn catch_up_html(class: &str, icon: &str, label: &str, gone_from: &str, c: &db::
             thousands(c.failing)
         ));
     }
-    let mut copies = vec![if c.videos == 0 {
-        "Nothing to check until videos are downloaded".to_string()
+    // Whether a video needs a copy is only known once it's been looked at,
+    // so the bar counts every downloaded video, and those that turned out
+    // not to need one as done.
+    let mut copies = Vec::new();
+    if c.videos == 0 {
+        copies.push("Nothing to transcode until videos are downloaded".to_string());
     } else {
-        format!(
-            "{} of {} downloaded videos checked · {} needed a copy",
-            thousands(c.checked),
-            thousands(c.videos),
-            thousands(c.copies)
-        )
-    }];
-    if c.checked < c.videos {
-        copies.push(format!("{} waiting", thousands(c.videos - c.checked)));
+        if c.checked >= c.videos {
+            copies.push("All done".to_string());
+        }
+        copies.push(format!("{} transcoded", thousands(c.copies)));
+        if c.checked < c.videos {
+            copies.push(format!("{} to go", thousands(c.videos - c.checked)));
+        }
+        if c.checked > c.copies {
+            copies.push(format!(
+                "{} didn't need it",
+                thousands(c.checked - c.copies)
+            ));
+        }
     }
     if c.copy_failing > 0 {
         copies.push(format!(
@@ -1427,7 +1436,7 @@ fn catch_up_html(class: &str, icon: &str, label: &str, gone_from: &str, c: &db::
             downloadable,
             &downloads.join(" · ")
         ),
-        checked = meter_html("Playback copies", c.checked, c.videos, &copies.join(" · ")),
+        checked = meter_html("Transcoded", c.checked, c.videos, &copies.join(" · ")),
     )
 }
 
@@ -3711,9 +3720,8 @@ mod tests {
         assert!(html.contains("2 gone from their platform"));
         assert!(html.contains("258 of 1,008 · 750 to go · 3 failed, trying again later"));
         assert!(html.contains("All downloaded"));
-        assert!(
-            html.contains("150 of 200 downloaded videos checked · 140 needed a copy · 50 waiting")
-        );
+        assert!(html.contains("All done · 6 transcoded · 2 didn't need it"));
+        assert!(html.contains("140 transcoded · 50 to go · 10 didn't need it"));
         assert!(html.contains("<strong class=\"stat-pct\">25%</strong>"));
         assert!(html.contains("stat-meter done"));
         assert!(stats_html(&[]).contains("No likes found yet"));
